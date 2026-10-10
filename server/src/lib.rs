@@ -175,7 +175,11 @@ impl Simulation {
 }
 
 fn adjacent(a: Point, b: Point) -> bool {
-    (a.x - b.x).abs() + (a.y - b.y).abs() == 1
+    // Actor positions are model anchors, not occupied pixels. The client
+    // artwork has a multi-cell footprint, so two models can visibly overlap
+    // while their logical anchors are equal. Treat the same anchor as a valid
+    // melee hit as well as the four cardinal neighboring cells.
+    (a.x - b.x).abs() + (a.y - b.y).abs() <= 1
 }
 
 #[derive(Debug)]
@@ -229,6 +233,22 @@ mod tests {
     #[test]
     fn attack_changes_snapshot_and_emits_message() {
         let mut simulation = Simulation::demo();
+        let events = simulation.fixed_tick(Some(ClientCommand::new(0, Command::Attack)));
+        let ServerEvent::Snapshot(snapshot) = &events[0] else {
+            panic!("expected snapshot")
+        };
+        assert!(snapshot
+            .messages
+            .iter()
+            .any(|message| message.contains("hit Mossling")));
+        assert!(snapshot.entities[0].stats.hp < 8);
+    }
+
+    #[test]
+    fn attack_hits_when_player_and_model_anchors_overlap() {
+        let mut simulation = Simulation::demo();
+        simulation.players.get_mut(&1).unwrap().position = Point { x: 3, y: 2 };
+
         let events = simulation.fixed_tick(Some(ClientCommand::new(0, Command::Attack)));
         let ServerEvent::Snapshot(snapshot) = &events[0] else {
             panic!("expected snapshot")
