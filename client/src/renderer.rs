@@ -36,7 +36,7 @@ impl Ink {
             Self::Monster => "\x1b[38;5;203m",
             Self::Npc => "\x1b[38;5;221m",
             Self::Item => "\x1b[38;5;220m",
-            Self::Spell => "\x1b[38;5;183m",
+            Self::Spell => "\x1b[38;5;153m",
             Self::Text => "\x1b[38;5;252m",
             Self::Muted => "\x1b[38;5;245m",
         }
@@ -149,17 +149,21 @@ impl Renderer {
         for y in 0..canvas.height {
             for x in 0..canvas.width {
                 let (glyph, ink) = if y < horizon {
-                    if (x * 17 + y * 31 + frame as usize / 3) % 29 == 0 {
+                    if (x * 17 + y * 31) % 37 == 0 {
                         ('+', Ink::Muted)
                     } else {
                         (' ', Ink::Background)
                     }
                 } else if y == horizon {
                     ('=', Ink::Moss)
-                } else if (x + y) % 5 == 0 {
-                    ('.', Ink::Stone)
                 } else {
-                    ('·', Ink::Moss)
+                    match (x * 13 + y * 7) % 11 {
+                        0 | 1 => ('·', Ink::Moss),
+                        2 => (',', Ink::Foliage),
+                        3 => ('\'', Ink::Foliage),
+                        4 => ('_', Ink::Stone),
+                        _ => (' ', Ink::Background),
+                    }
                 };
                 canvas.set(x as isize, y as isize, glyph, ink);
             }
@@ -170,7 +174,7 @@ impl Renderer {
         for x in (2..canvas.width).step_by(13) {
             self.draw_asset(
                 canvas,
-                assets.prop(PropKind::Tree, frame / 4),
+                assets.prop(PropKind::Tree, 0),
                 x as isize,
                 horizon.saturating_sub(5) as isize,
                 Ink::Foliage,
@@ -179,7 +183,7 @@ impl Renderer {
         for x in (8..canvas.width).step_by(19) {
             self.draw_asset(
                 canvas,
-                assets.prop(PropKind::Ruin, frame / 5),
+                assets.prop(PropKind::Ruin, 0),
                 x as isize,
                 horizon.saturating_sub(4) as isize,
                 Ink::Stone,
@@ -223,20 +227,17 @@ impl Renderer {
             return;
         }
 
-        let origin = world.player.position;
-        let steps = (target.x - origin.x).abs().max((target.y - origin.y).abs());
+        let origin = self.screen_position(world.player.position);
+        let target = self.screen_position(target);
+        let steps = (target.0 - origin.0).abs().max((target.1 - origin.1).abs());
         for step in 1..steps {
-            let x = origin.x + (target.x - origin.x) * step / steps;
-            let y = origin.y + (target.y - origin.y) * step / steps;
-            let glyph = assets.spell_glyph(frame + step as u64);
-            canvas.set(x as isize, y as isize, glyph, Ink::Spell);
+            let x = origin.0 + (target.0 - origin.0) * step / steps;
+            let y = origin.1 + (target.1 - origin.1) * step / steps;
+            if step % 2 == (frame as isize % 2) {
+                canvas.set(x, y, assets.spell_glyph(frame + step as u64), Ink::Spell);
+            }
         }
-        canvas.set(
-            target.x as isize,
-            target.y as isize,
-            assets.spell_glyph(frame + 3),
-            Ink::Spell,
-        );
+        canvas.set(target.0, target.1, '+', Ink::Spell);
     }
 
     fn draw_actor(
@@ -246,9 +247,7 @@ impl Renderer {
         actor: &ActorSnapshot,
         frame: u64,
     ) {
-        let bob = ((frame + actor.id + 1) % 2) as isize;
-        let x = actor.position.x as isize;
-        let y = actor.position.y as isize - bob;
+        let (x, y) = self.screen_position(actor.position);
         let ink = match actor.kind {
             EntityKind::Player => Ink::Player,
             EntityKind::Monster => Ink::Monster,
@@ -256,7 +255,7 @@ impl Renderer {
             EntityKind::Item => Ink::Item,
         };
 
-        let artwork = assets.for_entity(&actor.kind, &actor.name, frame + actor.id);
+        let artwork = assets.for_entity(&actor.kind, &actor.name, frame / 8);
         let artwork_width = artwork
             .lines()
             .map(|line| line.trim_end_matches('\r').chars().count())
@@ -274,6 +273,11 @@ impl Renderer {
         let filled = (hp * 8 / max_hp) as usize;
         let bar = format!("[{}{}]", "#".repeat(filled), "-".repeat(8 - filled));
         canvas.text(x - 5, y - 3, &bar, Ink::Muted);
+    }
+
+    fn screen_position(&self, position: ascii_mmorpg_shared::Point) -> (isize, isize) {
+        // Fixed viewport until terrain and props also support world-space scrolling.
+        (position.x as isize, position.y as isize)
     }
 
     fn draw_asset(&self, canvas: &mut Canvas, artwork: &str, x: isize, y: isize, ink: Ink) {
@@ -345,9 +349,9 @@ mod tests {
         assert!(frame.contains("Mossling"));
         assert!(frame.contains("[########]"));
         assert!(frame.contains("[#####---]"));
-        assert!(frame.contains("\x1b[38;5;117m"));
+        assert!(frame.contains("\x1b[38;5;153m"));
         assert!(frame.contains("\x1b[38;5;203m"));
-        assert!(frame.contains("\x1b[38;5;183m"));
+        assert!(frame.contains("\x1b[38;5;117m"));
         assert!(frame.contains('/'));
     }
 
@@ -363,6 +367,55 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(world.tick, 7);
         assert_eq!(world.player.position, Point { x: 8, y: 7 });
+    }
+
+    #[test]
+    fn moving_player_does_not_move_mob_on_screen() {
+        let renderer = Renderer {
+            width: 40,
+            height: 20,
+        };
+        let mut world = scene_world();
+        let before = renderer.render_frame(&world, 4);
+        crate::apply_local_command(
+            &mut world,
+            &ascii_mmorpg_shared::ClientCommand::new(
+                8,
+                ascii_mmorpg_shared::Command::Move(ascii_mmorpg_shared::Direction::East),
+            ),
+        );
+        let after = renderer.render_frame(&world, 4);
+        let anchor = |frame: &str, glyph| {
+            frame
+                .lines()
+                .enumerate()
+                .find_map(|(row, line)| {
+                    let mut escape = false;
+                    let mut column = 0;
+                    for ch in line.chars() {
+                        if ch == '\x1b' {
+                            escape = true;
+                            continue;
+                        }
+                        if escape {
+                            if ch == 'm' {
+                                escape = false;
+                            }
+                            continue;
+                        }
+                        if ch == glyph {
+                            return Some((column, row));
+                        }
+                        column += 1;
+                    }
+                    None
+                })
+                .expect("actor glyph should be visible")
+        };
+        assert_eq!(anchor(&before, 'm'), anchor(&after, 'm'));
+        assert_eq!(anchor(&before, '@'), (8, 7));
+        assert_eq!(anchor(&after, '@'), (9, 7));
+        assert_eq!(world.entities[0].position, Point { x: 18, y: 7 });
     }
 
     #[test]
