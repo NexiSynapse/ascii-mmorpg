@@ -1,0 +1,9 @@
+[
+    (
+        id: "mossling",
+        name: "Mossling",
+        glyph: 'm',
+        stats: (max_hp: 8, hp: 8, attack: 3, defense: 1, luck: 0),
+        loot: "mossling_drop",
+    ),
+]
