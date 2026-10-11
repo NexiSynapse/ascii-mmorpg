@@ -1,7 +1,7 @@
 use ascii_mmorpg_shared::protocol::Direction;
 use ascii_mmorpg_shared::{
-    resolve_attack, ActorSnapshot, ClientCommand, Command, EntityId, EntityKind, Point,
-    ServerEvent, Stats, Tick, WorldSnapshot, PROTOCOL_VERSION,
+    in_melee_range, resolve_attack, ActorSnapshot, ClientCommand, Command, EntityId, EntityKind,
+    Point, ServerEvent, Stats, Tick, WorldSnapshot, PROTOCOL_VERSION,
 };
 use std::collections::HashMap;
 
@@ -159,7 +159,7 @@ impl Simulation {
         let target = self
             .mobs
             .iter_mut()
-            .find(|mob| mob.stats.is_alive() && adjacent(player_position, mob.position));
+            .find(|mob| mob.stats.is_alive() && in_melee_range(player_position, mob.position));
         if let Some(target) = target {
             let result = resolve_attack(&attacker_stats, &mut target.stats, self.tick ^ target.id);
             self.messages.push(format!(
@@ -172,14 +172,6 @@ impl Simulation {
             self.messages.push("There is nothing in reach.".into());
         }
     }
-}
-
-fn adjacent(a: Point, b: Point) -> bool {
-    // Actor positions are model anchors, not occupied pixels. The client
-    // artwork has a multi-cell footprint, so two models can visibly overlap
-    // while their logical anchors are equal. Treat the same anchor as a valid
-    // melee hit as well as the four cardinal neighboring cells.
-    (a.x - b.x).abs() + (a.y - b.y).abs() <= 1
 }
 
 #[derive(Debug)]
@@ -258,6 +250,21 @@ mod tests {
             .iter()
             .any(|message| message.contains("hit Mossling")));
         assert!(snapshot.entities[0].stats.hp < 8);
+    }
+
+    #[test]
+    fn attack_reaches_one_cell_beyond_adjacent_anchor() {
+        let mut simulation = Simulation::demo();
+        simulation.players.get_mut(&1).unwrap().position = Point { x: 0, y: 2 };
+
+        let events = simulation.fixed_tick(Some(ClientCommand::new(0, Command::Attack)));
+        let ServerEvent::Snapshot(snapshot) = &events[0] else {
+            panic!("expected snapshot")
+        };
+        assert!(snapshot
+            .messages
+            .iter()
+            .any(|message| message.contains("hit Mossling")));
     }
 
     #[test]
