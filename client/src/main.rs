@@ -6,7 +6,7 @@ use ascii_mmorpg_shared::{ServerEvent, PROTOCOL_VERSION};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use std::io::{self, BufRead};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -73,7 +73,7 @@ fn run_realtime(address: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
     let mut connection = address.map(ClientConnection::connect).transpose()?;
     let mut terminal = PlainTerminal::new();
     let (width, height) = terminal.size();
-    let renderer = Renderer {
+    let mut renderer = Renderer {
         width: width as i16,
         height: (height.saturating_sub(5)) as i16,
     };
@@ -87,7 +87,12 @@ fn run_realtime(address: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
     terminal.draw(&renderer.render(&world))?;
 
     enable_raw_mode()?;
-    let result = realtime_loop(&mut terminal, &renderer, &mut world, connection.as_mut());
+    let result = realtime_loop(
+        &mut terminal,
+        &mut renderer,
+        &mut world,
+        connection.as_mut(),
+    );
     let disable_result = disable_raw_mode();
     if let Some(connection) = connection.as_mut() {
         connection.close();
@@ -99,110 +104,133 @@ fn run_realtime(address: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
 
 fn realtime_loop(
     terminal: &mut PlainTerminal,
-    renderer: &Renderer,
+    renderer: &mut Renderer,
     world: &mut ascii_mmorpg_shared::WorldSnapshot,
     mut connection: Option<&mut ClientConnection>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut tick = world.tick;
+    let mut animation_frame = world.tick;
     let mut welcomed = connection.is_none();
+    let mut held = [false; 4];
+    let mut next_move = Instant::now();
     loop {
-        let mut redraw = false;
+        let (width, height) = terminal.refresh_size();
+        renderer.resize(width as i16, height.saturating_sub(5) as i16);
         let mut disconnected = false;
         if let Some(connection) = connection.as_deref_mut() {
             while let Some(event) = connection.try_recv() {
                 match event {
-                    ascii_mmorpg_client::network::ConnectionEvent::Server(event) => {
-                        match event {
-                            ServerEvent::Welcome {
-                                protocol_version,
-                                player_id,
-                            } => {
-                                if protocol_version != PROTOCOL_VERSION {
-                                    return Err(format!(
-                                        "server protocol version {protocol_version} is not supported"
-                                    )
-                                    .into());
-                                }
-                                welcomed = true;
-                                world.messages = vec![format!(
+                    ascii_mmorpg_client::network::ConnectionEvent::Server(event) => match event {
+                        ServerEvent::Welcome {
+                            protocol_version,
+                            player_id,
+                        } => {
+                            if protocol_version != PROTOCOL_VERSION {
+                                return Err(format!(
+                                    "server protocol version {protocol_version} is not supported"
+                                )
+                                .into());
+                            }
+                            welcomed = true;
+                            world.messages = vec![format!(
                                     "Connected as player {player_id}. Awaiting authoritative snapshots."
                                 )];
-                            }
-                            ServerEvent::Snapshot(snapshot) => *world = snapshot,
-                            ServerEvent::Error(message) => {
-                                world.messages.push(format!("Server error: {message}"));
-                            }
-                            ServerEvent::Notice(message) => world.messages.push(message),
-                            ServerEvent::Combat {
-                                attacker,
-                                defender,
-                                damage,
-                                defeated,
-                            } => world.messages.push(format!(
-                                "Combat {attacker} -> {defender}: {damage} damage{}",
-                                if defeated { " (defeated)" } else { "" }
-                            )),
-                            ServerEvent::Loot { owner, drops } => world.messages.push(format!(
-                                "Player {owner} found {} loot item(s).",
-                                drops.len()
-                            )),
                         }
-                        redraw = true;
-                    }
+                        ServerEvent::Snapshot(snapshot) => *world = snapshot,
+                        ServerEvent::Error(message) => {
+                            world.messages.push(format!("Server error: {message}"));
+                        }
+                        ServerEvent::Notice(message) => world.messages.push(message),
+                        ServerEvent::Combat {
+                            attacker,
+                            defender,
+                            damage,
+                            defeated,
+                        } => world.messages.push(format!(
+                            "Combat {attacker} -> {defender}: {damage} damage{}",
+                            if defeated { " (defeated)" } else { "" }
+                        )),
+                        ServerEvent::Loot { owner, drops } => world.messages.push(format!(
+                            "Player {owner} found {} loot item(s).",
+                            drops.len()
+                        )),
+                    },
                     ascii_mmorpg_client::network::ConnectionEvent::Eof => {
                         world.messages.push("Server closed the connection.".into());
-                        redraw = true;
                         disconnected = true;
                     }
                     ascii_mmorpg_client::network::ConnectionEvent::Error(message) => {
                         world.messages.push(format!("Network error: {message}"));
-                        redraw = true;
                         disconnected = true;
                     }
                 }
             }
         }
-        if redraw {
-            terminal.draw(&renderer.render(world))?;
-        }
         if disconnected {
             return Ok(());
         }
-        if connection.is_some() && !event::poll(Duration::from_millis(50))? {
-            continue;
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(KeyEvent { code, kind, .. }) = event::read()? {
+                let movement = match code {
+                    KeyCode::Char('w') | KeyCode::Up => Some(0),
+                    KeyCode::Char('a') | KeyCode::Left => Some(1),
+                    KeyCode::Char('s') | KeyCode::Down => Some(2),
+                    KeyCode::Char('d') | KeyCode::Right => Some(3),
+                    _ => None,
+                };
+                if let Some(index) = movement {
+                    held[index] = kind != KeyEventKind::Release;
+                } else if kind == KeyEventKind::Press {
+                    let input = match code {
+                        KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char('f') => Some("f"),
+                        KeyCode::Char('r') => Some("r"),
+                        _ => None,
+                    };
+                    if let Some(input) = input {
+                        tick += 1;
+                        if let Some(command) = parse_command(input, tick) {
+                            if let Some(connection) = connection.as_deref_mut() {
+                                if !welcomed {
+                                    world.messages =
+                                        vec!["Still waiting for the server welcome.".into()];
+                                } else {
+                                    connection.send_command(&command)?;
+                                }
+                            } else {
+                                apply_local_command(world, &command);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        if let Event::Key(KeyEvent { code, kind, .. }) = event::read()? {
-            if kind != KeyEventKind::Press {
-                continue;
-            }
-            let input = match code {
-                KeyCode::Char('q') | KeyCode::Esc => break,
-                KeyCode::Char('w') | KeyCode::Up => Some("w"),
-                KeyCode::Char('a') | KeyCode::Left => Some("a"),
-                KeyCode::Char('s') | KeyCode::Down => Some("s"),
-                KeyCode::Char('d') | KeyCode::Right => Some("d"),
-                KeyCode::Char('f') => Some("f"),
-                KeyCode::Char('r') => Some("r"),
-                _ => None,
-            };
-            let Some(input) = input else { continue };
-            tick += 1;
-            let Some(command) = parse_command(input, tick) else {
-                continue;
-            };
-            if let Some(connection) = connection.as_deref_mut() {
-                if !welcomed {
-                    world.messages = vec!["Still waiting for the server welcome.".into()];
-                    terminal.draw(&renderer.render(world))?;
-                    continue;
+        if Instant::now() >= next_move {
+            for input in [
+                held[0].then_some("w"),
+                held[1].then_some("a"),
+                held[2].then_some("s"),
+                held[3].then_some("d"),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                tick += 1;
+                let command = parse_command(input, tick).expect("movement shortcut is valid");
+                if let Some(connection) = connection.as_deref_mut() {
+                    if welcomed {
+                        connection.send_command(&command)?;
+                    }
+                } else {
+                    apply_local_command(world, &command);
                 }
-                connection.send_command(&command)?;
-            } else {
-                apply_local_command(world, &command);
-                terminal.draw(&renderer.render(world))?;
             }
+            next_move = Instant::now() + Duration::from_millis(90);
         }
+
+        animation_frame = animation_frame.wrapping_add(1);
+        terminal.draw(&renderer.render_frame(world, animation_frame))?;
     }
     Ok(())
 }

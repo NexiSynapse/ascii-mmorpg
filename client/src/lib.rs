@@ -1,5 +1,6 @@
 use ascii_mmorpg_shared::{
-    ActorSnapshot, ClientCommand, Command, Direction, EntityKind, Point, Stats, WorldSnapshot,
+    in_melee_range, resolve_attack, ActorSnapshot, ClientCommand, Command, Direction, EntityKind,
+    Point, Stats, WorldSnapshot,
 };
 use std::io::{self, Write};
 
@@ -20,10 +21,16 @@ pub struct PlainTerminal {
 
 impl PlainTerminal {
     pub fn new() -> Self {
-        Self {
-            width: 80,
-            height: 24,
+        let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
+        Self { width, height }
+    }
+
+    pub fn refresh_size(&mut self) -> (u16, u16) {
+        if let Ok((width, height)) = crossterm::terminal::size() {
+            self.width = width;
+            self.height = height;
         }
+        self.size()
     }
 }
 
@@ -98,7 +105,25 @@ pub fn apply_local_command(world: &mut WorldSnapshot, command: &ClientCommand) {
                 .push(format!("You cast {spell}; spell effects are queued."));
         }
         Command::Attack => {
-            world.messages.push("There is nothing in reach.".into());
+            let player_position = world.player.position;
+            let attacker_stats = world.player.stats.clone();
+            let target = world.entities.iter_mut().find(|actor| {
+                actor.kind == EntityKind::Monster
+                    && actor.stats.is_alive()
+                    && in_melee_range(player_position, actor.position)
+            });
+            if let Some(target) = target {
+                let result =
+                    resolve_attack(&attacker_stats, &mut target.stats, world.tick ^ target.id);
+                world.messages.push(format!(
+                    "You hit {} for {} damage{}.",
+                    target.name,
+                    result.damage,
+                    if result.defeated { "; defeated" } else { "" }
+                ));
+            } else {
+                world.messages.push("There is nothing in reach.".into());
+            }
         }
     }
 }
@@ -118,7 +143,7 @@ pub fn sample_world() -> WorldSnapshot {
             id: 2,
             name: "Mossling".into(),
             kind: EntityKind::Monster,
-            position: Point { x: 10, y: 7 },
+            position: Point { x: 3, y: 2 },
             stats: Stats::healthy(8, 3, 1),
             glyph: 'm',
         }],
@@ -161,5 +186,14 @@ mod tests {
         apply_local_command(&mut world, &command);
         assert_eq!(world.player.position, Point { x: 3, y: 2 });
         assert!(world.messages[0].contains("(3, 2)"));
+    }
+
+    #[test]
+    fn local_attack_hits_adjacent_mossling() {
+        let mut world = sample_world();
+        world.entities[0].position = Point { x: 5, y: 2 };
+        apply_local_command(&mut world, &ClientCommand::new(1, Command::Attack));
+        assert!(world.entities[0].stats.hp < world.entities[0].stats.max_hp);
+        assert!(world.messages[0].contains("hit Mossling"));
     }
 }

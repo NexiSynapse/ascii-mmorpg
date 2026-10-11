@@ -15,11 +15,13 @@ enum Ink {
     Moss,
     Foliage,
     Rain,
+    RainBright,
     Player,
     Monster,
     Npc,
     Item,
     Spell,
+    Torch,
     Text,
     Muted,
 }
@@ -32,11 +34,13 @@ impl Ink {
             Self::Moss => "\x1b[38;5;65m",
             Self::Foliage => "\x1b[38;5;22m",
             Self::Rain => "\x1b[38;5;67m",
+            Self::RainBright => "\x1b[38;5;117m",
             Self::Player => "\x1b[38;5;117m",
             Self::Monster => "\x1b[38;5;203m",
             Self::Npc => "\x1b[38;5;221m",
             Self::Item => "\x1b[38;5;220m",
             Self::Spell => "\x1b[38;5;153m",
+            Self::Torch => "\x1b[38;5;220m",
             Self::Text => "\x1b[38;5;252m",
             Self::Muted => "\x1b[38;5;245m",
         }
@@ -112,6 +116,11 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    pub fn resize(&mut self, width: i16, height: i16) {
+        self.width = width.max(1);
+        self.height = height.max(1);
+    }
+
     pub fn render(&self, world: &WorldSnapshot) -> String {
         self.render_frame(world, world.tick)
     }
@@ -121,7 +130,7 @@ impl Renderer {
         let height = self.height.max(1) as usize;
         let mut canvas = Canvas::new(width, height);
         let assets = AssetLibrary::new();
-        self.draw_backdrop(&mut canvas, &assets, frame);
+        self.draw_backdrop(&mut canvas, &assets, world.player.position, frame);
 
         let actors = world
             .entities
@@ -130,7 +139,11 @@ impl Renderer {
             .collect::<Vec<_>>();
         self.draw_effects(&mut canvas, &assets, world, &actors, frame);
         for actor in &actors {
-            self.draw_actor(&mut canvas, &assets, actor, frame);
+            self.draw_actor(&mut canvas, &assets, actor, world.player.position, frame);
+            if actor.kind == EntityKind::Monster && actor.stats.is_alive() {
+                let (x, y) = self.screen_position(actor.position, world.player.position);
+                canvas.set(x, y + 2, '+', Ink::Spell);
+            }
         }
 
         let mut output = canvas.rows();
@@ -144,58 +157,116 @@ impl Renderer {
         output
     }
 
-    fn draw_backdrop(&self, canvas: &mut Canvas, assets: &AssetLibrary, frame: u64) {
-        let horizon = (canvas.height * 2 / 3).max(1);
+    fn draw_backdrop(
+        &self,
+        canvas: &mut Canvas,
+        assets: &AssetLibrary,
+        camera: ascii_mmorpg_shared::Point,
+        frame: u64,
+    ) {
         for y in 0..canvas.height {
             for x in 0..canvas.width {
-                let (glyph, ink) = if y < horizon {
-                    if (x * 17 + y * 31) % 37 == 0 {
-                        ('+', Ink::Muted)
-                    } else {
-                        (' ', Ink::Background)
-                    }
-                } else if y == horizon {
-                    ('=', Ink::Moss)
-                } else {
-                    match (x * 13 + y * 7) % 11 {
-                        0 | 1 => ('·', Ink::Moss),
-                        2 => (',', Ink::Foliage),
-                        3 => ('\'', Ink::Foliage),
-                        4 => ('_', Ink::Stone),
+                let wx = camera.x + x as i16 - canvas.width as i16 / 2;
+                let wy = camera.y + y as i16 - canvas.height as i16 / 2;
+                let patch = (wx * 17 + wy * 31).rem_euclid(23);
+                let path = (wx - wy / 3).rem_euclid(13) <= 2;
+                let torch_distance = [(-6, 2), (6, -4)]
+                    .iter()
+                    .map(|(tx, ty)| (wx - tx).abs() + (wy - ty).abs())
+                    .min()
+                    .unwrap_or(i16::MAX);
+                let (glyph, ink) = if torch_distance <= 2 {
+                    match patch {
+                        0 => ('·', Ink::Torch),
+                        1 | 2 => ('.', Ink::Muted),
                         _ => (' ', Ink::Background),
                     }
+                } else if path {
+                    match patch {
+                        0 | 1 => ('.', Ink::Stone),
+                        2 => (':', Ink::Muted),
+                        _ => (' ', Ink::Background),
+                    }
+                } else {
+                    Self::surface_cell(wx, wy, camera, patch)
                 };
                 canvas.set(x as isize, y as isize, glyph, ink);
             }
         }
 
-        // Authored props keep the backdrop readable while allowing the same
-        // viewport to suggest either a forest path or moss-lit ruins.
-        for x in (2..canvas.width).step_by(13) {
+        for (x, y) in [(-10, -1), (12, -3), (-7, 8), (15, 9)] {
+            let screen = self.screen_position(ascii_mmorpg_shared::Point { x, y }, camera);
             self.draw_asset(
                 canvas,
                 assets.prop(PropKind::Tree, 0),
-                x as isize,
-                horizon.saturating_sub(5) as isize,
+                screen.0 - 3,
+                screen.1 - 2,
                 Ink::Foliage,
             );
         }
-        for x in (8..canvas.width).step_by(19) {
+        for (x, y) in [(-2, -5), (9, 7)] {
+            let screen = self.screen_position(ascii_mmorpg_shared::Point { x, y }, camera);
             self.draw_asset(
                 canvas,
                 assets.prop(PropKind::Ruin, 0),
-                x as isize,
-                horizon.saturating_sub(4) as isize,
+                screen.0 - 3,
+                screen.1 - 2,
                 Ink::Stone,
             );
         }
+        let gate = self.screen_position(ascii_mmorpg_shared::Point { x: 2, y: -8 }, camera);
+        self.draw_asset(
+            canvas,
+            assets.prop(PropKind::Gate, 0),
+            gate.0 - 5,
+            gate.1 - 4,
+            Ink::Stone,
+        );
+        for (x, y) in [(-14, 4), (-11, 5), (4, 10), (11, 3), (17, 6)] {
+            let screen = self.screen_position(ascii_mmorpg_shared::Point { x, y }, camera);
+            canvas.set(screen.0, screen.1, '|', Ink::Foliage);
+            canvas.set(screen.0 - 1, screen.1 + 1, '/', Ink::Foliage);
+            canvas.set(screen.0 + 1, screen.1 + 1, '\\', Ink::Foliage);
+            canvas.set(screen.0, screen.1 + 1, '"', Ink::Moss);
+        }
 
-        // Rain is deterministic: the frame only advances its phase and no RNG
-        // state leaks into gameplay or changes the network snapshot.
+        for (x, y) in [(-6, 2), (6, -4)] {
+            let screen = self.screen_position(ascii_mmorpg_shared::Point { x, y }, camera);
+            canvas.set(screen.0, screen.1, '*', Ink::Torch);
+            canvas.set(screen.0, screen.1 + 1, '|', Ink::Muted);
+        }
+
+        self.draw_rain(canvas, frame);
+        canvas.text(2, 1, "+", Ink::Muted);
+    }
+
+    fn draw_rain(&self, canvas: &mut Canvas, frame: u64) {
+        let height = canvas.height as isize;
         for x in 0..canvas.width {
-            let drop = (x * 37 + frame as usize * 5 + 13) % (canvas.height + 7);
-            if drop < horizon.saturating_sub(1) {
-                canvas.set(x as isize, drop as isize, '/', Ink::Rain);
+            for layer in 0..3usize {
+                let speed = 2 + layer;
+                let span = canvas.height.max(1) + 9;
+                let phase = (x * 29 + layer * 47 + frame as usize * speed + 11) % span;
+                let head = phase as isize - 4;
+                for offset in 0..4isize {
+                    let y = head + offset;
+                    if y < 0 || y >= height {
+                        continue;
+                    }
+                    let glyph = if offset == 0 {
+                        '/'
+                    } else if layer == 0 {
+                        '·'
+                    } else {
+                        '|'
+                    };
+                    let ink = if offset == 0 && layer == 0 {
+                        Ink::RainBright
+                    } else {
+                        Ink::Rain
+                    };
+                    canvas.set(x as isize, y, glyph, ink);
+                }
             }
         }
     }
@@ -227,8 +298,8 @@ impl Renderer {
             return;
         }
 
-        let origin = self.screen_position(world.player.position);
-        let target = self.screen_position(target);
+        let origin = self.screen_position(world.player.position, world.player.position);
+        let target = self.screen_position(target, world.player.position);
         let steps = (target.0 - origin.0).abs().max((target.1 - origin.1).abs());
         for step in 1..steps {
             let x = origin.0 + (target.0 - origin.0) * step / steps;
@@ -245,9 +316,10 @@ impl Renderer {
         canvas: &mut Canvas,
         assets: &AssetLibrary,
         actor: &ActorSnapshot,
+        camera: ascii_mmorpg_shared::Point,
         frame: u64,
     ) {
-        let (x, y) = self.screen_position(actor.position);
+        let (x, y) = self.screen_position(actor.position, camera);
         let ink = match actor.kind {
             EntityKind::Player => Ink::Player,
             EntityKind::Monster => Ink::Monster,
@@ -261,6 +333,7 @@ impl Renderer {
             .map(|line| line.trim_end_matches('\r').chars().count())
             .max()
             .unwrap_or(1) as isize;
+        canvas.set(x, y + 2, '.', Ink::Muted);
         self.draw_asset(canvas, artwork, x - artwork_width / 2, y - 2, ink);
         // Keep the server-provided glyph visible as a compact identity cue,
         // while the authored asset supplies the silhouette around it.
@@ -275,9 +348,44 @@ impl Renderer {
         canvas.text(x - 5, y - 3, &bar, Ink::Muted);
     }
 
-    fn screen_position(&self, position: ascii_mmorpg_shared::Point) -> (isize, isize) {
-        // Fixed viewport until terrain and props also support world-space scrolling.
-        (position.x as isize, position.y as isize)
+    fn screen_position(
+        &self,
+        position: ascii_mmorpg_shared::Point,
+        camera: ascii_mmorpg_shared::Point,
+    ) -> (isize, isize) {
+        (
+            self.width.max(1) as isize / 2 + (position.x - camera.x) as isize,
+            self.height.max(1) as isize / 2 + (position.y - camera.y) as isize,
+        )
+    }
+
+    fn surface_cell(x: i16, y: i16, camera: ascii_mmorpg_shared::Point, patch: i16) -> (char, Ink) {
+        let distance = i32::from(x - camera.x).abs() + i32::from(y - camera.y).abs();
+        let seed = Self::terrain_seed(x, y);
+        let ridge = ((seed % 17) as i32 + i32::from(patch) * 2 - distance / 20).max(0);
+        let glyphs = [' ', '·', '.', ':', ';', '+', '*', '#', '%', '&'];
+        if ridge < 5 {
+            (' ', Ink::Background)
+        } else {
+            let glyph_index = (ridge / 2 + i32::from(patch) + (seed / 19) as i32)
+                .rem_euclid(glyphs.len() as i32) as usize;
+            let glyph = glyphs[glyph_index];
+            let ink = if ridge > 13 {
+                Ink::Foliage
+            } else if ridge > 9 {
+                Ink::Moss
+            } else {
+                Ink::Muted
+            };
+            (glyph, ink)
+        }
+    }
+
+    fn terrain_seed(x: i16, y: i16) -> u32 {
+        let mut value = (i32::from(x) as u32).wrapping_mul(0x45d9f3b);
+        value ^= (i32::from(y) as u32).wrapping_mul(0x119de1f3);
+        value ^= value >> 16;
+        value.wrapping_mul(0x45d9f3b) ^ (value >> 13)
     }
 
     fn draw_asset(&self, canvas: &mut Canvas, artwork: &str, x: isize, y: isize, ink: Ink) {
@@ -370,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn moving_player_does_not_move_mob_on_screen() {
+    fn player_camera_keeps_player_fixed_and_scrolls_mob() {
         let renderer = Renderer {
             width: 40,
             height: 20,
@@ -412,9 +520,9 @@ mod tests {
                 })
                 .expect("actor glyph should be visible")
         };
-        assert_eq!(anchor(&before, 'm'), anchor(&after, 'm'));
-        assert_eq!(anchor(&before, '@'), (8, 7));
-        assert_eq!(anchor(&after, '@'), (9, 7));
+        assert_eq!(anchor(&before, '@'), anchor(&after, '@'));
+        assert_eq!(anchor(&before, 'm'), (30, 10));
+        assert_eq!(anchor(&after, 'm'), (29, 10));
         assert_eq!(world.entities[0].position, Point { x: 18, y: 7 });
     }
 
@@ -428,5 +536,18 @@ mod tests {
         let snapshot_before = world.clone();
         let _ = renderer.render_frame(&world, 12);
         assert_eq!(world, snapshot_before);
+    }
+
+    #[test]
+    fn surface_sampling_is_deterministic_and_depth_varies_glyph_density() {
+        let camera = Point { x: 4, y: 9 };
+        assert_eq!(
+            Renderer::surface_cell(4, 9, camera, 3),
+            Renderer::surface_cell(4, 9, camera, 3)
+        );
+        assert_ne!(
+            Renderer::surface_cell(4, 9, camera, 0).0,
+            Renderer::surface_cell(4, 9, camera, 7).0
+        );
     }
 }
