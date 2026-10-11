@@ -621,14 +621,16 @@ To prevent the player from phasing through world structures, environmental props
 1. **Axis-Aligned Bounding Volumes (`BoundingBox`)**:
    - Defined in integer tile coordinates with constant-time point containment (`contains`) and box-box intersection (`intersects`) tests.
    - Uniform boundary expansion (`expand(margin)`) for actor clearance margins.
-2. **Environmental Collider Registry (`overworld_obstacles()`)**:
-   - **Stone Fortress Gatehouse**: Solid stone guard towers (West `[-4, -2]`, East `[2, 4]`) and portcullis grating (`[-1, 1]`) at $Y \in [-12, -9]$.
-   - **Ancient Stone Ruins & Colonnade**: Altar pedestal (`[-9, -4]` to `[-7, -6]`) and twin colonnade pillars (`[-11, -4]` and `[-7, -4]`).
-   - **Towering Pine Trees**: Solid trunk footprint colliders for key landmark trees along the highway, plus procedural forest thickets evaluated via deterministic terrain noise (`terrain_seed(gx, gy) % 9 == 0`).
-   - **Timber Lantern Posts & War Banners**: Physical collision anchors at `(-6, 2)`, `(6, -4)`, `(-8, 3)`, and `(8, -3)`.
+2. **Depth-Aware Ground-Contact Footprints (`overworld_obstacles()`)**:
+   - In 2.5D/isometric perspective with height elevation, characters stand on the ground at their feet, while tree canopies, roofs, and lintels extend upward into the air.
+   - Collision boundaries strictly represent the **ground-contact footprint** (tree trunks, pillar bases, and foundation walls) where an actor's feet make physical contact. Upper visual geometry (foliage, branches, headers) does not impede ground movement.
+   - **Towering Pine Trees**: Physical collision is strictly the single-tile trunk contact point where the tree roots into the ground (e.g. `(-7, -2)`, `(8, -3)`, `(9, -10)`, `(-9, -10)`, and procedural `point.x == tree_wx && point.y == tree_wy`). When standing in front of a tree (South, `tree.y + 1`), the character's feet rest in front of the trunk while their torso and head overlap the tree in front, occluding it via the 3D depth buffer without blocking movement.
+   - **Stone Fortress Gatehouse**: Solid stone guard towers (West `[-4, -2]`, East `[2, 4]`) and portcullis grating (`[-1, 1]`) at foundation line $Y = -12$.
+   - **Ancient Stone Ruins & Colonnade**: Altar pedestal base (`[-8, -5]` to `[-7, -5]`) and colonnade pillars (`(-10, -5)` and `(-6, -5)`).
+   - **Timber Lantern Posts & War Banners**: Ground contact points at `(-6, 2)`, `(6, -4)`, `(-8, 3)`, and `(8, -3)`.
    - **Zone Boundary Perimeter**: Enforces the playable bounds of the Whispering Forest overworld (`[-35, -35]` to `[35, 35]`), preventing players from wandering off into coordinate void.
 3. **Movement Resolution & Smooth Diagonal Sliding (`resolve_movement`)**:
-   - Direct step evaluation for cardinal directions (`North`, `South`, `East`, `West`). When blocked, the player halts at the boundary and receives immediate status feedback (e.g., `Blocked by Stone Gate.`, `Blocked by Pine Tree.`).
+   - Direct step evaluation for cardinal directions (`North`, `South`, `East`, `West`). When blocked, the player halts at the boundary and receives immediate status feedback (e.g., `Blocked by Stone Gate.`, `Blocked by Towering Pine Tree.`).
    - For diagonal movement (`NE`, `NW`, `SE`, `SW`), if the diagonal target is obstructed by a wall or obstacle, the engine tests the component horizontal and vertical steps. If one axis is unobstructed, the character smoothly slides along the obstacle surface instead of coming to a jarring halt.
 4. **Client-Server Parity**:
    - Both the local client loop (`apply_local_command` in `client/src/lib.rs`) and authoritative server simulation (`move_player` in `server/src/lib.rs`) evaluate the shared collision engine, guaranteeing identical physical boundaries in standalone and networked modes.
