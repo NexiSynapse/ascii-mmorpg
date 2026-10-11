@@ -109,7 +109,7 @@ impl Ink {
             Self::Lightning => "\x1b[38;2;76;201;240m",    // Electric cyan lightning bolt
             Self::LightningWhite => "\x1b[38;2;255;255;255m", // White lightning core
             Self::BannerRed => "\x1b[38;2;165;25;38m",     // Crimson war banner (darker)
-            Self::WoodPost => "\x1b[38;2;95;68;48m",       // Timber post (darker)
+            Self::WoodPost => "\x1b[38;2;135;85;50m",      // Rich timber post / bark
             Self::FloatingDamage => "\x1b[38;2;255;220;50m", // Popping combat numbers
             // Monster depth palette - mossy green/brown organic tones
             Self::MossBody => "\x1b[38;2;88;130;72m", // Mossy green body mass
@@ -998,6 +998,7 @@ impl Renderer {
                     '▲' => Ink::PineTree,
                     '▓' | '▒' => Ink::PineCanopy,
                     '|' => Ink::WoodPost,
+                    '(' | ')' if row >= 18 => Ink::WoodPost,
                     '_' => Ink::TreeShadow,
                     _ => Ink::Foliage,
                 };

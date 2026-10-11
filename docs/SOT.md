@@ -725,3 +725,20 @@ In `client/src/gpu/renderer.rs`, entity rendering inspects monster identity labe
 - Other beasts instantiate the quad-legged `Mossling` stalker model.
 - NPCs instantiate the hooded `Herbalist` model, and player entities instantiate the fully-armored `Humanoid Knight`.
 
+## 23. Landmark Pine Tree Trunk Visibility & Root Flares
+
+### 23.1 Root Flares and Elevated Foliage Canopy (`client/src/gpu/mesh.rs`)
+In isometric 2.5D graphics with elevated camera pitch angles ($\approx 40^\circ$), low-hanging wide conical canopies visually overlap and occlude the ground directly below them. Previously, the pine tree prototype had its lowest canopy cone at $Y = 1.60$ with radius $1.65$, projecting over the ground and rendering the thin trunk ($0.38$ width) completely invisible:
+
+1. **Sculpted Vertical Timber Column**:
+   - The trunk column was upgraded to a sturdy $0.65$-width timber pillar rising from ground level ($Y = 0.0$) through the entire canopy up to $Y = 4.80$.
+   - Vertical contour slabs ($[0.72, 4.20, 0.32]$ and $[0.32, 4.20, 0.72]$) in dark timber bark $[0.26, 0.16, 0.10, 1.0]$ provide natural bark ridge striations and deep self-shadowing.
+2. **Buttressed Root Flares**:
+   - A wide root collar ($[1.10, 0.44, 1.10]$ at $Y = 0.22$) anchors the base of the trunk firmly into the earth.
+   - Cross-spreading surface roots ($[0.45, 0.24, 1.50]$ and $[1.50, 0.24, 0.45]$) spread laterally into the dirt, guaranteeing the trunk base remains prominently visible above meadow grass elevation contours.
+3. **Elevated Multi-Tier Canopy**:
+   - The lowest foliage tier was elevated to $Y = 2.65$ (providing over $2.6$ units of unobstructed visible vertical trunk clearance).
+   - Canopy was expanded into 4 distinct conical tiers ($Y = 2.65$, $3.90$, $5.10$, and $6.20$) reaching a towering apex of $7.50$ units, delivering a striking woodland silhouette with commanding trunk presence from all camera angles.
+4. **Synchronized CPU ASCII Renderer**:
+   - In `client/src/renderer.rs`, `Ink::WoodPost` was enhanced to rich timber bark $[135, 85, 50]$, and root flare boundaries in `tree.txt` are inked with timber tones for consistent grounded visual presence.
+

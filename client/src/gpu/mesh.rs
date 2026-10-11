@@ -1274,41 +1274,68 @@ impl MeshBuffer {
         );
     }
 
-    /// Procedural 3D Pine Tree
+    /// Procedural 3D Pine Tree with sculpted timber trunk, buttressed root flares,
+    /// and an elevated multi-tier foliage canopy.
     pub fn add_pine_tree(&mut self, pos: [f32; 3], wind_sway: f32) {
         let (x, y, z) = (pos[0], pos[1], pos[2]);
         let trunk_color = [0.38, 0.24, 0.14, 1.0];
-        let pine_green = [0.14, 0.34, 0.18, 1.0];
+        let trunk_dark = [0.26, 0.16, 0.10, 1.0];
+        let pine_green_dark = [0.12, 0.30, 0.16, 1.0];
+        let pine_green = [0.15, 0.36, 0.20, 1.0];
+        let pine_green_light = [0.18, 0.42, 0.24, 1.0];
 
-        // Trunk
-        self.add_box([x, y + 1.25, z], [0.38, 2.50, 0.38], trunk_color, 3.0, 0.7);
+        // --- Sculpted Timber Trunk & Buttressed Root Flares ---
+        // Main vertical trunk column rising from ground up into the upper canopy
+        self.add_box([x, y + 2.40, z], [0.65, 4.80, 0.65], trunk_color, 3.0, 0.7);
+        // Vertical bark contour / ridge slabs for depth and striations
+        self.add_box([x, y + 2.20, z], [0.72, 4.20, 0.32], trunk_dark, 3.0, 0.8);
+        self.add_box([x, y + 2.20, z], [0.32, 4.20, 0.72], trunk_dark, 3.0, 0.8);
 
-        // 3 Tiers of conical foliage
+        // Buttress root collar at ground level (firmly anchored into terrain)
+        self.add_box([x, y + 0.22, z], [1.10, 0.44, 1.10], trunk_dark, 3.0, 0.8);
+        // Surface roots spreading into the soil
+        self.add_box([x, y + 0.12, z], [0.45, 0.24, 1.50], trunk_color, 3.0, 0.85);
+        self.add_box([x, y + 0.12, z], [1.50, 0.24, 0.45], trunk_color, 3.0, 0.85);
+
+        // --- Elevated Multi-Tier Foliage Canopy with Wind Sway ---
+        // Lowest Tier (elevated to y = 2.65 so trunk is prominently visible underneath)
         let sway = wind_sway * 0.08;
         self.add_cone(
-            [x + sway * 0.5, y + 1.6, z],
-            1.65,
-            1.6,
+            [x + sway * 0.4, y + 2.65, z],
+            1.70,
+            1.80,
+            8,
+            pine_green_dark,
+            3.0,
+            0.6,
+        );
+        // Middle Tier
+        self.add_cone(
+            [x + sway * 0.8, y + 3.90, z],
+            1.35,
+            1.70,
             8,
             pine_green,
             3.0,
             0.6,
         );
+        // Upper Tier
         self.add_cone(
-            [x + sway * 1.0, y + 2.7, z],
+            [x + sway * 1.2, y + 5.10, z],
+            0.95,
+            1.50,
+            8,
+            pine_green,
+            3.0,
+            0.6,
+        );
+        // Spire / Crown Apex
+        self.add_cone(
+            [x + sway * 1.5, y + 6.20, z],
+            0.55,
             1.30,
-            1.5,
             8,
-            pine_green,
-            3.0,
-            0.6,
-        );
-        self.add_cone(
-            [x + sway * 1.5, y + 3.8, z],
-            0.90,
-            1.4,
-            8,
-            pine_green,
+            pine_green_light,
             3.0,
             0.6,
         );
@@ -1504,15 +1531,33 @@ impl MeshBuffer {
     pub fn create_pine_tree_prototype() -> Self {
         let mut mb = Self::new();
         let trunk_color = [0.38, 0.24, 0.14, 1.0];
-        let pine_green = [0.14, 0.34, 0.18, 1.0];
+        let trunk_dark = [0.26, 0.16, 0.10, 1.0];
+        let pine_green_dark = [0.12, 0.30, 0.16, 1.0];
+        let pine_green = [0.15, 0.36, 0.20, 1.0];
+        let pine_green_light = [0.18, 0.42, 0.24, 1.0];
 
-        // Trunk
-        mb.add_box([0.0, 1.25, 0.0], [0.38, 2.50, 0.38], trunk_color, 3.0, 0.7);
+        // --- Sculpted Timber Trunk & Buttressed Root Flares ---
+        // Main vertical trunk column rising from ground up into the upper canopy
+        mb.add_box([0.0, 2.40, 0.0], [0.65, 4.80, 0.65], trunk_color, 3.0, 0.7);
+        // Vertical bark contour / ridge slabs for depth and striations
+        mb.add_box([0.0, 2.20, 0.0], [0.72, 4.20, 0.32], trunk_dark, 3.0, 0.8);
+        mb.add_box([0.0, 2.20, 0.0], [0.32, 4.20, 0.72], trunk_dark, 3.0, 0.8);
 
-        // 3 Tiers of conical foliage
-        mb.add_cone([0.0, 1.6, 0.0], 1.65, 1.6, 8, pine_green, 3.0, 0.6);
-        mb.add_cone([0.0, 2.7, 0.0], 1.30, 1.5, 8, pine_green, 3.0, 0.6);
-        mb.add_cone([0.0, 3.8, 0.0], 0.90, 1.4, 8, pine_green, 3.0, 0.6);
+        // Buttress root collar at ground level (firmly anchored into terrain)
+        mb.add_box([0.0, 0.22, 0.0], [1.10, 0.44, 1.10], trunk_dark, 3.0, 0.8);
+        // Surface roots spreading into the soil
+        mb.add_box([0.0, 0.12, 0.0], [0.45, 0.24, 1.50], trunk_color, 3.0, 0.85);
+        mb.add_box([0.0, 0.12, 0.0], [1.50, 0.24, 0.45], trunk_color, 3.0, 0.85);
+
+        // --- Elevated Multi-Tier Foliage Canopy ---
+        // Lowest Tier (elevated to y = 2.65 so trunk is prominently visible underneath)
+        mb.add_cone([0.0, 2.65, 0.0], 1.70, 1.80, 8, pine_green_dark, 3.0, 0.6);
+        // Middle Tier
+        mb.add_cone([0.0, 3.90, 0.0], 1.35, 1.70, 8, pine_green, 3.0, 0.6);
+        // Upper Tier
+        mb.add_cone([0.0, 5.10, 0.0], 0.95, 1.50, 8, pine_green, 3.0, 0.6);
+        // Spire / Crown Apex
+        mb.add_cone([0.0, 6.20, 0.0], 0.55, 1.30, 8, pine_green_light, 3.0, 0.6);
         mb
     }
 

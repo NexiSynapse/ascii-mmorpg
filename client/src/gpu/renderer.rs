@@ -356,7 +356,7 @@ impl GpuRenderer {
             ([-7.2, 0.0, -8.0], 1.05, (time * 2.1).sin()),
         ];
         for (pos, scale, sway) in trees {
-            if frustum.test_sphere(Vec3::from(pos) + Vec3::new(0.0, 2.0, 0.0), scale * 4.5) {
+            if frustum.test_sphere(Vec3::from(pos) + Vec3::new(0.0, 3.5, 0.0), scale * 5.2) {
                 batches.add_pine_tree(pos, scale, sway);
             }
         }
@@ -778,5 +778,56 @@ f 2 5 4 3
             lighting.num_point_lights >= 2,
             "Scene should include player and NPC lights"
         );
+    }
+
+    #[test]
+    fn test_pine_tree_trunk_and_root_flares_geometry() {
+        let tree_proto = MeshBuffer::create_pine_tree_prototype();
+        assert!(
+            !tree_proto.vertices.is_empty(),
+            "Pine tree prototype must contain vertices"
+        );
+        assert!(
+            !tree_proto.indices.is_empty(),
+            "Pine tree prototype must contain indices"
+        );
+
+        // Verify trunk ground contact reaches down to y <= 0.0
+        let min_y = tree_proto
+            .vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            min_y <= 0.05,
+            "Pine tree trunk/roots must touch the ground plane: min_y={min_y}"
+        );
+
+        // Verify maximum tree apex reaches above 7.0 for tall towering silhouette
+        let max_y = tree_proto
+            .vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            max_y >= 7.0,
+            "Pine tree apex should be towering: max_y={max_y}"
+        );
+
+        // Verify root flare lateral footprint spreads outwards for grounded stability
+        let max_x = tree_proto
+            .vertices
+            .iter()
+            .map(|v| v.position[0].abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_x >= 1.4,
+            "Pine tree root flares / branches must spread laterally: max_x={max_x}"
+        );
+
+        // Verify direct mesh buffer add_pine_tree
+        let mut mesh = MeshBuffer::new();
+        mesh.add_pine_tree([0.0, 0.0, 0.0], 0.0);
+        assert!(!mesh.vertices.is_empty());
     }
 }
