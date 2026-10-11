@@ -102,7 +102,10 @@ fn run_realtime(address: Option<&str>, fps: u32) -> Result<(), Box<dyn std::erro
 }
 
 #[cfg(feature = "notcurses")]
-fn run_realtime_notcurses(address: Option<&str>, fps: u32) -> Result<(), Box<dyn std::error::Error>> {
+fn run_realtime_notcurses(
+    address: Option<&str>,
+    fps: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let term = ascii_mmorpg_client::NotcursesTerminal::new()?;
     run_realtime_with_terminal(address, term, fps)
@@ -147,7 +150,7 @@ fn run_realtime_with_terminal<T: Terminal>(
         connection.close();
     }
     use std::io::Write;
-    print!("\x1b[?25h\x1b[0m\n");
+    println!("\x1b[?25h\x1b[0m");
     let _ = io::stdout().flush();
     disable_result?;
     result
@@ -319,15 +322,25 @@ fn realtime_loop(
         let draw_start = Instant::now();
         terminal.draw(&renderer.render_frame(world, animation_frame))?;
         let draw_ms = draw_start.elapsed().as_secs_f64() * 1000.0;
-        last_draw_ms = if last_draw_ms == 0.0 { draw_ms } else { last_draw_ms * 0.8 + draw_ms * 0.2 };
+        last_draw_ms = if last_draw_ms == 0.0 {
+            draw_ms
+        } else {
+            last_draw_ms * 0.8 + draw_ms * 0.2
+        };
 
         fps_count += 1;
         if fps_timer.elapsed() >= Duration::from_secs(1) {
             display_fps = fps_count;
             fps_count = 0;
             fps_timer = Instant::now();
-            if connection.is_none() && (world.messages.is_empty() || world.messages[0].starts_with("Real-time mode")) {
-                let target_label = if target_fps == 0 { "uncapped".to_string() } else { format!("{target_fps} target") };
+            if connection.is_none()
+                && (world.messages.is_empty() || world.messages[0].starts_with("Real-time mode"))
+            {
+                let target_label = if target_fps == 0 {
+                    "uncapped".to_string()
+                } else {
+                    format!("{target_fps} target")
+                };
                 world.messages = vec![format!(
                     "Real-time mode: WASD/arrows move, F attacks, R rests, Q quits. [{display_fps} FPS ({target_label}) | draw: {last_draw_ms:.2}ms]"
                 )];

@@ -63,24 +63,24 @@ impl Ink {
             Self::Torch => "\x1b[38;5;220m",
             Self::Text => "\x1b[38;5;252m",
             Self::Muted => "\x1b[38;5;245m",
-            Self::KnightSteel => "\x1b[38;2;225;232;240m",  // Polished steel plate
-            Self::KnightGold => "\x1b[38;2;255;210;75m",     // Golden helm crest / horns
-            Self::KnightCape => "\x1b[38;2;195;35;48m",      // Crimson battle cape
-            Self::DropShadow => "\x1b[38;2;16;20;28m",       // 3D ground drop shadow
-            Self::CobbleRoad => "\x1b[38;2;155;142;128m",    // Warm ancient cobblestone
-            Self::CobbleGlow => "\x1b[38;2;245;195;110m",    // Torchlit cobblestone
-            Self::CobbleBorder => "\x1b[38;2;85;78;70m",     // Cobblestone curb
-            Self::GrassMeadow => "\x1b[38;2;42;104;72m",     // Lush deep emerald grass
-            Self::GrassTorch => "\x1b[38;2;118;202;158m",    // Torchlit vibrant grass
-            Self::PineTree => "\x1b[38;2;40;95;80m",         // Frosty pine needles
-            Self::TreeShadow => "\x1b[38;2;12;20;16m",       // Tree base drop shadow
-            Self::TorchFlame => "\x1b[38;2;255;95;25m",      // Blazing orange flame
-            Self::TorchGlow => "\x1b[38;2;255;185;55m",      // Radiant amber halo
-            Self::Lightning => "\x1b[38;2;76;201;240m",      // Electric cyan lightning bolt
-            Self::LightningWhite => "\x1b[38;2;255;255;255m",// White lightning core
-            Self::BannerRed => "\x1b[38;2;195;30;45m",       // Crimson war banner
-            Self::WoodPost => "\x1b[38;2;120;85;60m",        // Timber post
-            Self::FloatingDamage => "\x1b[38;2;255;220;50m",  // Popping combat numbers
+            Self::KnightSteel => "\x1b[38;2;225;232;240m", // Polished steel plate
+            Self::KnightGold => "\x1b[38;2;255;210;75m",   // Golden helm crest / horns
+            Self::KnightCape => "\x1b[38;2;195;35;48m",    // Crimson battle cape
+            Self::DropShadow => "\x1b[38;2;16;20;28m",     // 3D ground drop shadow
+            Self::CobbleRoad => "\x1b[38;2;155;142;128m",  // Warm ancient cobblestone
+            Self::CobbleGlow => "\x1b[38;2;245;195;110m",  // Torchlit cobblestone
+            Self::CobbleBorder => "\x1b[38;2;85;78;70m",   // Cobblestone curb
+            Self::GrassMeadow => "\x1b[38;2;42;104;72m",   // Lush deep emerald grass
+            Self::GrassTorch => "\x1b[38;2;118;202;158m",  // Torchlit vibrant grass
+            Self::PineTree => "\x1b[38;2;40;95;80m",       // Frosty pine needles
+            Self::TreeShadow => "\x1b[38;2;12;20;16m",     // Tree base drop shadow
+            Self::TorchFlame => "\x1b[38;2;255;95;25m",    // Blazing orange flame
+            Self::TorchGlow => "\x1b[38;2;255;185;55m",    // Radiant amber halo
+            Self::Lightning => "\x1b[38;2;76;201;240m",    // Electric cyan lightning bolt
+            Self::LightningWhite => "\x1b[38;2;255;255;255m", // White lightning core
+            Self::BannerRed => "\x1b[38;2;195;30;45m",     // Crimson war banner
+            Self::WoodPost => "\x1b[38;2;120;85;60m",      // Timber post
+            Self::FloatingDamage => "\x1b[38;2;255;220;50m", // Popping combat numbers
         }
     }
 }
@@ -397,7 +397,7 @@ impl Renderer {
         let origin = self.screen_position(world.player.position, world.player.position);
         let target = self.screen_position(target, world.player.position);
         let steps = (target.0 - origin.0).abs().max((target.1 - origin.1).abs());
-        
+
         // Base spell beam (guarantees Ink::Spell \x1b[38;5;153m for compatibility)
         for step in 1..steps {
             let x = origin.0 + (target.0 - origin.0) * step / steps;
@@ -415,7 +415,16 @@ impl Renderer {
             let lx = bolt_x + if offset % 2 == 0 { -1 } else { 1 };
             let ly = bolt_y - offset;
             let glyph = if offset % 2 == 0 { '/' } else { '\\' };
-            canvas.set(lx, ly, glyph, if offset == 1 { Ink::LightningWhite } else { Ink::Lightning });
+            canvas.set(
+                lx,
+                ly,
+                glyph,
+                if offset == 1 {
+                    Ink::LightningWhite
+                } else {
+                    Ink::Lightning
+                },
+            );
         }
 
         // Fiery explosion sparks around target
@@ -495,12 +504,12 @@ impl Renderer {
                 let px = x + column as isize;
                 let py = y + row as isize;
                 let ink = match glyph {
-                    '▲' | '^' => Ink::KnightGold,       // Golden crest / horns
+                    '▲' | '^' => Ink::KnightGold,              // Golden crest / horns
                     '▓' | '8' | '[' | ']' => Ink::KnightSteel, // Gleaming plate armor
                     '|' | '<' | '>' | '(' | ')' if row <= 3 => Ink::KnightSteel,
                     '/' | '\\' if column <= 1 || column >= 5 => Ink::KnightCape, // Crimson cape edges
-                    '/' | '\\' => Ink::KnightSteel,      // Steel greaves / arms
-                    '_' => Ink::DropShadow,              // Ground shadow
+                    '/' | '\\' => Ink::KnightSteel, // Steel greaves / arms
+                    '_' => Ink::DropShadow,         // Ground shadow
                     _ => Ink::Player,
                 };
                 canvas.set(px, py, glyph, ink);

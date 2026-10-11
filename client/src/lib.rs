@@ -47,7 +47,10 @@ impl PlainTerminal {
     }
 
     pub fn draw_into<W: Write>(&mut self, frame: &str, writer: &mut W) -> io::Result<()> {
-        let current_lines: Vec<&str> = frame.split('\n').map(|s| s.trim_end_matches('\r')).collect();
+        let current_lines: Vec<&str> = frame
+            .split('\n')
+            .map(|s| s.trim_end_matches('\r'))
+            .collect();
 
         // If line count changed or initial frame, perform full redraw with clean clear
         if self.prev_lines.len() != current_lines.len() {
