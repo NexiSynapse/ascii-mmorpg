@@ -7,7 +7,7 @@ use std::io::{self, Write};
 pub mod assets;
 pub mod network;
 pub mod renderer;
-pub use renderer::Renderer;
+pub use renderer::{Renderer, WeatherMode};
 
 pub trait Terminal {
     fn size(&self) -> (u16, u16);
@@ -420,6 +420,7 @@ mod tests {
         let frame = Renderer {
             width: 5,
             height: 5,
+            weather: WeatherMode::Rain,
         }
         .render(&sample_world());
         assert!(frame.lines().nth(2).unwrap().contains('@'));

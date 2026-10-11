@@ -44,6 +44,11 @@ enum Ink {
     BannerRed,
     WoodPost,
     FloatingDamage,
+    // Atmospheric Weather Shader Tokens
+    Snow,
+    SnowGlow,
+    SnowSoft,
+    Splash,
 }
 
 impl Ink {
@@ -81,6 +86,10 @@ impl Ink {
             Self::BannerRed => "\x1b[38;2;195;30;45m",     // Crimson war banner
             Self::WoodPost => "\x1b[38;2;120;85;60m",      // Timber post
             Self::FloatingDamage => "\x1b[38;2;255;220;50m", // Popping combat numbers
+            Self::Snow => "\x1b[38;2;230;245;255m",        // Crisp winter snowflake
+            Self::SnowGlow => "\x1b[38;2;255;255;255m",    // Crystalline specular highlight
+            Self::SnowSoft => "\x1b[38;2;160;195;225m",    // Twilight soft snow flurry
+            Self::Splash => "\x1b[38;2;180;225;255m",      // Impact water spray
         }
     }
 }
@@ -119,6 +128,14 @@ impl Canvas {
         self.cells[y as usize * self.width + x as usize] = Cell::new(glyph, ink);
     }
 
+    fn get(&self, x: isize, y: isize) -> Cell {
+        if x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.height {
+            Cell::new(' ', Ink::Background)
+        } else {
+            self.cells[y as usize * self.width + x as usize]
+        }
+    }
+
     fn text(&mut self, x: isize, y: isize, text: &str, ink: Ink) {
         for (offset, glyph) in text.chars().enumerate() {
             self.set(x + offset as isize, y, glyph, ink);
@@ -143,6 +160,15 @@ impl Canvas {
     }
 }
 
+/// Weather simulation modes for the dedicated post-processing overlay shader.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WeatherMode {
+    #[default]
+    Rain,
+    Snow,
+    Storm,
+}
+
 /// Procedural ANSI renderer for the alpha client.
 ///
 /// `frame` is separate from the authoritative tick so a replay or demo can
@@ -151,9 +177,23 @@ impl Canvas {
 pub struct Renderer {
     pub width: i16,
     pub height: i16,
+    pub weather: WeatherMode,
 }
 
 impl Renderer {
+    pub fn new(width: i16, height: i16) -> Self {
+        Self {
+            width: width.max(1),
+            height: height.max(1),
+            weather: WeatherMode::Rain,
+        }
+    }
+
+    pub fn with_weather(mut self, weather: WeatherMode) -> Self {
+        self.weather = weather;
+        self
+    }
+
     pub fn resize(&mut self, width: i16, height: i16) {
         self.width = width.max(1);
         self.height = height.max(1);
@@ -184,6 +224,9 @@ impl Renderer {
             }
         }
 
+        // Apply Weather Shader as a dedicated top-level post-processing overlay pass
+        self.apply_weather_shader(&mut canvas, world.player.position, frame);
+
         let mut output = canvas.rows();
         output.push_str(&format!(
             "\n\n\x1b[38;5;252mTick {}  HP {}/{}\x1b[0m\x1b[K",
@@ -200,7 +243,7 @@ impl Renderer {
         canvas: &mut Canvas,
         assets: &AssetLibrary,
         camera: ascii_mmorpg_shared::Point,
-        frame: u64,
+        _frame: u64,
     ) {
         for y in 0..canvas.height {
             for x in 0..canvas.width {
@@ -332,23 +375,66 @@ impl Renderer {
             canvas.set(screen.0, screen.1 + 1, '·', Ink::TorchGlow);
         }
 
-        self.draw_rain(canvas, frame);
         canvas.text(2, 1, "+", Ink::Muted);
     }
 
-    fn draw_rain(&self, canvas: &mut Canvas, frame: u64) {
+    fn is_ui_or_anchor_cell(cell: Cell) -> bool {
+        cell.ink == Ink::Text
+            || cell.glyph == '@'
+            || cell.glyph == 'm'
+            || cell.glyph == '['
+            || cell.glyph == ']'
+            || cell.glyph == '#'
+            || cell.glyph == '-'
+            || (cell.glyph == '+' && cell.ink == Ink::Spell)
+    }
+
+    fn apply_weather_shader(
+        &self,
+        canvas: &mut Canvas,
+        camera: ascii_mmorpg_shared::Point,
+        frame: u64,
+    ) {
+        match self.weather {
+            WeatherMode::Rain => self.shader_rain(canvas, camera, frame, false),
+            WeatherMode::Storm => self.shader_rain(canvas, camera, frame, true),
+            WeatherMode::Snow => self.shader_snow(canvas, camera, frame),
+        }
+    }
+
+    fn shader_rain(
+        &self,
+        canvas: &mut Canvas,
+        _camera: ascii_mmorpg_shared::Point,
+        frame: u64,
+        is_storm: bool,
+    ) {
+        let width = canvas.width;
         let height = canvas.height as isize;
-        for x in 0..canvas.width {
-            for layer in 0..3usize {
-                let speed = 2 + layer;
+        let layers = if is_storm { 4 } else { 3 };
+        let speed_mult = if is_storm { 2 } else { 1 };
+        let is_lightning_flash = is_storm && (frame % 45 < 2);
+
+        for x in 0..width {
+            for layer in 0..layers {
+                let speed = (2 + layer) * speed_mult;
                 let span = canvas.height.max(1) + 9;
                 let phase = (x * 29 + layer * 47 + frame as usize * speed + 11) % span;
                 let head = phase as isize - 4;
+                let wind_drift = if is_storm { head / 4 } else { 0 };
+                let px = (x as isize + wind_drift).rem_euclid(width as isize);
+
                 for offset in 0..4isize {
                     let y = head + offset;
                     if y < 0 || y >= height {
                         continue;
                     }
+
+                    let current = canvas.get(px, y);
+                    if Self::is_ui_or_anchor_cell(current) {
+                        continue;
+                    }
+
                     let glyph = if offset == 0 {
                         '/'
                     } else if layer == 0 {
@@ -356,13 +442,77 @@ impl Renderer {
                     } else {
                         '|'
                     };
-                    let ink = if offset == 0 && layer == 0 {
+
+                    let ink = if is_lightning_flash {
+                        Ink::LightningWhite
+                    } else if offset == 0 && layer == 0 {
                         Ink::RainBright
                     } else {
                         Ink::Rain
                     };
-                    canvas.set(x as isize, y, glyph, ink);
+
+                    canvas.set(px, y, glyph, ink);
                 }
+
+                if head >= height - 3 && head < height {
+                    let splash_x = (x as isize + 1).rem_euclid(width as isize);
+                    let splash_y = (head + 1).min(height - 1);
+                    let current = canvas.get(splash_x, splash_y);
+                    if !Self::is_ui_or_anchor_cell(current) && current.glyph != ' ' {
+                        let splash_glyph = if (frame + x as u64) % 2 == 0 {
+                            '~'
+                        } else {
+                            '.'
+                        };
+                        canvas.set(splash_x, splash_y, splash_glyph, Ink::Splash);
+                    }
+                }
+            }
+        }
+    }
+
+    fn shader_snow(&self, canvas: &mut Canvas, _camera: ascii_mmorpg_shared::Point, frame: u64) {
+        let width = canvas.width as isize;
+        let height = canvas.height as isize;
+
+        for layer in 0..3usize {
+            let num_columns = canvas.width;
+            let fall_speed = match layer {
+                0 => 1,
+                1 => 2,
+                _ => 1,
+            };
+            let span = canvas.height.max(1) + 8;
+
+            for x in (layer..num_columns).step_by(2) {
+                let seed = x * 37 + layer * 73;
+                let phase = (seed + frame as usize * fall_speed) % span;
+                let y = phase as isize - 2;
+
+                if y < 0 || y >= height {
+                    continue;
+                }
+
+                let sway_freq = 0.25;
+                let sway_amp = if layer == 0 { 2.5 } else { 1.5 };
+                let sway = ((y as f64 * sway_freq + frame as f64 * 0.1 + seed as f64).sin()
+                    * sway_amp) as isize;
+                let px = (x as isize + sway).rem_euclid(width);
+
+                let current = canvas.get(px, y);
+                if Self::is_ui_or_anchor_cell(current) {
+                    continue;
+                }
+
+                let (glyph, ink) = match (layer, (seed + frame as usize) % 4) {
+                    (0, 0) => ('*', Ink::SnowGlow),
+                    (0, _) => ('*', Ink::Snow),
+                    (1, 0) => ('•', Ink::Snow),
+                    (1, _) => ('·', Ink::SnowSoft),
+                    (_, _) => ('.', Ink::SnowSoft),
+                };
+
+                canvas.set(px, y, glyph, ink);
             }
         }
     }
@@ -607,6 +757,7 @@ mod tests {
         let renderer = Renderer {
             width: 32,
             height: 14,
+            weather: WeatherMode::Rain,
         };
         let world = scene_world();
         assert_eq!(
@@ -620,6 +771,7 @@ mod tests {
         let renderer = Renderer {
             width: 32,
             height: 14,
+            weather: WeatherMode::Rain,
         };
         let frame = renderer.render_frame(&scene_world(), 4);
         assert!(frame.contains("Ranger"));
@@ -633,10 +785,33 @@ mod tests {
     }
 
     #[test]
+    fn weather_shader_snow_and_storm_modes_render_distinct_overlays() {
+        let mut renderer = Renderer {
+            width: 40,
+            height: 18,
+            weather: WeatherMode::Snow,
+        };
+        let world = scene_world();
+        let snow_frame = renderer.render_frame(&world, 4);
+        assert!(snow_frame.contains('*') || snow_frame.contains('·'));
+        assert!(
+            snow_frame.contains("\x1b[38;2;230;245;255m")
+                || snow_frame.contains("\x1b[38;2;255;255;255m")
+                || snow_frame.contains("\x1b[38;2;160;195;225m")
+        );
+
+        renderer.weather = WeatherMode::Storm;
+        let storm_frame = renderer.render_frame(&world, 4);
+        assert!(storm_frame.contains('/'));
+        assert_ne!(snow_frame, storm_frame);
+    }
+
+    #[test]
     fn animation_phase_changes_frame_without_changing_snapshot() {
         let renderer = Renderer {
             width: 32,
             height: 14,
+            weather: WeatherMode::Rain,
         };
         let world = scene_world();
         let first = renderer.render_frame(&world, 0);
@@ -651,6 +826,7 @@ mod tests {
         let renderer = Renderer {
             width: 40,
             height: 20,
+            weather: WeatherMode::Rain,
         };
         let mut world = scene_world();
         let before = renderer.render_frame(&world, 4);
@@ -700,6 +876,7 @@ mod tests {
         let renderer = Renderer {
             width: 32,
             height: 14,
+            weather: WeatherMode::Rain,
         };
         let world = scene_world();
         let snapshot_before = world.clone();

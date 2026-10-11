@@ -97,14 +97,19 @@ Rendering does not mutate authoritative snapshots.
 ```text
 Cargo.toml                 Cargo workspace
 crates/shared/             Protocol, content, combat, loot, framing
+crates/libnotcurses-sys/   Vendored and patched Notcurses FFI bindings
 server/                    Authoritative simulation and TCP server
-client/                    Input, TCP client, ASCII assets, renderer
+client/                    Input, TCP client, ASCII assets, ANSI/Notcurses renderer
 bot/                       Headless TCP client and smoke client
 tools/                     RON content validator
 content/                   RON game definitions
-docs/                      ADRs and this source of truth
+docs/                      ADRs, research findings, and this source of truth
 assets/ascii/              Workspace-authored ASCII frames
 assets/source/kenney/      Optional CC0 source reference packs
+play_ansi.bat              Windows launcher for ANSI client (uncapped by default)
+play_notcurses.bat         Windows launcher for Notcurses client (uncapped by default)
+play_wezterm.bat           WezTerm GUI launcher for ANSI client
+play_wezterm_notcurses.bat WezTerm GUI launcher for Notcurses client
 .github/                   CI workflow
 ```
 
@@ -415,3 +420,56 @@ The current project has repeatedly passed formatting, workspace tests, clippy wi
 - Do not bulk-copy online ASCII artwork without licence verification.
 - Do not treat the reference videos as proof of the original engine or mechanics.
 - Keep authored ASCII assets editable, reviewable and attribution-safe.
+
+## 15. Recent updates and technical changelog
+
+### 15.1 Notcurses Windows integration & research findings
+- **Research & documentation**: Analyzed Notcurses C engine architecture on Windows/MSYS2 (`windows.c`, ConPTY IPC, cell rasters, direct mode). Documented root-cause findings and architecture in `docs/NOTCURSES_RESEARCH_FINDINGS.md`.
+- **Vendored FFI bindings**: Staged and patched `crates/libnotcurses-sys` via `[patch.crates-io]` in root `Cargo.toml`.
+- **Target support**: Enabled build support for `x86_64-pc-windows-gnu` linking MSYS2 ucrt64 `notcurses.dll` / `libnotcurses-core.dll` via `--features notcurses`.
+- **Terminal backend abstraction**: Implemented `NotcursesTerminal` in `client/src/lib.rs` implementing the common `Terminal` trait, supporting cell rendering and native resize queries.
+
+### 15.2 Windows ConPTY IPC & terminal fixes
+- **ConPTY IPC tearing & line wrap fix**: Resolved cursor positioning races and line wrap artifacts under Windows ConPTY by building a differential dirty-line terminal rasterizer in `PlainTerminal`. Strips CRLF escapes, uses absolute row positioning (`\x1b[{row};1H`), appends clear-to-EOL (`\x1b[K`), and triggers clean full repaints on terminal resize.
+- **WezTerm error 10054 fix**: Fixed the `wezterm_mux_server_impl::local > encoding PDU to client: writing pdu data buffer: An existing connection was forcibly closed by the remote host. (os error 10054)` error. Identified that the CLI wrapper `wezterm.exe` detached its client socket early; resolved by directly targeting `wezterm-gui.exe start --always-new-process --cwd "%~dp0"`.
+
+### 15.3 Framerate decoupling & uncapped performance engine
+- **Decoupled game loop**: Decoupled client visual rendering and animation from the server's fixed 20 Hz simulation clock.
+- **CLI flag `--fps`**: Added `--fps <TARGET | uncapped | max>` flag. Configured argument parsing with `rposition` so command-line overrides take precedence over script defaults.
+- **Sub-millisecond pacer**: Implemented high-precision frame pacing combining coarse `event::poll` sleeping with tight yield/spin on Windows. Passing `0` or `uncapped` disables sleep entirely for benchmarking maximum rendering throughput.
+- **Performance HUD overlay**: Added in-game real-time metrics display: `[<FPS> FPS (<target>) | draw: <ms>]`.
+- **Uncapped default for testing**: Configured all launcher batch scripts (`play_ansi.bat`, `play_notcurses.bat`, `play_wezterm.bat`, `play_wezterm_notcurses.bat`) to launch uncapped by default.
+
+### 15.4 Dark fantasy & 3D aesthetic overhaul (Skyrim / Elden Ring style)
+- **Articulated knight character model (`assets/ascii/player_warrior.txt`)**: Upgraded player model from a flat 4-line sprite to an articulated 6-row knight featuring a horned greathelm (`/▲\`), polished plate pauldrons (`/▓▓▓\`), breastplate emblem (`<|()|>`), chainmail fauld (`|888|\`), greaves, and a 3D ground drop shadow (`( ___ )`).
+- **Layered 3D environmental props**:
+  - `assets/ascii/tree.txt`: Layered pine needle canopies with ground drop shadows.
+  - `assets/ascii/ruin.txt`: Ancient stone pillars with foundation drop shadows (`( _____ )`).
+- **24-bit TrueColor palette**: Added 18 curated color tokens in `client/src/renderer.rs`: `KnightSteel`, `KnightGold`, `KnightCape`, `DropShadow`, `CobbleRoad`, `CobbleGlow`, `CobbleBorder`, `GrassMeadow`, `GrassTorch`, `PineTree`, `TreeShadow`, `TorchFlame`, `TorchGlow`, `Lightning`, `LightningWhite`, `BannerRed`, `WoodPost`, `FloatingDamage`.
+- **Dynamic 3D radial lighting**: Paved winding cobblestone highways with stone curbs; torches and lanterns cast warm radial halos that blend smoothly into deep midnight negative space. Added hanging crimson battle banners and timber posts.
+- **Combat visual effects**: Vertical electric cyan lightning bolts striking down with white cores, radial fiery ember bursts around targets, and popping floating damage numbers (`91`, `CRIT`).
+
+### 15.5 Launch runner automation
+- `play_ansi.bat`: Launches MSVC optimized release build with `--fps uncapped`.
+- `play_notcurses.bat`: Sets MSYS2 ucrt64 runtime paths and launches GNU Notcurses release binary with `--notcurses --fps uncapped`.
+- `play_wezterm.bat`: Launches WezTerm GUI directly with new process isolation running `play_ansi.bat`.
+- `play_wezterm_notcurses.bat`: Launches WezTerm GUI directly running `play_notcurses.bat`.
+
+### 15.6 CI matrix & verification status
+- **Unit test suite**: All 31 unit tests across workspace crates passing (`cargo test --workspace`), including weather shader overlay and distinct mode tests.
+- **RON content validator**: Clean validation of all 11 definitions (`cargo run -p ascii-mmorpg-tools -- content`).
+- **Formatting & lints**: Formatted according to standard style (`cargo fmt --all -- --check`) and clean Clippy build with all warnings denied (`cargo clippy --workspace --all-targets -- -D warnings`).
+- **GitHub Actions CI**: Matrix workflow passing green on both `ubuntu-latest` and `windows-latest`.
+
+### 15.7 Atmospheric weather shader overlay layer (Rain, Snowfall, and Storm)
+- **Top-level shader overlay pass**: Elevated atmospheric weather from baked ground backdrop cells into a dedicated post-processing overlay layer (`apply_weather_shader`). Running above the scene backdrop, combat effects, and character models creates realistic 3D depth and parallax.
+- **Multiple weather shader modes (`WeatherMode`)**:
+  - `WeatherMode::Rain`: Multi-layer angled streaks (`/`, `·`, `|`), wind shear drift, and ground impact splash ripples (`~`, `.`).
+  - `WeatherMode::Snow`: Volumetric snowflakes (`*`, `•`, `·`, `°`) with fluttering horizontal sinusoidal sway (`sin(y * freq + frame * 0.1) * amp`) and multi-speed descent layers.
+  - `WeatherMode::Storm`: High-velocity tempest streaks with violent wind drift and periodic electrical lightning flash cycles illuminating the atmosphere.
+- **Translucent UI / anchor masking (`is_ui_or_anchor_cell`)**: Precipitation composites over empty space, terrain, props, and player plate armor while automatically protecting nameplates, health bars (`[########]`), and actor anchors (`@`, `m`).
+- **Interactive controls & CLI**:
+  - In-game keybinding `V` / `T`: Instantly cycles weather modes (Rain → Snowfall → Storm) during real-time gameplay with immediate HUD notification.
+  - CLI flag `--weather <rain|snow|storm>`: Configures initial weather mode on startup.
+- **24-bit TrueColor weather tokens**: Added `Ink::Snow` (`\x1b[38;2;230;245;255m`), `Ink::SnowGlow` (`\x1b[38;2;255;255;255m`), `Ink::SnowSoft` (`\x1b[38;2;160;195;225m`), and `Ink::Splash` (`\x1b[38;2;180;225;255m`).
+

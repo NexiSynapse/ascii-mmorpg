@@ -1,6 +1,6 @@
 use ascii_mmorpg_client::{
     apply_local_command, network::ClientConnection, parse_command, sample_world, PlainTerminal,
-    Renderer, Terminal,
+    Renderer, Terminal, WeatherMode,
 };
 use ascii_mmorpg_shared::{ServerEvent, PROTOCOL_VERSION};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
@@ -18,11 +18,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let fps = target_fps(&args);
+    let weather = weather_mode(&args);
     let address = connect_address(&args)?;
     if args.iter().any(|arg| arg == "--notcurses") {
         #[cfg(feature = "notcurses")]
         {
-            return run_realtime_notcurses(address.as_deref(), fps);
+            return run_realtime_notcurses(address.as_deref(), fps, weather);
         }
         #[cfg(not(feature = "notcurses"))]
         {
@@ -31,7 +32,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    run_realtime(address.as_deref(), fps)
+    run_realtime(address.as_deref(), fps, weather)
+}
+
+fn weather_mode(args: &[String]) -> WeatherMode {
+    if let Some(index) = args.iter().rposition(|arg| arg == "--weather") {
+        if let Some(val) = args.get(index + 1) {
+            match val.to_lowercase().as_str() {
+                "snow" | "snowfall" => return WeatherMode::Snow,
+                "storm" | "tempest" => return WeatherMode::Storm,
+                "rain" => return WeatherMode::Rain,
+                _ => {}
+            }
+        }
+    }
+    WeatherMode::Rain
 }
 
 fn target_fps(args: &[String]) -> u32 {
@@ -54,6 +69,7 @@ fn run_demo_mode() -> Result<(), Box<dyn std::error::Error>> {
     let renderer = Renderer {
         width: width as i16,
         height: height.saturating_sub(6) as i16,
+        weather: WeatherMode::Rain,
     };
     let mut world = sample_world();
     world.messages =
@@ -82,6 +98,7 @@ fn run_line_mode() -> Result<(), Box<dyn std::error::Error>> {
     let renderer = Renderer {
         width: width as i16,
         height: (height.saturating_sub(5)) as i16,
+        weather: WeatherMode::Rain,
     };
     let mut world = sample_world();
     terminal.draw(&renderer.render(&world))?;
@@ -96,31 +113,38 @@ fn run_line_mode() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_realtime(address: Option<&str>, fps: u32) -> Result<(), Box<dyn std::error::Error>> {
+fn run_realtime(
+    address: Option<&str>,
+    fps: u32,
+    weather: WeatherMode,
+) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
-    run_realtime_with_terminal(address, PlainTerminal::new(), fps)
+    run_realtime_with_terminal(address, PlainTerminal::new(), fps, weather)
 }
 
 #[cfg(feature = "notcurses")]
 fn run_realtime_notcurses(
     address: Option<&str>,
     fps: u32,
+    weather: WeatherMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let term = ascii_mmorpg_client::NotcursesTerminal::new()?;
-    run_realtime_with_terminal(address, term, fps)
+    run_realtime_with_terminal(address, term, fps, weather)
 }
 
 fn run_realtime_with_terminal<T: Terminal>(
     address: Option<&str>,
     mut terminal: T,
     fps: u32,
+    weather: WeatherMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = address.map(ClientConnection::connect).transpose()?;
     let (width, height) = terminal.size();
     let mut renderer = Renderer {
         width: width as i16,
         height: (height.saturating_sub(5)) as i16,
+        weather,
     };
     let mut world = sample_world();
     world.messages = vec![match address {
@@ -245,6 +269,21 @@ fn realtime_loop(
                         KeyCode::Char('q') => break 'game,
                         KeyCode::Char('f') => Some("f"),
                         KeyCode::Char('r') => Some("r"),
+                        KeyCode::Char('v') | KeyCode::Char('t') => {
+                            renderer.weather = match renderer.weather {
+                                WeatherMode::Rain => WeatherMode::Snow,
+                                WeatherMode::Snow => WeatherMode::Storm,
+                                WeatherMode::Storm => WeatherMode::Rain,
+                            };
+                            let weather_label = match renderer.weather {
+                                WeatherMode::Rain => "Rain",
+                                WeatherMode::Snow => "Snowfall",
+                                WeatherMode::Storm => "Storm",
+                            };
+                            world.messages =
+                                vec![format!("Weather overlay changed to {weather_label}.")];
+                            None
+                        }
                         _ => None,
                     };
                     if let Some(input) = input {
@@ -341,8 +380,13 @@ fn realtime_loop(
                 } else {
                     format!("{target_fps} target")
                 };
+                let weather_label = match renderer.weather {
+                    WeatherMode::Rain => "Rain",
+                    WeatherMode::Snow => "Snowfall",
+                    WeatherMode::Storm => "Storm",
+                };
                 world.messages = vec![format!(
-                    "Real-time mode: WASD/arrows move, F attacks, R rests, Q quits. [{display_fps} FPS ({target_label}) | draw: {last_draw_ms:.2}ms]"
+                    "Real-time mode: WASD move, F attack, R rest, V weather ({weather_label}), Q quit. [{display_fps} FPS ({target_label}) | draw: {last_draw_ms:.2}ms]"
                 )];
             }
         }
