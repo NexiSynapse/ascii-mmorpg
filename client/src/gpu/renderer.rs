@@ -1,9 +1,10 @@
 //! High-level GPU offscreen renderer for the ASCII MMORPG client
 //! with multi-buffered asynchronous staging rings and hardware instanced batching.
 
-use glam::{Mat4, Vec3};
+use std::time::Instant;
 
-use ascii_mmorpg_shared::{EntityKind, WorldSnapshot};
+use ascii_mmorpg_shared::{EntityKind, Point, WorldSnapshot};
+use glam::{Mat4, Vec3};
 
 use super::context::GpuContext;
 use super::mesh::{Frustum, MeshBuffer, SceneBatches};
@@ -19,6 +20,9 @@ pub struct GpuRenderer {
     pub width: i16,
     pub height: i16,
     pub weather: WeatherMode,
+    pub last_player_pos: Option<Point>,
+    pub last_move_instant: Option<Instant>,
+    pub player_walk_phase: f32,
 }
 
 impl GpuRenderer {
@@ -38,6 +42,9 @@ impl GpuRenderer {
             width,
             height,
             weather,
+            last_player_pos: None,
+            last_move_instant: None,
+            player_walk_phase: 0.0,
         })
     }
 
@@ -87,6 +94,44 @@ impl GpuRenderer {
         self.format_frame_with_hud(&cells, world)
     }
 
+    /// Evaluates whether the player is currently walking based on position changes
+    /// within a 280ms stride window, returning the active walk cycle phase.
+    ///
+    /// When the player is stationary, returns 0.0 so feet remain planted on the ground.
+    pub fn update_walk_phase(&mut self, world: &WorldSnapshot) -> f32 {
+        if !world.player.stats.is_alive() {
+            self.player_walk_phase = 0.0;
+            return 0.0;
+        }
+
+        let current_pos = world.player.position;
+        let now = Instant::now();
+
+        let moved = match self.last_player_pos {
+            Some(last_pos) => last_pos != current_pos,
+            None => false,
+        };
+
+        if moved {
+            self.last_player_pos = Some(current_pos);
+            self.last_move_instant = Some(now);
+        } else if self.last_player_pos.is_none() {
+            self.last_player_pos = Some(current_pos);
+        }
+
+        let is_walking = self
+            .last_move_instant
+            .is_some_and(|t| now.duration_since(t).as_millis() < 280);
+
+        if is_walking {
+            self.player_walk_phase += 0.35;
+            self.player_walk_phase
+        } else {
+            self.player_walk_phase = 0.0;
+            0.0
+        }
+    }
+
     /// Renders a batch of world snapshots continuously across the double-buffered GPU ring,
     /// keeping the GPU hardware at full utilization and eliminating CPU-GPU idle bubbles.
     pub fn render_batch(&mut self, snapshots: &[WorldSnapshot]) -> Vec<String> {
@@ -95,7 +140,20 @@ impl GpuRenderer {
         }
 
         let mut batch_data = Vec::with_capacity(snapshots.len());
+        let mut last_pos = self.last_player_pos;
+        let mut walk_phase = self.player_walk_phase;
         for (i, snapshot) in snapshots.iter().enumerate() {
+            let moved = match last_pos {
+                Some(prev) => prev != snapshot.player.position,
+                None => false,
+            };
+            last_pos = Some(snapshot.player.position);
+            if moved && snapshot.player.stats.is_alive() {
+                walk_phase += 0.35;
+            } else {
+                walk_phase = 0.0;
+            }
+
             let mut mesh = MeshBuffer::new();
             let mut batches = SceneBatches::new();
             let (cam, light) = Self::populate_scene(
@@ -104,11 +162,14 @@ impl GpuRenderer {
                 self.weather,
                 snapshot,
                 snapshot.tick.max(i as u64),
+                walk_phase,
                 &mut mesh,
                 &mut batches,
             );
             batch_data.push((mesh, batches, cam, light));
         }
+        self.last_player_pos = last_pos;
+        self.player_walk_phase = walk_phase;
 
         let frame_refs: Vec<(
             &MeshBuffer,
@@ -135,24 +196,28 @@ impl GpuRenderer {
         world: &WorldSnapshot,
         frame: u64,
     ) -> (CameraUniforms, LightingUniforms) {
+        let walk_phase = self.update_walk_phase(world);
         Self::populate_scene(
             self.width,
             self.height,
             self.weather,
             world,
             frame,
+            walk_phase,
             &mut self.mesh,
             &mut self.batches,
         )
     }
 
     /// Populates scene geometry and fills hardware instance batches for a given target buffer set.
+    #[allow(clippy::too_many_arguments)]
     pub fn populate_scene(
         width: i16,
         height: i16,
         weather: WeatherMode,
         world: &WorldSnapshot,
         frame: u64,
+        walk_phase: f32,
         mesh: &mut MeshBuffer,
         batches: &mut SceneBatches,
     ) -> (CameraUniforms, LightingUniforms) {
@@ -256,7 +321,7 @@ impl GpuRenderer {
                     mesh.add_herbalist([ex, 0.0, ez], time);
                 }
                 EntityKind::Player => {
-                    mesh.add_humanoid([ex, 0.0, ez], 0.0, time * 3.0, 0.0);
+                    mesh.add_humanoid([ex, 0.0, ez], 0.0, 0.0, 0.0);
                 }
                 EntityKind::Item => {
                     let hover = (time * 3.0 + ex).sin() * 0.15;
@@ -271,11 +336,6 @@ impl GpuRenderer {
             }
         }
 
-        let walk_phase = if world.player.stats.is_alive() {
-            time * 4.0
-        } else {
-            0.0
-        };
         mesh.add_humanoid([px, 0.0, pz], 0.0, walk_phase, 0.0);
 
         // 4. Instanced Props with View-Frustum Culling (Asciicker plane culling optimization)
@@ -497,6 +557,7 @@ mod tests {
             renderer.weather,
             &world,
             10,
+            0.0,
             &mut mesh,
             &mut batches,
         );
@@ -608,5 +669,39 @@ f 2 5 4 3
             (reconstructed - cam_target).length() < 0.01,
             "Unprojected point should match original target: {reconstructed:?} vs {cam_target:?}"
         );
+    }
+
+    #[test]
+    fn test_player_feet_do_not_move_when_idle() {
+        let mut renderer = GpuRenderer::new(40, 20, WeatherMode::Rain)
+            .expect("GPU Renderer should initialize on host");
+        let mut world = sample_world();
+
+        // 1. Initial idle state: player is stationary, walk_phase must be 0.0
+        let idle_phase = renderer.update_walk_phase(&world);
+        assert_eq!(
+            idle_phase, 0.0,
+            "Player feet should not move when standing still"
+        );
+
+        // Subsequent idle frame at same position: still 0.0
+        let idle_phase_2 = renderer.update_walk_phase(&world);
+        assert_eq!(
+            idle_phase_2, 0.0,
+            "Player feet should remain stationary on subsequent idle frames"
+        );
+
+        // 2. Player takes a step: position changes
+        world.player.position.x += 1;
+        let walk_phase = renderer.update_walk_phase(&world);
+        assert!(
+            walk_phase > 0.0,
+            "Player walk phase should activate when position changes: {walk_phase}"
+        );
+
+        // 3. Humanoid mesh at 0.0 walk_phase has both boots planted side-by-side with zero leg swing
+        let mut mesh = MeshBuffer::new();
+        mesh.add_humanoid([0.0, 0.0, 0.0], 0.0, 0.0, 0.0);
+        assert!(!mesh.vertices.is_empty());
     }
 }

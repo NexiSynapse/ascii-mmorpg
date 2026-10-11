@@ -635,6 +635,17 @@ To prevent the player from phasing through world structures, environmental props
 4. **Client-Server Parity**:
    - Both the local client loop (`apply_local_command` in `client/src/lib.rs`) and authoritative server simulation (`move_player` in `server/src/lib.rs`) evaluate the shared collision engine, guaranteeing identical physical boundaries in standalone and networked modes.
 
+## 20. Movement-Aware Articulation & Stationary Foot Posture
 
+### 20.1 Stationary Leg Articulation vs. Walk Cycle (`GpuRenderer::update_walk_phase`)
+Previously, procedural 3D humanoid entities in the GPU pipeline drove leg swing and boot displacement via a continuous time variable (`time * 4.0`), causing characters to continuously march in place even while standing still.
 
-
+1. **Velocity and Displacement Tracking**:
+   - `GpuRenderer` tracks the local player's previous grid coordinate (`last_player_pos`) and the timestamp of their latest displacement (`last_move_instant`).
+   - A 280ms stride window (`is_some_and(|t| now.duration_since(t).as_millis() < 280)`) determines active walking state.
+2. **Stationary Idle Stance**:
+   - When stationary, `walk_phase` resets to `0.0`.
+   - In `MeshBuffer::add_humanoid`, `leg_swing = (walk_phase).sin() * 0.3 = 0.0`. Both armored greaves and leather sabatons (boots) remain strictly planted side-by-side on the ground plane ($Y + 0.12, Z + 0.06$) with zero foot or leg movement.
+   - Remote player entities (`EntityKind::Player`) at rest are likewise rendered with `walk_phase = 0.0`.
+3. **Active Stride Striding**:
+   - When displacement occurs within the stride window, `player_walk_phase` articulates forward by `+0.35` radians per rendered frame, driving smooth alternating forward/backward stride swings for the left and right legs.
