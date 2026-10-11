@@ -2,7 +2,16 @@
 setlocal
 cd /d "%~dp0"
 
-title ASCII MMORPG - Interactive Demo
+title ASCII MMORPG - Interactive Demo (Optimized)
+echo [1/2] Verifying client build and embedded assets...
+cargo build --release -p ascii-mmorpg-client
+if %ERRORLEVEL% NEQ 0 (
+    echo.
+    echo Build failed! Check compiler errors above.
+    pause
+    exit /b %ERRORLEVEL%
+)
+
 cls
 set "EXE=%~dp0target\release\ascii-mmorpg-client.exe"
 if not exist "%EXE%" set "EXE=%~dp0target\debug\ascii-mmorpg-client.exe"

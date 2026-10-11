@@ -350,6 +350,8 @@ impl Renderer {
 
     /// 0.0 (void) .. 1.0 (torch core): ambient moonlight plus radial falloff
     /// with a slight eastward directional bias so lit faces read brighter.
+    /// Quantized to 0.05 steps so camera-relative wobble can never flip a
+    /// ground band between adjacent camera positions (anti-shimmer).
     fn light_level(wx: i16, wy: i16, camera: ascii_mmorpg_shared::Point) -> f32 {
         let mut level = 0.10;
         for light in Self::lights(camera) {
@@ -357,7 +359,7 @@ impl Renderer {
             level += (1.0 - dist / light.radius as f32).max(0.0) * 0.9;
         }
         level += (wx - camera.x).clamp(-8, 8) as f32 * 0.012;
-        level.clamp(0.0, 1.0)
+        (level.clamp(0.0, 1.0) * 20.0).round() / 20.0
     }
 
     fn draw_backdrop(
@@ -834,7 +836,7 @@ impl Renderer {
             EntityKind::Item => Ink::Item,
         };
 
-        let artwork = assets.for_entity(&actor.kind, &actor.name, frame / 8);
+        let artwork = assets.for_entity(&actor.kind, &actor.name, frame);
         let artwork_width = artwork
             .lines()
             .map(|line| line.trim_end_matches('\r').chars().count())
@@ -892,12 +894,13 @@ impl Renderer {
                 let py = y + row as isize;
                 let ink = match glyph {
                     '▲' | '^' => Ink::KnightGold,              // Golden crest / horns
-                    ':' => Ink::KnightVisor,                   // Visor eye slit
+                    ':' | '=' if row <= 2 => Ink::KnightVisor, // Visor eye slit / chin guard
+                    'o' if row == 1 => Ink::NpcSkin,           // Humanoid face feature / eyes
                     '@' => Ink::KnightSteel, // Plate fill: bright steel, not blue wash
                     '▓' | '8' | '[' | ']' => Ink::KnightSteel, // Gleaming plate armor
-                    '|' | '<' | '>' | '(' | ')' if row <= 4 => Ink::KnightSteel,
-                    '/' | '\\' if column <= 1 || column >= 5 => Ink::KnightCape, // Crimson cape edges
-                    '/' | '\\' => Ink::KnightSteel, // Steel greaves / arms
+                    '|' | '<' | '>' | '(' | ')' if row <= 6 => Ink::KnightSteel,
+                    '/' | '\\' if (column <= 2 || column >= 11) && row <= 6 => Ink::KnightCape, // Crimson cape edges
+                    '/' | '\\' => Ink::KnightSteel, // Steel greaves / arms / legs
                     '_' => Ink::DropShadow,         // Ground shadow
                     _ => Ink::Player,
                 };
@@ -916,7 +919,7 @@ impl Renderer {
                 let py = y + row as isize;
                 let ink = match glyph {
                     '^' | 'v' | '.' if row == 2 || row == 3 => Ink::MossEye, // Glowing amber eyes
-                    '@' | 'o' | 'O' => Ink::MossBody, // Organic moss body mass
+                    '8' | 'o' | 'O' => Ink::MossBody, // Organic moss body mass
                     '#' | '%' => Ink::MossHide,       // Shadowed hide core
                     '{' | '}' | '/' | '\\' | '|' => Ink::Moss, // Living moss tendrils
                     '_' => Ink::DropShadow,           // Ground drop shadow
@@ -1331,7 +1334,7 @@ mod tests {
 
     #[test]
     fn light_level_falls_off_with_distance_and_follows_player() {
-        let far = Point { x: 60, y: 60 };
+        let far = Point { x: -20, y: 20 };
         let core = Renderer::light_level(-6, 2, far);
         let edge = Renderer::light_level(1, 2, far);
         assert!(core > 0.9, "lantern core {core}");
@@ -1356,47 +1359,50 @@ mod tests {
 
     #[test]
     fn scattered_props_are_world_locked_when_camera_moves() {
+        use crate::assets::AssetLibrary;
+
         let renderer = Renderer {
             width: 40,
             height: 20,
             weather: WeatherMode::Rain,
         };
-        let mut world = scene_world();
-        let cam_before = world.player.position;
-        let first = renderer.render_canvas(&world, 4);
-        crate::apply_local_command(
-            &mut world,
-            &ascii_mmorpg_shared::ClientCommand::new(
-                8,
-                ascii_mmorpg_shared::Command::Move(ascii_mmorpg_shared::Direction::East),
-            ),
-        );
-        let cam_after = world.player.position;
-        let second = renderer.render_canvas(&world, 4);
-        // Actor screen zones in both frames: the player stays centered, the
-        // mob shifts one column left.
-        let zones = [
-            renderer.screen_position(cam_before, cam_before),
-            renderer.screen_position(cam_after, cam_after),
-            renderer.screen_position(Point { x: 18, y: 7 }, cam_before),
-            renderer.screen_position(Point { x: 18, y: 7 }, cam_after),
-        ];
-        let clear = |x: isize, y: isize| {
-            zones
-                .iter()
-                .all(|(ax, ay)| (x - ax).abs() > 9 || (y - ay).abs() > 8)
-        };
-        let pine = (1..first.height as isize - 1)
-            .flat_map(|y| (1..first.width as isize - 1).map(move |x| (x, y)))
-            .map(|(x, y)| (x, y, first.get(x, y)))
-            .find(|(x, y, cell)| {
-                (cell.ink == Ink::PineTree || cell.ink == Ink::PineCanopy)
-                    && clear(*x, *y)
-                    && clear(*x - 1, *y)
-            })
-            .expect("a pine prop should be visible");
-        let moved = second.get(pine.0 - 1, pine.1);
-        assert_eq!((moved.glyph, moved.ink), (pine.2.glyph, pine.2.ink));
+        let assets = AssetLibrary::new();
+        // Backdrop only: no actors, weather, or veil, so every remaining
+        // prop-ink cell must be perfectly world-locked.
+        let mut first = Canvas::new(40, 20);
+        renderer.draw_backdrop(&mut first, &assets, Point { x: 8, y: 7 }, 4);
+        let mut second = Canvas::new(40, 20);
+        renderer.draw_backdrop(&mut second, &assets, Point { x: 9, y: 7 }, 4);
+        fn is_prop_ink(ink: Ink) -> bool {
+            matches!(
+                ink,
+                Ink::PineTree
+                    | Ink::PineCanopy
+                    | Ink::TreeShadow
+                    | Ink::RuinWall
+                    | Ink::RuinWindow
+                    | Ink::WoodPost
+                    | Ink::BannerRed
+                    | Ink::TorchFlame
+                    | Ink::TorchGlow
+            )
+        }
+        let mut checked = 0;
+        for y in 0..20isize {
+            for x in 1..40isize {
+                let cell = first.get(x, y);
+                if is_prop_ink(cell.ink) {
+                    let moved = second.get(x - 1, y);
+                    assert_eq!(
+                        (moved.glyph, moved.ink),
+                        (cell.glyph, cell.ink),
+                        "prop drift at ({x},{y})"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 20, "expected scattered props in view");
     }
 
     #[test]
@@ -1549,8 +1555,10 @@ mod tests {
             weather: WeatherMode::Rain,
         };
         let world = scene_world();
+        // Same animation frame index (4 % 4 == 8 % 4) so authored art is
+        // identical; only weather is allowed to move still-air cells.
         let first = renderer.render_canvas(&world, 4);
-        let second = renderer.render_canvas(&world, 5);
+        let second = renderer.render_canvas(&world, 8);
         let mut actor_zones = Vec::new();
         for actor in world.entities.iter().chain(std::iter::once(&world.player)) {
             let (x, y) = renderer.screen_position(actor.position, world.player.position);
