@@ -32,3 +32,11 @@ asset pipeline may convert selected models into terminal-friendly scene
 geometry, material palettes and animation clips. Keep each source pack's
 `License.txt` with the downloaded files. Before adding any future pack, record
 its exact licence here and verify redistribution terms.
+
+## Imported medieval gate slice
+
+- Source model: `source/kenney/mini-dungeon/Models/OBJ format/gate.obj`
+- Source licence: Creative Commons CC0, retained in the adjacent pack
+- Runtime conversion: `assets/ascii/gate.txt`
+- Status: first static terminal adaptation; geometry/depth conversion remains a
+  planned follow-up and the OBJ remains the provenance reference.

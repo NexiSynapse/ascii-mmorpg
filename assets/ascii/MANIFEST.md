@@ -11,6 +11,7 @@ third-party artwork or generated binary data.
 | `npc_herbalist.txt` | NPC fallback animation | 2 |
 | `tree.txt` | Forest prop animation | 2 |
 | `ruin.txt` | Ruin prop animation | 2 |
+| `gate.txt` | Static medieval gate adaptation | 1 |
 | `item_icons.txt` | Sword, shield, and generic item icons | 3 |
 | `spell_effect.txt` | Spell trail/impact glyphs | 4 |
 
@@ -20,7 +21,7 @@ the current working directory at runtime.
 
 ## Optional source references
 
-The staged `assets/source/kenney/` CC0 packs remain optional source references
-for future art tooling. None of those packs are required by, embedded in, or
-loaded by this renderer. The files listed above are the complete visual input
-for the current ASCII slice.
+The staged `assets/source/kenney/` CC0 packs remain source references for art
+tooling. `gate.txt` is the first small terminal adaptation of one of those
+sources; the remaining pack contents are not loaded by this renderer. The files
+listed above are the complete visual input for the current ASCII slice.

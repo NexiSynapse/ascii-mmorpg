@@ -40,6 +40,7 @@ impl AsciiAsset {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PropKind {
+    Gate,
     Tree,
     Ruin,
 }
@@ -78,6 +79,7 @@ impl AssetLibrary {
 
     pub fn prop(self, kind: PropKind, render_frame: u64) -> &'static str {
         match kind {
+            PropKind::Gate => GATE.frame(render_frame),
             PropKind::Tree => TREE.frame(render_frame),
             PropKind::Ruin => RUIN.frame(render_frame),
         }
@@ -124,6 +126,7 @@ const NPC_HERBALIST: AsciiAsset = AsciiAsset::new(
 );
 const TREE: AsciiAsset = AsciiAsset::new("tree", include_str!("../../assets/ascii/tree.txt"));
 const RUIN: AsciiAsset = AsciiAsset::new("ruin", include_str!("../../assets/ascii/ruin.txt"));
+const GATE: AsciiAsset = AsciiAsset::new("gate", include_str!("../../assets/ascii/gate.txt"));
 const ITEM_ICONS: ItemIcons = ItemIcons {
     source: include_str!("../../assets/ascii/item_icons.txt"),
 };
