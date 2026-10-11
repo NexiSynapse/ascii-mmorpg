@@ -161,8 +161,8 @@ impl GpuRenderer {
         let px = p_pos.x as f32 * 0.8;
         let pz = p_pos.y as f32 * 0.8;
 
-        // 1. Setup Camera (Isometric 2.5D perspective)
-        let cam_eye = Vec3::new(px, 11.5, pz - 13.5);
+        // 1. Setup Camera (Isometric 2.5D perspective looking North towards -Z)
+        let cam_eye = Vec3::new(px, 11.5, pz + 13.5);
         let cam_target = Vec3::new(px, 0.8, pz);
         let cam_up = Vec3::new(0.0, 1.0, 0.0);
 
@@ -213,11 +213,11 @@ impl GpuRenderer {
         let gate_flicker1 = (time * 9.5).sin() * 0.15;
         let gate_flicker2 = (time * 11.2).cos() * 0.15;
         lights.push(GpuPointLight {
-            position: [-2.2, 2.6, 0.65, 8.5],
+            position: [-2.2, 2.6, -10.0 + 0.65, 8.5],
             color: [1.0, 0.62, 0.20, 1.4 + gate_flicker1],
         });
         lights.push(GpuPointLight {
-            position: [2.2, 2.6, 0.65, 8.5],
+            position: [2.2, 2.6, -10.0 + 0.65, 8.5],
             color: [1.0, 0.62, 0.20, 1.4 + gate_flicker2],
         });
 
@@ -243,7 +243,7 @@ impl GpuRenderer {
         // 3. Dynamic Scene Geometry (Cobblestone Highway, Altar, Gate, Entities)
         mesh.add_terrain(px, pz, 24.0);
         mesh.add_gate([0.0, 0.0, -10.0]);
-        mesh.add_ruin_altar([-6.5, 0.0, 4.0]);
+        mesh.add_ruin_altar([-6.5, 0.0, -4.0]);
 
         for entity in &world.entities {
             let ex = entity.position.x as f32 * 0.8;
@@ -282,8 +282,8 @@ impl GpuRenderer {
         let trees = [
             ([-5.0, 0.0, -4.0], 1.0, (time * 2.0).sin()),
             ([6.0, 0.0, -2.5], 1.1, (time * 2.3).sin()),
-            ([7.5, 0.0, 8.0], 0.95, (time * 1.8).sin()),
-            ([-8.0, 0.0, 10.0], 1.05, (time * 2.1).sin()),
+            ([7.5, 0.0, -8.0], 0.95, (time * 1.8).sin()),
+            ([-7.0, 0.0, -8.0], 1.05, (time * 2.1).sin()),
         ];
         for (pos, scale, sway) in trees {
             if frustum.test_sphere(Vec3::from(pos) + Vec3::new(0.0, 2.0, 0.0), scale * 4.5) {
@@ -292,8 +292,8 @@ impl GpuRenderer {
         }
 
         let pillars = [
-            ([-7.9, 0.0, 4.0], 1.0),
-            ([-5.1, 0.0, 4.0], 0.76),
+            ([-7.9, 0.0, -4.0], 1.0),
+            ([-5.1, 0.0, -4.0], 0.76),
         ];
         for (pos, height_scale) in pillars {
             if frustum.test_sphere(Vec3::from(pos) + Vec3::new(0.0, 1.5, 0.0), 3.0) {
