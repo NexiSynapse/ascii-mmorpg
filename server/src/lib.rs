@@ -144,12 +144,19 @@ impl Simulation {
     }
 
     fn move_player(&mut self, player_id: EntityId, direction: Direction) {
+        let obstacles = ascii_mmorpg_shared::overworld_obstacles();
         let player = self.players.get_mut(&player_id).expect("player is ensured");
-        player.position = player.position.step(direction);
-        self.messages.push(format!(
-            "You move to ({}, {}).",
-            player.position.x, player.position.y
-        ));
+        let outcome = ascii_mmorpg_shared::resolve_movement(player.position, direction, &obstacles);
+        if outcome.blocked {
+            let obstacle = outcome.obstacle.unwrap_or("an obstacle");
+            self.messages.push(format!("Blocked by {obstacle}."));
+        } else {
+            player.position = outcome.resolved_position;
+            self.messages.push(format!(
+                "You move to ({}, {}).",
+                player.position.x, player.position.y
+            ));
+        }
     }
 
     fn attack(&mut self, player_id: EntityId) {
@@ -289,5 +296,22 @@ mod tests {
             .entities
             .iter()
             .any(|entity| entity.kind == EntityKind::Monster));
+    }
+
+    #[test]
+    fn server_move_into_obstacle_is_blocked() {
+        let mut simulation = Simulation::demo();
+        // Place player near Timber Lantern Post at (-6, 2)
+        simulation.players.get_mut(&1).unwrap().position = Point { x: -5, y: 2 };
+        let events =
+            simulation.fixed_tick(Some(ClientCommand::new(0, Command::Move(Direction::West))));
+        let ServerEvent::Snapshot(snapshot) = &events[0] else {
+            panic!("expected snapshot")
+        };
+        assert_eq!(snapshot.player.position, Point { x: -5, y: 2 });
+        assert!(snapshot
+            .messages
+            .iter()
+            .any(|msg| msg.contains("Blocked by Timber Lantern Post")));
     }
 }

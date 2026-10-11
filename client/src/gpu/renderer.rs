@@ -291,10 +291,7 @@ impl GpuRenderer {
             }
         }
 
-        let pillars = [
-            ([-7.9, 0.0, -4.0], 1.0),
-            ([-5.1, 0.0, -4.0], 0.76),
-        ];
+        let pillars = [([-7.9, 0.0, -4.0], 1.0), ([-5.1, 0.0, -4.0], 0.76)];
         for (pos, height_scale) in pillars {
             if frustum.test_sphere(Vec3::from(pos) + Vec3::new(0.0, 1.5, 0.0), 3.0) {
                 batches.add_pillar(pos, height_scale);
@@ -563,10 +560,20 @@ f 2 5 4 3
 "#;
         let mb = MeshBuffer::load_obj(obj_cube, [1.0, 0.8, 0.2, 1.0], 1.0, 0.3)
             .expect("Should parse valid OBJ string");
-        assert!(!mb.vertices.is_empty(), "MeshBuffer should contain vertices");
-        assert!(!mb.indices.is_empty(), "MeshBuffer should contain triangle indices");
+        assert!(
+            !mb.vertices.is_empty(),
+            "MeshBuffer should contain vertices"
+        );
+        assert!(
+            !mb.indices.is_empty(),
+            "MeshBuffer should contain triangle indices"
+        );
         // 4 triangular sides (4 * 3 = 12 indices) + quad base (2 * 3 = 6 indices) = 18 indices
-        assert_eq!(mb.indices.len(), 18, "Pyramid should have 6 triangles = 18 indices");
+        assert_eq!(
+            mb.indices.len(),
+            18,
+            "Pyramid should have 6 triangles = 18 indices"
+        );
     }
 
     #[test]

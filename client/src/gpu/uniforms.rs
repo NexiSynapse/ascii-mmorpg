@@ -15,7 +15,12 @@ pub struct CameraUniforms {
 impl CameraUniforms {
     /// O(1) mathematical screen-to-world unprojection borrowed from Asciicker's depth unprojection logic.
     /// Maps a screen cell coordinate (x, y) and its GPU depth buffer value into exact 3D world coordinates.
-    pub fn unproject_screen_to_world(&self, screen_x: f32, screen_y: f32, depth: f32) -> glam::Vec3 {
+    pub fn unproject_screen_to_world(
+        &self,
+        screen_x: f32,
+        screen_y: f32,
+        depth: f32,
+    ) -> glam::Vec3 {
         let inv_vp = glam::Mat4::from_cols_array_2d(&self.inv_view_proj);
         let ndc_x = (screen_x / self.width as f32) * 2.0 - 1.0;
         let ndc_y = 1.0 - (screen_y / self.height as f32) * 2.0; // Y is inverted in NDC

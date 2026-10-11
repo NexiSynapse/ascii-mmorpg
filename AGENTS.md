@@ -24,6 +24,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 - Framing: 4-byte LE length + postcard payload, 1 MiB max (`MAX_FRAME_SIZE`), non-empty. Use `encode_frame/decode_frame/read_frame/write_frame`; do not invent framing.
 - `WorldSnapshot.player` is the per-connection local view; `entities` holds remotes + mobs. `EntityKind` (`Player/Monster/Npc/Item`) drives client visuals, not gameplay.
 - Combat is deterministic: `resolve_attack(attacker, defender, tick ^ target_id)`, Manhattan `MELEE_RANGE = 6` (`combat.rs`).
+- Collision: deterministic AABB spatial boundaries and diagonal sliding physics in `crates/shared/src/collision.rs` (`resolve_movement`, `overworld_obstacles`). Both `server::move_player` and `client::apply_local_command` use it.
 
 ## Server (`server/src/main.rs`, `lib.rs`)
 - `cargo run -p ascii-mmorpg-server` prints loopback demo; `cargo run -p ascii-mmorpg-server -- --tcp 127.0.0.1:4000` serves TCP (multi-client reader/writer threads + one sim thread, per-client `snapshot_for(id)` broadcast).

@@ -22,7 +22,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let fps = target_fps(&args);
     let weather = weather_mode(&args);
-    let force_cpu = args.iter().any(|arg| arg == "--cpu") && !args.iter().any(|arg| arg == "--wgpu");
+    let force_cpu =
+        args.iter().any(|arg| arg == "--cpu") && !args.iter().any(|arg| arg == "--wgpu");
     let address = connect_address(&args)?;
     if args.iter().any(|arg| arg == "--notcurses") {
         #[cfg(feature = "notcurses")]
@@ -101,9 +102,7 @@ fn run_wgpu_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let adapter_info = renderer.ctx.adapter.get_info();
         eprintln!(
             "adapter: {} (backend: {:?}, device_type: {:?})",
-            adapter_info.name,
-            adapter_info.backend,
-            adapter_info.device_type,
+            adapter_info.name, adapter_info.backend, adapter_info.device_type,
         );
         let world = sample_world();
         let started = Instant::now();

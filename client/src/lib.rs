@@ -423,11 +423,22 @@ pub fn apply_local_command(world: &mut WorldSnapshot, command: &ClientCommand) {
     world.messages.clear();
     match &command.command {
         Command::Move(direction) => {
-            world.player.position = world.player.position.step(*direction);
-            world.messages.push(format!(
-                "You move to ({}, {}).",
-                world.player.position.x, world.player.position.y
-            ));
+            let obstacles = ascii_mmorpg_shared::overworld_obstacles();
+            let outcome = ascii_mmorpg_shared::resolve_movement(
+                world.player.position,
+                *direction,
+                &obstacles,
+            );
+            if outcome.blocked {
+                let obstacle = outcome.obstacle.unwrap_or("an obstacle");
+                world.messages.push(format!("Blocked by {obstacle}."));
+            } else {
+                world.player.position = outcome.resolved_position;
+                world.messages.push(format!(
+                    "You move to ({}, {}).",
+                    world.player.position.x, world.player.position.y
+                ));
+            }
         }
         Command::Rest => {
             world.player.stats.hp = (world.player.stats.hp + 1).min(world.player.stats.max_hp);
@@ -588,5 +599,16 @@ mod tests {
         let s4 = String::from_utf8(out4).unwrap();
         assert!(s4.contains("\x1b[2;1HChanged 2\x1b[0m\x1b[K\r\nChanged 3\x1b[0m\x1b[K"));
         assert!(!s4.contains("\x1b[3;1H"));
+    }
+
+    #[test]
+    fn local_move_into_obstacle_is_blocked() {
+        let mut world = sample_world();
+        // Place player adjacent to Timber Lantern Post at (-6, 2)
+        world.player.position = Point { x: -5, y: 2 };
+        let command = parse_command("a", 1).unwrap(); // Step West into lantern post
+        apply_local_command(&mut world, &command);
+        assert_eq!(world.player.position, Point { x: -5, y: 2 });
+        assert!(world.messages[0].contains("Blocked by Timber Lantern Post"));
     }
 }

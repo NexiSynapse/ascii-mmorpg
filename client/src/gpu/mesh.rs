@@ -1033,18 +1033,15 @@ impl MeshBuffer {
 
                         let default_face_normal = (p1 - p0).cross(p2 - p0).normalize_or_zero();
 
-                        let n0 = c0
-                            .1
-                            .and_then(|idx| normals.get(idx).copied())
-                            .unwrap_or(default_face_normal);
-                        let n1 = c1
-                            .1
-                            .and_then(|idx| normals.get(idx).copied())
-                            .unwrap_or(default_face_normal);
-                        let n2 = c2
-                            .1
-                            .and_then(|idx| normals.get(idx).copied())
-                            .unwrap_or(default_face_normal);
+                        let n0 =
+                            c0.1.and_then(|idx| normals.get(idx).copied())
+                                .unwrap_or(default_face_normal);
+                        let n1 =
+                            c1.1.and_then(|idx| normals.get(idx).copied())
+                                .unwrap_or(default_face_normal);
+                        let n2 =
+                            c2.1.and_then(|idx| normals.get(idx).copied())
+                                .unwrap_or(default_face_normal);
 
                         let tp0 = (transform * p0.extend(1.0)).truncate();
                         let tp1 = (transform * p1.extend(1.0)).truncate();

@@ -535,8 +535,7 @@ impl GpuPipeline {
             wgpu::TextureFormat::Rgba8Unorm,
             "NormalDepth",
         );
-        let (depth_texture, depth_view) =
-            create_depth_texture(device, render_width, render_height);
+        let (depth_texture, depth_view) = create_depth_texture(device, render_width, render_height);
 
         // 5. Create Multi-Buffered Frame Slots
         let slot0 = FrameSlot::new(
