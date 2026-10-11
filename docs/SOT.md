@@ -214,6 +214,8 @@ Current assets:
 ```text
 assets/ascii/player_warrior.txt       Animated player frames
 assets/ascii/monster_mossling.txt     Animated Mossling frames
+assets/ascii/skeleton.txt             Animated skeletal undead frames
+assets/ascii/skeleton_warrior.txt     Animated shield-and-blade skeleton frames
 assets/ascii/npc_herbalist.txt        Animated NPC fallback frames
 assets/ascii/tree.txt                 Animated tree prop frames
 assets/ascii/ruin.txt                 Animated ruin prop frames
@@ -222,7 +224,13 @@ assets/ascii/spell_effect.txt         Spell/effect glyph frames
 assets/ascii/MANIFEST.md              Asset inventory and provenance
 ```
 
-Frames are separated by a line containing `---` and selected by client render frame.
+Frames are separated by a line containing exactly `---` (line-based split, so art itself may contain runs like `|---|`) and selected by client render frame.
+
+Monster art is selected by label (`Skeleton Warrior` before `Skeleton`, case-insensitive; otherwise Mossling), mirroring item-icon selection:
+
+- Label containing `skeleton warrior` → skeleton warrior frames
+- Label containing `skeleton` → skeleton frames
+- Otherwise → Mossling frames
 
 Item selection currently uses the item label:
 
@@ -487,6 +495,16 @@ The current project has repeatedly passed formatting, workspace tests, clippy wi
   - **Serene negative space**: Eliminated high-contrast character noise (`*`, `#`, `%`, `&`) from the open terrain. Replaced with deep midnight void (`\x1b[38;2;12;15;22m`) and subtle, sparse ground dither (`·`, `.`, ` `) using `GrassDark` and `Moss`.
   - **Winding cobblestone highway**: Softened highway curbs and road tiles (`o`, `·`, `Q`, `.`) illuminated by warm amber radiant halos from timber lantern posts (`TorchFlame`, `TorchGlow`).
   - **Gentle weather overlay pacing**: Calibrated rain and snow descent rates (`frame / 24` to `frame / 12`) to maintain smooth, tranquil ambiance even under high-framerate/uncapped rendering.
+
+### 15.9 Reference-parity graphics pass (light field, camera, sampler, effects)
+- **Skeletal undead assets**: workspace-authored `skeleton.txt` / `skeleton_warrior.txt` (4 frames each, bone palette `BoneLight`/`Bone`/`BoneDark`/`BoneEye`, steel shield and blade), selected by monster label; online ASCII collections researched but not copied (per-work licensing unclear).
+- **Line-based frame splitting**: `client/src/assets.rs` splits on separator *lines*, so art may contain runs like `|---|`; also fixes miscounted `frame_count` for such art.
+- **Light field**: player-carried + lantern point lights with radial falloff replace Manhattan tint bands (`light_level`, directional bias); backdrop bands and ground texture thin with darkness.
+- **Oblique camera + scattered props**: one shared projection for all layers; trees/ruins placed on a deterministic world grid instead of fixed coords, with a world-lock test.
+- **Depth veil**: far terrain/prop inks sink toward the void (`dim_ink`, two tiers) while actor, light, weather, and UI inks stay bright — foreground/background channels.
+- **Effects**: persistent spell beam removed (event-only strike flash + embers + impact `+`); damage numbers parsed from the real message figure instead of the `"91"` placeholder.
+- **Nameplates**: greedy nearest-free (label, bar) row slots so overlapping actors keep readable stacked labels.
+- **Metrics**: near-black fraction test (≥70%, measured 3.7% at baseline), still-air shimmer test (only weather/actor cells may change), `ASCII_DUMP=1` snapshot dumps for visual review against `data/videos/`.
 
 ## 16. Depth awareness & animation techniques in terminal ASCII engines
 

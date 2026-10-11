@@ -8,6 +8,8 @@ third-party artwork or generated binary data.
 | --- | --- | ---: |
 | `player_warrior.txt` | Player/warrior volumetric animation | 4 |
 | `monster_mossling.txt` | Mossling monster volumetric animation | 4 |
+| `skeleton.txt` | Pale skeletal undead animation (reference bone-white idiom) | 4 |
+| `skeleton_warrior.txt` | Shield-and-blade skeleton warrior animation | 4 |
 | `npc_herbalist.txt` | NPC fallback animation | 4 |
 | `tree.txt` | Forest prop animated wind sway | 2 |
 | `ruin.txt` | Ruin prop weathered stone animation | 2 |
