@@ -681,3 +681,47 @@ To elevate the visual aesthetic of the client from basic plain-text footer rows 
 5. **High-Performance Buffer Serializer (`buffer_to_ansi`)**:
    - Traverses Ratatui `Buffer` cells and emits delta ANSI attribute sequences (`\x1b[38;2;...m`, `\x1b[1m`, `\x1b[0m`) only on style transitions, fully compatible with Windows ConPTY, Notcurses, and differential dirty-line terminal blitters.
 
+## 22. Procedural 3D Character Models & Entity Dispatch
+
+### 22.1 High-Detail Procedural Character Geometry (`client/src/gpu/mesh.rs`)
+To eliminate generic boxy representations and deliver visually stunning characters across the 3D GPU graphics pipeline, high-fidelity procedural meshes were authored with dedicated anatomical sculpting, micro-insets, materials, and roughness properties:
+
+1. **Player Knight (`MeshBuffer::add_humanoid`)**:
+   - **Greathelm & Brow Diadem**: Steel helmet with golden brow band, cheek guards, dark gorget neck collar, and cyan enchanted visor slit ($[0.35, 0.90, 1.0]$) with material glow.
+   - **Knight Plume**: Swept crest in royal crimson with gilded trim.
+   - **Cuirass & Faulds**: Sculpted peascod breastplate with medial ridge, gilded heraldic eagle/cross inlay, oiled leather belt with golden buckle, and segmented fauld tassets.
+   - **Layered Pauldrons**: Multi-tiered spiked shoulder armor with gilded crest accents.
+   - **Flowing Cape**: Royal crimson cloak articulated with subtle physics-driven sway.
+   - **Articulated Limbs**: Cuisses with knee poleyns, shin greaves, and fluted sabatons (boots) with stationary idle support.
+   - **Armament**: Gilded heater shield with heraldic cross and broadsword with fuller groove, swept quillons, wire-wrapped hilt, and octagonal pommel stone.
+
+2. **Skeletal Undead (`MeshBuffer::add_skeleton`)**:
+   - **Cranium & Sockets**: Bleached ivory skull with hollow eye sockets illuminated by glowing ember soul glints ($[1.0, 0.35, 0.15]$), maxilla, and bared jaw.
+   - **Skeletal Anatomy**: Cervical vertebrae, thoracic ribcage with hollow cavity shading, spine column, pelvic basin, and spindly jointed leg bones with shambling stride.
+   - **Armament**: Notched rusted scimitar with aged steel blade and crossguard.
+
+3. **Skeleton Champion Warrior (`MeshBuffer::add_skeleton_warrior`)**:
+   - **Horned Spangenhelm**: Iron combat helm reinforced with brass trim and protruding iron horns.
+   - **Spiked Pauldrons & Hauberk**: Heavy spiked shoulder guards over tattered chainmail hauberk and breastplate fragment.
+   - **Reinforced Tower Shield**: Heavy iron-bound door shield with brass rim and central iron boss skull emblem.
+   - **Executioner's Broadsword**: Massive two-handed executioner blade with brass swept guard.
+
+4. **Mossling Forest Lurker (`MeshBuffer::add_mossling`)**:
+   - **Carapace & Spine Ridge**: Bulky layered moss carapace with bark underbelly plating and dorsal spine ridge.
+   - **Quadruped Stalker Limbs**: Muscular clawed stalker limbs with root talons and stride articulation.
+   - **Fanged Maw**: Dark mandibles with paired protruding ivory tusks.
+   - **Compound Eyes**: Multi-faceted predatory amber luminescent eyes ($[1.0, 0.82, 0.20]$).
+   - **Bioluminescent Fungal Horns**: Conical fungal horns tipped with pulsating bioluminescent spore pods ($[0.45, 0.95, 0.55]$).
+
+5. **Herbalist NPC (`MeshBuffer::add_herbalist`)**:
+   - **Scholar Robe & Cowl**: Twilight blue scholar robe with gold-embroidered hem and shadowy cowl hood.
+   - **Alchemical Satchel**: Oiled leather satchel holding twin glass flasks (crimson healing draught and cerulean mana potion).
+   - **Elderwood Staff & Lantern**: Gnarled elderwood staff holding a brass filigree lantern cage with warm organic flame flickering.
+
+### 22.2 Dynamic Entity Model Dispatch (`GpuRenderer::populate_scene`)
+In `client/src/gpu/renderer.rs`, entity rendering inspects monster identity labels instead of defaulting all hostiles to mosslings:
+- Entities containing `"warrior"` instantiate the armored `Skeleton Warrior` champion model.
+- Entities containing `"skeleton"` instantiate the agile `Skeleton` undead model.
+- Other beasts instantiate the quad-legged `Mossling` stalker model.
+- NPCs instantiate the hooded `Herbalist` model, and player entities instantiate the fully-armored `Humanoid Knight`.
+
