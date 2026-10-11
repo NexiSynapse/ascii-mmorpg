@@ -17,8 +17,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return run_line_mode();
     }
 
+    let fps = target_fps(&args);
     let address = connect_address(&args)?;
-    run_realtime(address.as_deref())
+    if args.iter().any(|arg| arg == "--notcurses") {
+        #[cfg(feature = "notcurses")]
+        {
+            return run_realtime_notcurses(address.as_deref(), fps);
+        }
+        #[cfg(not(feature = "notcurses"))]
+        {
+            return Err(
+                "--notcurses requires cargo run -p ascii-mmorpg-client --features notcurses".into(),
+            );
+        }
+    }
+    run_realtime(address.as_deref(), fps)
+}
+
+fn target_fps(args: &[String]) -> u32 {
+    if let Some(index) = args.iter().rposition(|arg| arg == "--fps") {
+        if let Some(val) = args.get(index + 1) {
+            if val == "uncapped" || val == "max" {
+                return 0;
+            }
+            if let Ok(fps) = val.parse::<u32>() {
+                return fps;
+            }
+        }
+    }
+    60
 }
 
 fn run_demo_mode() -> Result<(), Box<dyn std::error::Error>> {
@@ -69,9 +96,24 @@ fn run_line_mode() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_realtime(address: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+fn run_realtime(address: Option<&str>, fps: u32) -> Result<(), Box<dyn std::error::Error>> {
+    enable_raw_mode()?;
+    run_realtime_with_terminal(address, PlainTerminal::new(), fps)
+}
+
+#[cfg(feature = "notcurses")]
+fn run_realtime_notcurses(address: Option<&str>, fps: u32) -> Result<(), Box<dyn std::error::Error>> {
+    enable_raw_mode()?;
+    let term = ascii_mmorpg_client::NotcursesTerminal::new()?;
+    run_realtime_with_terminal(address, term, fps)
+}
+
+fn run_realtime_with_terminal<T: Terminal>(
+    address: Option<&str>,
+    mut terminal: T,
+    fps: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = address.map(ClientConnection::connect).transpose()?;
-    let mut terminal = PlainTerminal::new();
     let (width, height) = terminal.size();
     let mut renderer = Renderer {
         width: width as i16,
@@ -84,36 +126,50 @@ fn run_realtime(address: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
         }
         None => "Real-time mode: WASD/arrows move, F attacks, R rests, Q quits.".into(),
     }];
+
+    // Drain any terminal capability responses or stale escape codes from stdin
+    std::thread::sleep(Duration::from_millis(30));
+    while event::poll(Duration::ZERO)? {
+        let _ = event::read()?;
+    }
+
     terminal.draw(&renderer.render(&world))?;
 
-    enable_raw_mode()?;
     let result = realtime_loop(
         &mut terminal,
         &mut renderer,
         &mut world,
         connection.as_mut(),
+        fps,
     );
     let disable_result = disable_raw_mode();
     if let Some(connection) = connection.as_mut() {
         connection.close();
     }
-    println!();
+    use std::io::Write;
+    print!("\x1b[?25h\x1b[0m\n");
+    let _ = io::stdout().flush();
     disable_result?;
     result
 }
 
 fn realtime_loop(
-    terminal: &mut PlainTerminal,
+    terminal: &mut impl Terminal,
     renderer: &mut Renderer,
     world: &mut ascii_mmorpg_shared::WorldSnapshot,
     mut connection: Option<&mut ClientConnection>,
+    target_fps: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut tick = world.tick;
     let mut animation_frame = world.tick;
     let mut welcomed = connection.is_none();
     let mut held = [false; 4];
     let mut next_move = Instant::now();
-    loop {
+    let mut fps_count = 0u32;
+    let mut fps_timer = Instant::now();
+    let mut display_fps;
+    let mut last_draw_ms = 0.0f64;
+    'game: loop {
         let (width, height) = terminal.refresh_size();
         renderer.resize(width as i16, height.saturating_sub(5) as i16);
         let mut disconnected = false;
@@ -169,7 +225,8 @@ fn realtime_loop(
         if disconnected {
             return Ok(());
         }
-        if event::poll(Duration::from_millis(50))? {
+        let frame_start = Instant::now();
+        while event::poll(Duration::ZERO)? {
             if let Event::Key(KeyEvent { code, kind, .. }) = event::read()? {
                 let movement = match code {
                     KeyCode::Char('w') | KeyCode::Up => Some(0),
@@ -182,7 +239,7 @@ fn realtime_loop(
                     held[index] = kind != KeyEventKind::Release;
                 } else if kind == KeyEventKind::Press {
                     let input = match code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char('q') => break 'game,
                         KeyCode::Char('f') => Some("f"),
                         KeyCode::Char('r') => Some("r"),
                         _ => None,
@@ -259,7 +316,46 @@ fn realtime_loop(
         }
 
         animation_frame = animation_frame.wrapping_add(1);
+        let draw_start = Instant::now();
         terminal.draw(&renderer.render_frame(world, animation_frame))?;
+        let draw_ms = draw_start.elapsed().as_secs_f64() * 1000.0;
+        last_draw_ms = if last_draw_ms == 0.0 { draw_ms } else { last_draw_ms * 0.8 + draw_ms * 0.2 };
+
+        fps_count += 1;
+        if fps_timer.elapsed() >= Duration::from_secs(1) {
+            display_fps = fps_count;
+            fps_count = 0;
+            fps_timer = Instant::now();
+            if connection.is_none() && (world.messages.is_empty() || world.messages[0].starts_with("Real-time mode")) {
+                let target_label = if target_fps == 0 { "uncapped".to_string() } else { format!("{target_fps} target") };
+                world.messages = vec![format!(
+                    "Real-time mode: WASD/arrows move, F attacks, R rests, Q quits. [{display_fps} FPS ({target_label}) | draw: {last_draw_ms:.2}ms]"
+                )];
+            }
+        }
+
+        let target_frame = if target_fps == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_nanos(1_000_000_000 / target_fps as u64)
+        };
+
+        let frame_elapsed = frame_start.elapsed();
+        if frame_elapsed < target_frame {
+            let wait = target_frame - frame_elapsed;
+            // Sleep for the bulk of the wait to avoid pegging CPU cores
+            if wait > Duration::from_millis(6) {
+                let sleep_duration = wait - Duration::from_millis(4);
+                let _ = event::poll(sleep_duration)?;
+            }
+            // Tail yield/spin to achieve sub-millisecond timer precision on Windows
+            while frame_start.elapsed() < target_frame {
+                if event::poll(Duration::ZERO)? {
+                    break;
+                }
+                std::thread::yield_now();
+            }
+        }
     }
     Ok(())
 }

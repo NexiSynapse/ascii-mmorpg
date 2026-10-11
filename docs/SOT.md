@@ -30,7 +30,7 @@ Reference evidence is recorded in the attached analysis documents:
 - `ascii_mmorpg_reference_brief.md`
 - `ascii_mmorpg_reconstruction.md`
 
-The original rendering pipeline is unknown. This project uses a client-side hybrid approach: authored ASCII frames and procedural glyph materials now, with a future depth-aware scene/raster pipeline and optional Notcurses backend.
+The original rendering pipeline is unknown. This project uses a client-side hybrid approach: authored ASCII frames and procedural glyph materials now, with a future depth-aware scene/raster pipeline and optional Notcurses backend (evaluated in `NOTCURSES_RESEARCH_FINDINGS.md`).
 
 ## 2. Current architecture
 

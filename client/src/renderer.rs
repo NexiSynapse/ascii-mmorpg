@@ -21,15 +21,35 @@ enum Ink {
     Npc,
     Item,
     Spell,
+    #[allow(dead_code)]
     Torch,
     Text,
     Muted,
+    // Vibrant Dark MMORPG & 3D Materials
+    KnightSteel,
+    KnightGold,
+    KnightCape,
+    DropShadow,
+    CobbleRoad,
+    CobbleGlow,
+    CobbleBorder,
+    GrassMeadow,
+    GrassTorch,
+    PineTree,
+    TreeShadow,
+    TorchFlame,
+    TorchGlow,
+    Lightning,
+    LightningWhite,
+    BannerRed,
+    WoodPost,
+    FloatingDamage,
 }
 
 impl Ink {
     const fn ansi(self) -> &'static str {
         match self {
-            Self::Background => "\x1b[38;5;236m",
+            Self::Background => "\x1b[38;2;12;15;22m", // Deep midnight dark fantasy void
             Self::Stone => "\x1b[38;5;101m",
             Self::Moss => "\x1b[38;5;65m",
             Self::Foliage => "\x1b[38;5;22m",
@@ -43,6 +63,24 @@ impl Ink {
             Self::Torch => "\x1b[38;5;220m",
             Self::Text => "\x1b[38;5;252m",
             Self::Muted => "\x1b[38;5;245m",
+            Self::KnightSteel => "\x1b[38;2;225;232;240m",  // Polished steel plate
+            Self::KnightGold => "\x1b[38;2;255;210;75m",     // Golden helm crest / horns
+            Self::KnightCape => "\x1b[38;2;195;35;48m",      // Crimson battle cape
+            Self::DropShadow => "\x1b[38;2;16;20;28m",       // 3D ground drop shadow
+            Self::CobbleRoad => "\x1b[38;2;155;142;128m",    // Warm ancient cobblestone
+            Self::CobbleGlow => "\x1b[38;2;245;195;110m",    // Torchlit cobblestone
+            Self::CobbleBorder => "\x1b[38;2;85;78;70m",     // Cobblestone curb
+            Self::GrassMeadow => "\x1b[38;2;42;104;72m",     // Lush deep emerald grass
+            Self::GrassTorch => "\x1b[38;2;118;202;158m",    // Torchlit vibrant grass
+            Self::PineTree => "\x1b[38;2;40;95;80m",         // Frosty pine needles
+            Self::TreeShadow => "\x1b[38;2;12;20;16m",       // Tree base drop shadow
+            Self::TorchFlame => "\x1b[38;2;255;95;25m",      // Blazing orange flame
+            Self::TorchGlow => "\x1b[38;2;255;185;55m",      // Radiant amber halo
+            Self::Lightning => "\x1b[38;2;76;201;240m",      // Electric cyan lightning bolt
+            Self::LightningWhite => "\x1b[38;2;255;255;255m",// White lightning core
+            Self::BannerRed => "\x1b[38;2;195;30;45m",       // Crimson war banner
+            Self::WoodPost => "\x1b[38;2;120;85;60m",        // Timber post
+            Self::FloatingDamage => "\x1b[38;2;255;220;50m",  // Popping combat numbers
         }
     }
 }
@@ -98,7 +136,7 @@ impl Canvas {
                 }
                 output.push(cell.glyph);
             }
-            output.push_str("\x1b[0m\n");
+            output.push_str("\x1b[0m\x1b[K\n");
         }
         output.pop();
         output
@@ -148,11 +186,11 @@ impl Renderer {
 
         let mut output = canvas.rows();
         output.push_str(&format!(
-            "\n\n\x1b[38;5;252mTick {}  HP {}/{}\x1b[0m",
+            "\n\n\x1b[38;5;252mTick {}  HP {}/{}\x1b[0m\x1b[K",
             world.tick, world.player.stats.hp, world.player.stats.max_hp
         ));
         for message in &world.messages {
-            output.push_str(&format!("\n\x1b[38;5;245m{message}\x1b[0m"));
+            output.push_str(&format!("\n\x1b[38;5;245m{message}\x1b[0m\x1b[K"));
         }
         output
     }
@@ -175,16 +213,52 @@ impl Renderer {
                     .map(|(tx, ty)| (wx - tx).abs() + (wy - ty).abs())
                     .min()
                     .unwrap_or(i16::MAX);
-                let (glyph, ink) = if torch_distance <= 2 {
-                    match patch {
-                        0 => ('·', Ink::Torch),
-                        1 | 2 => ('.', Ink::Muted),
-                        _ => (' ', Ink::Background),
+
+                let (glyph, ink) = if torch_distance <= 1 {
+                    // Blazing torch/lantern core
+                    match patch % 3 {
+                        0 => ('*', Ink::TorchFlame),
+                        1 => ('^', Ink::TorchGlow),
+                        _ => ('.', Ink::CobbleGlow),
+                    }
+                } else if torch_distance <= 3 {
+                    // Radial warm amber illumination on road & grass
+                    if path {
+                        match patch % 4 {
+                            0 => ('0', Ink::CobbleGlow),
+                            1 => ('o', Ink::CobbleGlow),
+                            2 => ('8', Ink::CobbleGlow),
+                            _ => ('.', Ink::CobbleGlow),
+                        }
+                    } else {
+                        match patch % 4 {
+                            0 => ('"', Ink::GrassTorch),
+                            1 => ('\'', Ink::GrassTorch),
+                            2 => ('|', Ink::GrassTorch),
+                            _ => ('.', Ink::GrassMeadow),
+                        }
                     }
                 } else if path {
-                    match patch {
-                        0 | 1 => ('.', Ink::Stone),
-                        2 => (':', Ink::Muted),
+                    // Ancient textured cobblestone highway with stone curbs
+                    let road_col = (wx - wy / 3).rem_euclid(13);
+                    if road_col == 0 || road_col == 2 {
+                        (if road_col == 0 { '/' } else { '\\' }, Ink::CobbleBorder)
+                    } else {
+                        match patch % 5 {
+                            0 => ('0', Ink::CobbleRoad),
+                            1 => ('o', Ink::CobbleRoad),
+                            2 => ('8', Ink::CobbleRoad),
+                            3 => ('%', Ink::CobbleRoad),
+                            _ => ('.', Ink::CobbleBorder),
+                        }
+                    }
+                } else if torch_distance <= 6 {
+                    // Ambient twilight meadow grass blades
+                    match patch % 5 {
+                        0 => ('"', Ink::GrassMeadow),
+                        1 => ('\'', Ink::GrassMeadow),
+                        2 => (',', Ink::GrassMeadow),
+                        3 => ('|', Ink::GrassMeadow),
                         _ => (' ', Ink::Background),
                     }
                 } else {
@@ -194,18 +268,23 @@ impl Renderer {
             }
         }
 
+        // 3D Pine Trees with ground foundation shadows
         for (x, y) in [(-10, -1), (12, -3), (-7, 8), (15, 9)] {
             let screen = self.screen_position(ascii_mmorpg_shared::Point { x, y }, camera);
+            canvas.text(screen.0 - 4, screen.1 + 3, "( _____ )", Ink::TreeShadow);
             self.draw_asset(
                 canvas,
                 assets.prop(PropKind::Tree, 0),
                 screen.0 - 3,
                 screen.1 - 2,
-                Ink::Foliage,
+                Ink::PineTree,
             );
         }
+
+        // Ancient Stone Ruins
         for (x, y) in [(-2, -5), (9, 7)] {
             let screen = self.screen_position(ascii_mmorpg_shared::Point { x, y }, camera);
+            canvas.text(screen.0 - 4, screen.1 + 3, "( _____ )", Ink::TreeShadow);
             self.draw_asset(
                 canvas,
                 assets.prop(PropKind::Ruin, 0),
@@ -214,6 +293,8 @@ impl Renderer {
                 Ink::Stone,
             );
         }
+
+        // Medieval Stone Gate
         let gate = self.screen_position(ascii_mmorpg_shared::Point { x: 2, y: -8 }, camera);
         self.draw_asset(
             canvas,
@@ -222,18 +303,33 @@ impl Renderer {
             gate.1 - 4,
             Ink::Stone,
         );
+
+        // Hanging Crimson War Banners
+        for (x, y) in [(-8, 3), (8, -3)] {
+            let screen = self.screen_position(ascii_mmorpg_shared::Point { x, y }, camera);
+            canvas.set(screen.0, screen.1, '|', Ink::WoodPost);
+            canvas.set(screen.0, screen.1 + 1, '▓', Ink::BannerRed);
+            canvas.set(screen.0, screen.1 + 2, '▼', Ink::BannerRed);
+        }
+
+        // Dense Wild Grass Clumps
         for (x, y) in [(-14, 4), (-11, 5), (4, 10), (11, 3), (17, 6)] {
             let screen = self.screen_position(ascii_mmorpg_shared::Point { x, y }, camera);
-            canvas.set(screen.0, screen.1, '|', Ink::Foliage);
-            canvas.set(screen.0 - 1, screen.1 + 1, '/', Ink::Foliage);
-            canvas.set(screen.0 + 1, screen.1 + 1, '\\', Ink::Foliage);
+            canvas.set(screen.0, screen.1, '|', Ink::GrassTorch);
+            canvas.set(screen.0 - 1, screen.1 + 1, '/', Ink::GrassMeadow);
+            canvas.set(screen.0 + 1, screen.1 + 1, '\\', Ink::GrassMeadow);
             canvas.set(screen.0, screen.1 + 1, '"', Ink::Moss);
         }
 
+        // Timber Lantern Posts with radiating amber light
         for (x, y) in [(-6, 2), (6, -4)] {
             let screen = self.screen_position(ascii_mmorpg_shared::Point { x, y }, camera);
-            canvas.set(screen.0, screen.1, '*', Ink::Torch);
-            canvas.set(screen.0, screen.1 + 1, '|', Ink::Muted);
+            canvas.set(screen.0, screen.1, '*', Ink::TorchFlame);
+            canvas.set(screen.0 - 1, screen.1, 'r', Ink::WoodPost);
+            canvas.set(screen.0 - 1, screen.1 + 1, '|', Ink::WoodPost);
+            canvas.set(screen.0 - 1, screen.1 + 2, '|', Ink::WoodPost);
+            canvas.set(screen.0 + 1, screen.1, '·', Ink::TorchGlow);
+            canvas.set(screen.0, screen.1 + 1, '·', Ink::TorchGlow);
         }
 
         self.draw_rain(canvas, frame);
@@ -301,6 +397,8 @@ impl Renderer {
         let origin = self.screen_position(world.player.position, world.player.position);
         let target = self.screen_position(target, world.player.position);
         let steps = (target.0 - origin.0).abs().max((target.1 - origin.1).abs());
+        
+        // Base spell beam (guarantees Ink::Spell \x1b[38;5;153m for compatibility)
         for step in 1..steps {
             let x = origin.0 + (target.0 - origin.0) * step / steps;
             let y = origin.1 + (target.1 - origin.1) * step / steps;
@@ -309,6 +407,34 @@ impl Renderer {
             }
         }
         canvas.set(target.0, target.1, '+', Ink::Spell);
+
+        // Lightning arc cracking from the sky above target
+        let bolt_x = target.0;
+        let bolt_y = target.1;
+        for offset in 1..=4 {
+            let lx = bolt_x + if offset % 2 == 0 { -1 } else { 1 };
+            let ly = bolt_y - offset;
+            let glyph = if offset % 2 == 0 { '/' } else { '\\' };
+            canvas.set(lx, ly, glyph, if offset == 1 { Ink::LightningWhite } else { Ink::Lightning });
+        }
+
+        // Fiery explosion sparks around target
+        let phase = (frame % 4) as isize;
+        for (dx, dy) in [(-2, 0), (2, 0), (0, -1), (0, 1), (-1, -1), (1, 1)] {
+            let px = target.0 + dx + (phase % 2) - 1;
+            let py = target.1 + dy;
+            let ember = match (dx + dy + phase).rem_euclid(3) {
+                0 => '*',
+                1 => '#',
+                _ => '%',
+            };
+            canvas.set(px, py, ember, Ink::TorchFlame);
+        }
+
+        // Floating combat damage indicator
+        if active_message {
+            canvas.text(target.0 - 2, target.1 - 4, "91", Ink::FloatingDamage);
+        }
     }
 
     fn draw_actor(
@@ -333,10 +459,22 @@ impl Renderer {
             .map(|line| line.trim_end_matches('\r').chars().count())
             .max()
             .unwrap_or(1) as isize;
-        canvas.set(x, y + 2, '.', Ink::Muted);
-        self.draw_asset(canvas, artwork, x - artwork_width / 2, y - 2, ink);
-        // Keep the server-provided glyph visible as a compact identity cue,
-        // while the authored asset supplies the silhouette around it.
+
+        // 3D ground drop shadow under character
+        canvas.set(x - 2, y + 3, '(', Ink::DropShadow);
+        canvas.set(x - 1, y + 3, '_', Ink::DropShadow);
+        canvas.set(x, y + 3, '_', Ink::DropShadow);
+        canvas.set(x + 1, y + 3, '_', Ink::DropShadow);
+        canvas.set(x + 2, y + 3, ')', Ink::DropShadow);
+
+        if actor.kind == EntityKind::Player {
+            // Authentic Skyrim / Elden Ring knight plate armor with golden trim and crimson cape
+            self.draw_player_knight(canvas, artwork, x - artwork_width / 2, y - 2);
+        } else {
+            self.draw_asset(canvas, artwork, x - artwork_width / 2, y - 2, ink);
+        }
+
+        // Keep the server-provided glyph visible as a compact identity cue
         canvas.set(x, y, actor.glyph, ink);
 
         let label_x = x - actor.name.chars().count() as isize / 2;
@@ -346,6 +484,28 @@ impl Renderer {
         let filled = (hp * 8 / max_hp) as usize;
         let bar = format!("[{}{}]", "#".repeat(filled), "-".repeat(8 - filled));
         canvas.text(x - 5, y - 3, &bar, Ink::Muted);
+    }
+
+    fn draw_player_knight(&self, canvas: &mut Canvas, artwork: &str, x: isize, y: isize) {
+        for (row, line) in artwork.lines().enumerate() {
+            for (column, glyph) in line.trim_end_matches('\r').chars().enumerate() {
+                if glyph.is_whitespace() {
+                    continue;
+                }
+                let px = x + column as isize;
+                let py = y + row as isize;
+                let ink = match glyph {
+                    '▲' | '^' => Ink::KnightGold,       // Golden crest / horns
+                    '▓' | '8' | '[' | ']' => Ink::KnightSteel, // Gleaming plate armor
+                    '|' | '<' | '>' | '(' | ')' if row <= 3 => Ink::KnightSteel,
+                    '/' | '\\' if column <= 1 || column >= 5 => Ink::KnightCape, // Crimson cape edges
+                    '/' | '\\' => Ink::KnightSteel,      // Steel greaves / arms
+                    '_' => Ink::DropShadow,              // Ground shadow
+                    _ => Ink::Player,
+                };
+                canvas.set(px, py, glyph, ink);
+            }
+        }
     }
 
     fn screen_position(
