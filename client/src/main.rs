@@ -71,11 +71,11 @@ fn target_fps(args: &[String]) -> u32 {
 fn run_demo_mode() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = PlainTerminal::new();
     let (width, height) = terminal.size();
-    let renderer = Renderer {
-        width: width as i16,
-        height: height.saturating_sub(6) as i16,
-        weather: WeatherMode::Rain,
-    };
+    let renderer = Renderer::new(
+        width as i16,
+        height.saturating_sub(6) as i16,
+    )
+    .with_weather(WeatherMode::Rain);
     let mut world = sample_world();
     world.messages =
         vec!["Finite glyph-scene demo: authored frames, ruins, rain, and spell trail.".into()];
@@ -143,11 +143,11 @@ fn connect_address(args: &[String]) -> Result<Option<String>, String> {
 fn run_line_mode() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = PlainTerminal::new();
     let (width, height) = terminal.size();
-    let renderer = Renderer {
-        width: width as i16,
-        height: (height.saturating_sub(5)) as i16,
-        weather: WeatherMode::Rain,
-    };
+    let renderer = Renderer::new(
+        width as i16,
+        (height.saturating_sub(5)) as i16,
+    )
+    .with_weather(WeatherMode::Rain);
     let mut world = sample_world();
     terminal.draw(&renderer.render(&world))?;
     println!("Commands are local in alpha; networking is available through the server protocol.");

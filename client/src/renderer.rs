@@ -134,7 +134,7 @@ impl Ink {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Cell {
     glyph: char,
     ink: Ink,
@@ -225,6 +225,14 @@ pub struct Renderer {
     pub width: i16,
     pub height: i16,
     pub weather: WeatherMode,
+    pub last_player_pos: std::cell::Cell<Option<ascii_mmorpg_shared::Point>>,
+    pub last_move_instant: std::cell::Cell<Option<std::time::Instant>>,
+}
+
+impl Default for Renderer {
+    fn default() -> Self {
+        Self::new(80, 24)
+    }
 }
 
 impl Renderer {
@@ -233,6 +241,8 @@ impl Renderer {
             width: width.max(1),
             height: height.max(1),
             weather: WeatherMode::Rain,
+            last_player_pos: std::cell::Cell::new(None),
+            last_move_instant: std::cell::Cell::new(None),
         }
     }
 
@@ -252,6 +262,44 @@ impl Renderer {
     pub fn resize(&mut self, width: i16, height: i16) {
         self.width = width.max(1);
         self.height = height.max(1);
+    }
+
+    /// Evaluates whether the player is currently walking based on recent position changes
+    /// within a 280ms stride window, returning true if in active motion.
+    /// When the player is stationary (idle), returns false so feet remain firmly planted on the ground.
+    pub fn is_player_walking(&self, world: &WorldSnapshot) -> bool {
+        if !world.player.stats.is_alive() {
+            return false;
+        }
+
+        let current_pos = world.player.position;
+        let now = std::time::Instant::now();
+        let last_pos = self.last_player_pos.get();
+
+        let moved = match last_pos {
+            Some(last) => last != current_pos,
+            None => false,
+        };
+
+        if moved {
+            self.last_player_pos.set(Some(current_pos));
+            self.last_move_instant.set(Some(now));
+        } else if last_pos.is_none() {
+            self.last_player_pos.set(Some(current_pos));
+        }
+
+        self.last_move_instant
+            .get()
+            .is_some_and(|t| now.duration_since(t).as_millis() < 280)
+    }
+
+    /// Overrides movement state for unit tests or deterministic replay.
+    pub fn set_player_walking_for_test(&self, walking: bool) {
+        if walking {
+            self.last_move_instant.set(Some(std::time::Instant::now()));
+        } else {
+            self.last_move_instant.set(None);
+        }
     }
 
     pub fn render(&self, world: &WorldSnapshot) -> String {
@@ -313,14 +361,24 @@ impl Renderer {
             claimed.push(row + 1);
             label_rows.push(row);
         }
+        let is_walking = self.is_player_walking(world);
         for (actor, label_row) in actors.iter().zip(label_rows) {
+            let actor_frame = if actor.kind == EntityKind::Player {
+                if is_walking {
+                    frame
+                } else {
+                    0 // Stationary idle posture: feet firmly planted side-by-side
+                }
+            } else {
+                frame
+            };
             self.draw_actor(
                 &mut canvas,
                 &assets,
                 actor,
                 world.player.position,
                 label_row,
-                frame,
+                actor_frame,
             );
             if actor.kind == EntityKind::Monster && actor.stats.is_alive() {
                 let (x, y) = self.screen_position(actor.position, world.player.position);
@@ -1164,11 +1222,7 @@ mod tests {
 
     #[test]
     fn frame_output_is_deterministic_for_same_tick() {
-        let renderer = Renderer {
-            width: 32,
-            height: 14,
-            weather: WeatherMode::Rain,
-        };
+        let renderer = Renderer::new(32, 14).with_weather(WeatherMode::Rain);
         let world = scene_world();
         assert_eq!(
             renderer.render_frame(&world, 4),
@@ -1178,11 +1232,7 @@ mod tests {
 
     #[test]
     fn scene_contains_entity_metadata_visuals_labels_bars_and_effect() {
-        let renderer = Renderer {
-            width: 32,
-            height: 14,
-            weather: WeatherMode::Rain,
-        };
+        let renderer = Renderer::new(32, 14).with_weather(WeatherMode::Rain);
         let frame = renderer.render_frame(&scene_world(), 4);
         assert!(frame.contains("Ranger"));
         assert!(frame.contains("Mossling"));
@@ -1196,11 +1246,7 @@ mod tests {
 
     #[test]
     fn weather_shader_snow_and_storm_modes_render_distinct_overlays() {
-        let mut renderer = Renderer {
-            width: 40,
-            height: 18,
-            weather: WeatherMode::Snow,
-        };
+        let mut renderer = Renderer::new(40, 18).with_weather(WeatherMode::Snow);
         let world = scene_world();
         let snow_frame = renderer.render_frame(&world, 4);
         assert!(snow_frame.contains('*') || snow_frame.contains('·'));
@@ -1218,11 +1264,7 @@ mod tests {
 
     #[test]
     fn animation_phase_changes_frame_without_changing_snapshot() {
-        let renderer = Renderer {
-            width: 32,
-            height: 14,
-            weather: WeatherMode::Rain,
-        };
+        let renderer = Renderer::new(32, 14).with_weather(WeatherMode::Rain);
         let world = scene_world();
         let first = renderer.render_frame(&world, 0);
         let second = renderer.render_frame(&world, 1);
@@ -1233,11 +1275,7 @@ mod tests {
 
     #[test]
     fn player_camera_keeps_player_fixed_and_scrolls_mob() {
-        let renderer = Renderer {
-            width: 40,
-            height: 20,
-            weather: WeatherMode::Rain,
-        };
+        let renderer = Renderer::new(40, 20).with_weather(WeatherMode::Rain);
         let mut world = scene_world();
         let before = renderer.render_frame(&world, 4);
         crate::apply_local_command(
@@ -1283,11 +1321,7 @@ mod tests {
 
     #[test]
     fn rendering_does_not_mutate_authoritative_snapshot() {
-        let renderer = Renderer {
-            width: 32,
-            height: 14,
-            weather: WeatherMode::Rain,
-        };
+        let renderer = Renderer::new(32, 14).with_weather(WeatherMode::Rain);
         let world = scene_world();
         let snapshot_before = world.clone();
         let _ = renderer.render_frame(&world, 12);
@@ -1309,11 +1343,7 @@ mod tests {
 
     #[test]
     fn damage_number_comes_from_messages_not_a_placeholder() {
-        let renderer = Renderer {
-            width: 32,
-            height: 14,
-            weather: WeatherMode::Rain,
-        };
+        let renderer = Renderer::new(32, 14).with_weather(WeatherMode::Rain);
         let frame = renderer.render_frame(&scene_world(), 4);
         assert!(!frame.contains("91"));
         assert!(frame.contains('3'));
@@ -1357,11 +1387,7 @@ mod tests {
 
     #[test]
     fn oblique_camera_shifts_world_by_exact_pixels() {
-        let renderer = Renderer {
-            width: 40,
-            height: 20,
-            weather: WeatherMode::Rain,
-        };
+        let renderer = Renderer::new(40, 20).with_weather(WeatherMode::Rain);
         let origin = Point { x: 0, y: 0 };
         let before = renderer.screen_position(Point { x: -14, y: 5 }, origin);
         let after = renderer.screen_position(Point { x: -14, y: 5 }, Point { x: 1, y: 0 });
@@ -1373,11 +1399,7 @@ mod tests {
     fn scattered_props_are_world_locked_when_camera_moves() {
         use crate::assets::AssetLibrary;
 
-        let renderer = Renderer {
-            width: 40,
-            height: 20,
-            weather: WeatherMode::Rain,
-        };
+        let renderer = Renderer::new(40, 20).with_weather(WeatherMode::Rain);
         let assets = AssetLibrary::new();
         // Backdrop only: no actors, weather, or veil, so every remaining
         // prop-ink cell must be perfectly world-locked.
@@ -1439,11 +1461,7 @@ mod tests {
         ] {
             assert_eq!(Renderer::dim_ink(ink), ink);
         }
-        let renderer = Renderer {
-            width: 40,
-            height: 20,
-            weather: WeatherMode::Rain,
-        };
+        let renderer = Renderer::new(40, 20).with_weather(WeatherMode::Rain);
         let canvas = renderer.render_canvas(&scene_world(), 4);
         // Player anchor at the center keeps full brightness.
         assert_eq!(canvas.get(20, 10).glyph, '@');
@@ -1492,11 +1510,7 @@ mod tests {
             ("warrior", warrior_world),
         ];
         for (name, world) in &scenes {
-            let renderer = Renderer {
-                width: 80,
-                height: 40,
-                weather: WeatherMode::Rain,
-            };
+            let renderer = Renderer::new(80, 40).with_weather(WeatherMode::Rain);
             let frame = renderer.render_frame(world, 4);
             std::fs::write(dir.join(format!("{name}.ansi.txt")), frame).unwrap();
         }
@@ -1504,11 +1518,7 @@ mod tests {
 
     #[test]
     fn overlapping_actors_keep_distinct_label_rows() {
-        let renderer = Renderer {
-            width: 60,
-            height: 24,
-            weather: WeatherMode::Rain,
-        };
+        let renderer = Renderer::new(60, 24).with_weather(WeatherMode::Rain);
         let mut world = scene_world();
         world.entities.push(ActorSnapshot {
             id: 3,
@@ -1541,11 +1551,7 @@ mod tests {
 
     #[test]
     fn frame_background_dominates_scene() {
-        let renderer = Renderer {
-            width: 80,
-            height: 40,
-            weather: WeatherMode::Rain,
-        };
+        let renderer = Renderer::new(80, 40).with_weather(WeatherMode::Rain);
         let canvas = renderer.render_canvas(&scene_world(), 4);
         let total = (canvas.width * canvas.height) as f64;
         let dark = canvas
@@ -1561,11 +1567,7 @@ mod tests {
 
     #[test]
     fn still_scene_cells_do_not_shimmer_between_frames() {
-        let renderer = Renderer {
-            width: 40,
-            height: 20,
-            weather: WeatherMode::Rain,
-        };
+        let renderer = Renderer::new(40, 20).with_weather(WeatherMode::Rain);
         let world = scene_world();
         // Same animation frame index (4 % 4 == 8 % 4) so authored art is
         // identical; only weather is allowed to move still-air cells.
@@ -1595,5 +1597,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_cpu_player_feet_do_not_move_when_idle() {
+        let renderer = Renderer::new(40, 20).with_weather(WeatherMode::Rain);
+        let world = scene_world();
+        // Stationary player is idle: feet must remain in Frame 0 pose across frames
+        assert!(!renderer.is_player_walking(&world), "Stationary player should be idle");
+        let canvas0 = renderer.render_canvas(&world, 0);
+        let canvas1 = renderer.render_canvas(&world, 1);
+        let canvas3 = renderer.render_canvas(&world, 3);
+        let (px, py) = renderer.screen_position(world.player.position, world.player.position);
+        // Boots are at py + 1. Left boot: px - 1, Right boot: px + 1
+        assert_eq!(
+            canvas0.get(px - 1, py + 1),
+            canvas1.get(px - 1, py + 1),
+            "Boots must stay planted between frame 0 and 1 while idle"
+        );
+        assert_eq!(
+            canvas0.get(px - 1, py + 1),
+            canvas3.get(px - 1, py + 1),
+            "Boots must stay planted between frame 0 and 3 while idle"
+        );
     }
 }

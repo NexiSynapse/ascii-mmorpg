@@ -67,11 +67,22 @@ fn vs_main(in: VertexInput, inst: InstanceInput) -> VertexOutput {
         inst.model_col2,
         inst.model_col3,
     );
-    let world_pos4 = model * vec4<f32>(in.position, 1.0);
+    var world_pos4 = model * vec4<f32>(in.position, 1.0);
+    let mat_id = select(in.material_id, inst.instance_material.x, inst.instance_material.x >= 0.0);
+
+    // Procedural wind sway for foliage (material_id == 3.0: pine needles, leaves, canopies)
+    // Anchors tree base/ground while allowing elevated canopy cones and boughs to oscillate
+    if (mat_id >= 2.8 && mat_id <= 3.2 && world_pos4.y > 0.8) {
+        let wind_intensity = min((world_pos4.y - 0.8) * 0.045, 0.18);
+        let sway = sin(camera.time * 2.4 + world_pos4.x * 0.65 + world_pos4.z * 0.45) * wind_intensity;
+        world_pos4.x += sway;
+        world_pos4.z += sway * 0.45;
+    }
+
     out.world_pos = world_pos4.xyz;
     out.world_normal = normalize((model * vec4<f32>(in.normal, 0.0)).xyz);
     out.color = in.color * inst.instance_color;
-    out.material_id = select(in.material_id, inst.instance_material.x, inst.instance_material.x >= 0.0);
+    out.material_id = mat_id;
     out.roughness = select(in.roughness, inst.instance_material.y, inst.instance_material.y >= 0.0);
     out.clip_position = camera.view_proj * world_pos4;
     return out;

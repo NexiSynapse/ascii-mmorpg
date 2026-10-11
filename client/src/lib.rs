@@ -520,12 +520,9 @@ mod tests {
 
     #[test]
     fn renderer_places_player_and_status() {
-        let frame = Renderer {
-            width: 5,
-            height: 5,
-            weather: WeatherMode::Rain,
-        }
-        .render(&sample_world());
+        let frame = Renderer::new(5, 5)
+            .with_weather(WeatherMode::Rain)
+            .render(&sample_world());
         assert!(frame.lines().nth(2).unwrap().contains('@'));
         assert!(frame.contains("HP 20/20"));
     }
