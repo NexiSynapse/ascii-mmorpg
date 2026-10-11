@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Source of truth
-- `docs/SOT.md` is authoritative for what exists. `docs/PROJECT_PLAN.md` is direction, not done work. `README.md` is the runnable overview.
+- `docs/SOT.md` is authoritative for what exists. `docs/EXTERNAL_AGENT_EXPLAINER.md` is the comprehensive architecture, pipeline, quality, and animation explainer for external agents. `docs/PROJECT_PLAN.md` is direction, not done work. `README.md` is the runnable overview.
 - ADRs in `docs/adr/`: 0001 protocol, 0002 fixed-tick (stale: says 10 Hz single-client), 0003 ANSI fallback, 0004 alpha boundaries.
 - If docs conflict with code/config, trust code.
 
