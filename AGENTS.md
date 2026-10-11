@@ -52,7 +52,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 - `play_wezterm*.bat` locate WezTerm via `%WEZTERM_EXE%`, then `where wezterm-gui.exe`, then `%ProgramFiles%` / `%LOCALAPPDATA%` install dirs; they must keep targeting `wezterm-gui.exe start --always-new-process` (wrapper `wezterm.exe` detaches early → error 10054).
 - All `.bat` launchers default `--fps uncapped`.
 
-## wgpu hardware rendering (`gpu` default, `wgpu-scene` alias)
+## GPU rendering (Path C, `gpu` default, `wgpu-scene` alias)
 - Flags: `--wgpu` (explicit realtime 3D hardware offscreen pipeline, combines with `--connect`/`--fps`/`--notcurses`), `--cpu` (forces CPU rasterizer fallback), `--wgpu-demo [N]` (headless benchmark reporting adapter info, frametimes, and FPS).
-- Pipeline: hardware instancing, 8 dynamic point lights, 2x SSAA quadrant sampling G-buffer, Gribb-Hartmann frustum culling, O(1) depth unprojection, and double-buffered async staging ring.
-- Verification: keep code warning-free under `cargo clippy -p ascii-mmorpg-client --all-targets -- -D warnings`.
+- Pipeline: Offscreen 3D scene + real-time compute ASCII shader (`client/src/gpu/`). Default feature: `gpu` (`wgpu`, `bytemuck`, `pollster`, `glam`). Hardware instancing, 8 dynamic point lights, 2x SSAA quadrant sampling G-buffer, Gribb-Hartmann frustum culling, O(1) depth unprojection, and asynchronous staging rings (`RING_SIZE = 2`) for high-throughput batch rendering.
+- Graceful fallback: Automatically falls back to CPU procedural renderer if GPU initialization fails, or can be forced with `--cpu`: `cargo run -p ascii-mmorpg-client -- --cpu`.
+- Verification: keep code warning-free under `cargo clippy --workspace --all-targets -- -D warnings`.
+

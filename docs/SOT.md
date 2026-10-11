@@ -525,6 +525,12 @@ The current project has repeatedly passed formatting, workspace tests, clippy wi
 - **Nameplates**: greedy nearest-free (label, bar) row slots so overlapping actors keep readable stacked labels.
 - **Metrics**: near-black fraction test (≥70%, measured 3.7% at baseline), still-air shimmer test (only weather/actor cells may change), `ASCII_DUMP=1` snapshot dumps for visual review against `data/videos/`.
 
+### 15.10 Offscreen wgpu diorama with compute ASCII pass (Initial Spike)
+- **Feature `wgpu-scene`** (`client/Cargo.toml`, alias to `gpu`): headless wgpu 3D scene (render-to-texture, no window/surface) + WGSL compute pass that reduces texel blocks to packed cell records; the CPU maps one small buffer per frame and formats ANSI through the existing `Terminal` trait (ConPTY differential path and Notcurses both work unmodified).
+- **Scene**: ground slab, gatehouse landmark, world-grid pines, lantern posts doubling as point lights, player-carried torch light with flicker, nearest entities as boxes.
+- **CLI**: `--wgpu` (realtime, honors `--connect`/`--fps`/`--notcurses`), `--wgpu-fallback` (software rasterizer), `--wgpu-demo [N]` (headless frames + timing). `WGPU_FORCE_FALLBACK=1` / `WGPU_POWER=low` env overrides for driver isolation.
+- *Note*: Fully generalized and superseded by the Path C instanced multi-buffered pipeline described in Section 18.
+
 ## 16. Depth awareness & animation techniques in terminal ASCII engines
 
 ### 16.1 Depth awareness mechanisms

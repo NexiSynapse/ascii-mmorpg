@@ -282,8 +282,8 @@ fn realtime_loop(
                             }
                             welcomed = true;
                             world.messages = vec![format!(
-                                    "Connected as player {player_id}. Awaiting authoritative snapshots."
-                                )];
+                                "Connected as player {player_id}. Awaiting authoritative snapshots."
+                            )];
                         }
                         ServerEvent::Snapshot(snapshot) => *world = snapshot,
                         ServerEvent::Error(message) => {

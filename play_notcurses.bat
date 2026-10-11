@@ -1,24 +1,19 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-
 rem --- Locate MSYS2 UCRT64 runtime (override with MSYS2_ROOT if installed elsewhere) ---
 if not defined MSYS2_ROOT set "MSYS2_ROOT=C:\msys64"
-if exist "%MSYS2_ROOT%\ucrt64\bin" (
-  set "PATH=%MSYS2_ROOT%\ucrt64\bin;%MSYS2_ROOT%\usr\bin;%PATH%"
-  set "PKG_CONFIG_PATH=%MSYS2_ROOT%\ucrt64\lib\pkgconfig"
-  set "LIBCLANG_PATH=%MSYS2_ROOT%\ucrt64\bin"
-) else (
-  if exist "C:\tools\msys64\ucrt64\bin" (
-    set "PATH=C:\tools\msys64\ucrt64\bin;C:\tools\msys64\usr\bin;%PATH%"
-    set "PKG_CONFIG_PATH=C:\tools\msys64\ucrt64\lib\pkgconfig"
-    set "LIBCLANG_PATH=C:\tools\msys64\ucrt64\bin"
-  ) else (
-    echo WARNING: MSYS2 UCRT64 runtime not found; notcurses DLLs may fail to load.
-    echo Set MSYS2_ROOT to your MSYS2 install dir if it is not C:\msys64.
-  )
+if not exist "%MSYS2_ROOT%\ucrt64\bin" (
+  if exist "C:\tools\msys64\ucrt64\bin" set "MSYS2_ROOT=C:\tools\msys64"
 )
+set "PATH=%MSYS2_ROOT%\ucrt64\bin;%MSYS2_ROOT%\usr\bin;%PATH%"
+set "PKG_CONFIG_PATH=%MSYS2_ROOT%\ucrt64\lib\pkgconfig"
 set "PKG_CONFIG_ALLOW_CROSS=1"
+set "LIBCLANG_PATH=%MSYS2_ROOT%\ucrt64\bin"
+if not exist "%MSYS2_ROOT%\ucrt64\bin" (
+  echo WARNING: MSYS2 UCRT64 runtime not found; notcurses DLLs may fail to load.
+  echo Set MSYS2_ROOT to your MSYS2 install dir if it is not C:\msys64.
+)
 chcp 65001 >nul
 
 title ASCII MMORPG - Notcurses Native Demo (Optimized)
