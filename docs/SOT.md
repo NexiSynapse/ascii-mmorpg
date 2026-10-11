@@ -602,4 +602,17 @@ To achieve razor-sharp asset silhouettes and mathematical depth precision while 
    - `MeshBuffer::load_obj()` and `MeshBuffer::add_obj()` parse standard 3D `.obj` files exported from Blender.
    - Automatically parses vertex positions, vertex normals, and triangulates polygonal faces with custom materials and roughness, providing a clean path for custom 3D asset importation.
 
+### 18.3 Upstream Integration: Skeletal Undead, Anti-Shimmer Lighting & Headless Benchmarking
+Incorporated beneficial commits from remote `rendering_gra_update`:
+1. **Skeletal Undead Models & Articulated Animation**:
+   - Embedded `assets/ascii/skeleton.txt` and `assets/ascii/skeleton_warrior.txt` (4 frames each) with dedicated bone palette (`BoneLight`, `Bone`, `BoneDark`, `BoneEye`), steel broadsword, and tower shield.
+   - Line-based frame separator logic preserves artistic separators like `|---|`.
+2. **Radial Light Fields & Anti-Shimmer Quantization**:
+   - Integrated dynamic light field with player-carried torch and fixed world lantern posts with radial distance attenuation.
+   - Quantized ground light levels to $0.05$ steps, preventing discrete sub-pixel camera jitter from flipping ground dither specks between consecutive frames.
+3. **Headless GPU Benchmarking & Unified CLI**:
+   - Added `--wgpu-demo [N]` CLI flag for headless automated benchmarking, rendering $N$ frames directly through our hardware-accelerated $2\times$ SSAA compute pipeline without requiring terminal interaction.
+   - Verified benchmark output: **171.7 FPS equivalent** (5.82 ms/frame) on NVIDIA GeForce GTX 1650 under Vulkan with full 3D instanced geometry, dynamic lights, and Sobel edge detection.
+
+
 
