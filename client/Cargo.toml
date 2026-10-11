@@ -8,6 +8,7 @@ rust-version.workspace = true
 [features]
 default = ["gpu"]
 gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster", "dep:glam"]
+wgpu-scene = ["gpu"]
 notcurses = ["dep:notcurses"]
 
 [dependencies]

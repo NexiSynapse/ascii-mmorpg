@@ -205,7 +205,8 @@ mod tests {
         assert_ne!(warrior.frame(0), skeleton.frame(0));
         let mossling = library.entity_asset(&EntityKind::Monster, "Mossling");
         assert_eq!(mossling.name(), "monster-mossling");
-        assert!(mossling.frame(0).contains("(^^)"));
+        assert_eq!(mossling.frame_count(), 4);
+        assert!(mossling.frame(0).contains("(^^^^)"));
     }
 
     #[test]

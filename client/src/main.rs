@@ -13,13 +13,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|arg| arg == "--demo") {
         return run_demo_mode();
     }
+    if args.iter().any(|arg| arg == "--wgpu-demo") {
+        return run_wgpu_demo(&args);
+    }
     if args.iter().any(|arg| arg == "--line") {
         return run_line_mode();
     }
 
     let fps = target_fps(&args);
     let weather = weather_mode(&args);
-    let force_cpu = args.iter().any(|arg| arg == "--cpu");
+    let force_cpu = args.iter().any(|arg| arg == "--cpu") && !args.iter().any(|arg| arg == "--wgpu");
     let address = connect_address(&args)?;
     if args.iter().any(|arg| arg == "--notcurses") {
         #[cfg(feature = "notcurses")]
@@ -80,6 +83,51 @@ fn run_demo_mode() -> Result<(), Box<dyn std::error::Error>> {
         terminal.draw(&renderer.render_frame(&world, frame))?;
     }
     Ok(())
+}
+
+fn run_wgpu_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let frames = args
+        .iter()
+        .position(|arg| arg == "--wgpu-demo")
+        .and_then(|index| args.get(index + 1))
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(10);
+
+    #[cfg(feature = "gpu")]
+    {
+        use ascii_mmorpg_client::gpu::GpuRenderer;
+        let mut renderer = GpuRenderer::new(80, 40, WeatherMode::Rain)
+            .map_err(|e| format!("wgpu init failed: {e}"))?;
+        let adapter_info = renderer.ctx.adapter.get_info();
+        eprintln!(
+            "adapter: {} (backend: {:?}, device_type: {:?})",
+            adapter_info.name,
+            adapter_info.backend,
+            adapter_info.device_type,
+        );
+        let world = sample_world();
+        let started = Instant::now();
+        let mut last = String::new();
+        for frame in 0..frames.max(1) {
+            last = renderer.render_frame(&world, frame);
+        }
+        let elapsed = started.elapsed();
+        let ms = elapsed.as_secs_f64() * 1000.0 / frames.max(1) as f64;
+        let fps = if ms > 0.0 { 1000.0 / ms } else { 0.0 };
+        println!("{last}");
+        eprintln!(
+            "wgpu benchmark: {} frames rendered in {:.2?} ({:.2} ms/frame, {:.1} FPS equivalent)",
+            frames.max(1),
+            elapsed,
+            ms,
+            fps,
+        );
+        Ok(())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        Err("--wgpu-demo requires cargo run -p ascii-mmorpg-client --features gpu".into())
+    }
 }
 
 fn connect_address(args: &[String]) -> Result<Option<String>, String> {
