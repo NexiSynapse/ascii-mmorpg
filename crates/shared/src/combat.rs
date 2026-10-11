@@ -1,5 +1,11 @@
 use crate::protocol::Stats;
 
+pub const MELEE_RANGE: i16 = 6;
+
+pub fn in_melee_range(a: crate::protocol::Point, b: crate::protocol::Point) -> bool {
+    (a.x - b.x).abs() + (a.y - b.y).abs() <= MELEE_RANGE
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CombatResult {
     pub damage: i32,
@@ -56,5 +62,13 @@ mod tests {
         let result = resolve_attack(&attacker, &mut defender, 0);
         assert_eq!(result.damage, 0);
         assert!(result.defeated);
+    }
+
+    #[test]
+    fn melee_range_is_shared_and_has_a_clear_boundary() {
+        use crate::protocol::Point;
+
+        assert!(in_melee_range(Point { x: 0, y: 0 }, Point { x: 6, y: 0 }));
+        assert!(!in_melee_range(Point { x: 0, y: 0 }, Point { x: 7, y: 0 }));
     }
 }

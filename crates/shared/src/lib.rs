@@ -6,7 +6,7 @@ pub mod content;
 pub mod loot;
 pub mod protocol;
 
-pub use combat::{resolve_attack, CombatResult};
+pub use combat::{in_melee_range, resolve_attack, CombatResult, MELEE_RANGE};
 pub use content::{ItemDef, SpellDef, ZoneDef};
 pub use loot::{roll_loot, LootEntry, LootTable};
 pub use protocol::*;
