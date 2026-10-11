@@ -50,3 +50,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 - `play_notcurses.bat` locates MSYS2 UCRT64 via `%MSYS2_ROOT%` (default `C:\msys64`, fallback `C:\tools\msys64`), prepends `ucrt64\bin` + `usr\bin` to `PATH`, warns instead of failing if absent, and keeps `chcp 65001`.
 - `play_wezterm*.bat` locate WezTerm via `%WEZTERM_EXE%`, then `where wezterm-gui.exe`, then `%ProgramFiles%` / `%LOCALAPPDATA%` install dirs; they must keep targeting `wezterm-gui.exe start --always-new-process` (wrapper `wezterm.exe` detaches early → error 10054).
 - All `.bat` launchers default `--fps uncapped`.
+
+## wgpu scene (`wgpu-scene` feature, opt-in)
+- Default builds never touch the GPU: `wgpu`/`pollster` are optional deps. CI (default features) is unaffected.
+- Flags: `--wgpu` (realtime 3D, combines with `--connect`/`--fps`/`--notcurses`), `--wgpu-fallback` (software rasterizer), `--wgpu-demo [N]` (headless benchmark). Env: `WGPU_FORCE_FALLBACK=1`, `WGPU_POWER=low`.
+- Keep wgpu code warning-free under `cargo clippy -p ascii-mmorpg-client --features wgpu-scene --all-targets -- -D warnings`, and keep new std API calls at or below Rust 1.70 (`div_ceil` etc. break the workspace MSRV lint) even though wgpu itself needs a modern toolchain.

@@ -7,6 +7,8 @@ use std::io::{self, Write};
 pub mod assets;
 pub mod network;
 pub mod renderer;
+#[cfg(feature = "wgpu-scene")]
+pub mod wgpu_ascii;
 pub use renderer::{Renderer, WeatherMode};
 
 pub trait Terminal {

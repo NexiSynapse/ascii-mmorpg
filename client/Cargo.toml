@@ -8,8 +8,13 @@ rust-version.workspace = true
 [features]
 default = []
 notcurses = ["dep:notcurses"]
+# Offscreen wgpu 3D scene with a compute-shader ASCII pass. Opt-in only:
+# needs a GPU (or software fallback) and stays out of default builds and CI.
+wgpu-scene = ["dep:wgpu", "dep:pollster"]
 
 [dependencies]
 ascii-mmorpg-shared = { path = "../crates/shared" }
 crossterm = "0.29"
 notcurses = { version = "3.6", optional = true }
+wgpu = { version = "30", optional = true }
+pollster = { version = "1", optional = true }

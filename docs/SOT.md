@@ -496,8 +496,7 @@ The current project has repeatedly passed formatting, workspace tests, clippy wi
   - **Winding cobblestone highway**: Softened highway curbs and road tiles (`o`, `·`, `Q`, `.`) illuminated by warm amber radiant halos from timber lantern posts (`TorchFlame`, `TorchGlow`).
   - **Gentle weather overlay pacing**: Calibrated rain and snow descent rates (`frame / 24` to `frame / 12`) to maintain smooth, tranquil ambiance even under high-framerate/uncapped rendering.
 
-### 15.9 Reference-parity graphics pass (light field, camera, sampler, effects)
-- **Skeletal undead assets**: workspace-authored `skeleton.txt` / `skeleton_warrior.txt` (4 frames each, bone palette `BoneLight`/`Bone`/`BoneDark`/`BoneEye`, steel shield and blade), selected by monster label; online ASCII collections researched but not copied (per-work licensing unclear).
+### 15.9 Reference-parity graphics pass (light field, camera, sampler, effects)- **Skeletal undead assets**: workspace-authored `skeleton.txt` / `skeleton_warrior.txt` (4 frames each, bone palette `BoneLight`/`Bone`/`BoneDark`/`BoneEye`, steel shield and blade), selected by monster label; online ASCII collections researched but not copied (per-work licensing unclear).
 - **Line-based frame splitting**: `client/src/assets.rs` splits on separator *lines*, so art may contain runs like `|---|`; also fixes miscounted `frame_count` for such art.
 - **Light field**: player-carried + lantern point lights with radial falloff replace Manhattan tint bands (`light_level`, directional bias); backdrop bands and ground texture thin with darkness.
 - **Oblique camera + scattered props**: one shared projection for all layers; trees/ruins placed on a deterministic world grid instead of fixed coords, with a world-lock test.
@@ -505,6 +504,13 @@ The current project has repeatedly passed formatting, workspace tests, clippy wi
 - **Effects**: persistent spell beam removed (event-only strike flash + embers + impact `+`); damage numbers parsed from the real message figure instead of the `"91"` placeholder.
 - **Nameplates**: greedy nearest-free (label, bar) row slots so overlapping actors keep readable stacked labels.
 - **Metrics**: near-black fraction test (≥70%, measured 3.7% at baseline), still-air shimmer test (only weather/actor cells may change), `ASCII_DUMP=1` snapshot dumps for visual review against `data/videos/`.
+
+### 15.10 Offscreen wgpu diorama with compute ASCII pass (opt-in)
+- **Feature `wgpu-scene`** (`client/Cargo.toml`, off by default): headless wgpu 30 scene (render-to-texture, no window/surface) + WGSL compute pass that reduces texel blocks to packed cell records; the CPU maps one small buffer per frame and formats ANSI through the existing `Terminal` trait (ConPTY differential path and Notcurses both work unmodified).
+- **Scene**: ground slab, gatehouse landmark, world-grid pines, lantern posts doubling as point lights, player-carried torch light with flicker, nearest entities as boxes. Hand-rolled mat4 (no linear-algebra dependency).
+- **CLI**: `--wgpu` (realtime, honors `--connect`/`--fps`/`--notcurses`), `--wgpu-fallback` (software rasterizer), `--wgpu-demo [N]` (headless frames + timing). `WGPU_FORCE_FALLBACK=1` / `WGPU_POWER=low` env overrides for driver isolation.
+- **Measured**: NVIDIA MX230 over Vulkan, 80x40 cells: ~4.8 ms/frame (~206 FPS), ~2.1 ms GPU submit. Default builds and CI stay GPU-free (feature off).
+- **Known issues**: the full diorama currently reads back void on real camera matrices while identity/translation-only configs render correctly end-to-end (pipelines, compute, readback all verified; under investigation, no validation errors). Intel UHD init access-violates with `WGPU_POWER=low` on this machine (driver).
 
 ## 16. Depth awareness & animation techniques in terminal ASCII engines
 
