@@ -232,6 +232,19 @@ asset representation.
 - Support frame dumps for visual regression tests.
 - Add quality settings for sampling resolution, glow, rain and target FPS.
 
+### First imported medieval slice (current)
+
+The existing Kenney Mini Dungeon pack is the first licensed source used for the
+medieval-dark direction. Its CC0 `gate.obj` is retained as provenance and has a
+small compile-time terminal adaptation in `assets/ascii/gate.txt`. The gate is
+now placed as a stable world-space landmark by the client renderer. This is an
+intentional thin slice: it proves source tracking, static placement and visual
+integration without pretending that hand-authored glyphs are a 3D converter.
+
+Next conversion step: render the retained OBJ through an offline depth/material
+sampler, compare its silhouette with the hand-authored gate, then promote only
+the useful generated representation into the embedded asset library.
+
 ## 6. Gameplay model
 
 The intended alpha includes:
@@ -490,20 +503,103 @@ system immediately.
 1. Correct the TCP loop so it advances independently of incoming commands.
 2. Update ADR 0002 from the obsolete 10 Hz/single-client description.
 3. Add explicit animation state, facing and sequence IDs to snapshots.
-4. Keep the ANSI renderer as a deterministic layered-scene prototype: use a fixed
-   viewport until terrain, props and actors share world-space camera projection.
-   Do not centre only the player while leaving scenery screen-fixed: this makes
-   stationary mobs appear player-controlled. Use stable terrain layers, animate actor poses only
-   on a slow cadence, and replace the placeholder pink stream with an event-shaped
-   blue-white marker/effect.
-5. Add a minimal depth-aware glyph conversion experiment and frame dump after the
-   layered prototype has a stable visual baseline.
-6. Recreate one forest path, one dungeon corridor and one gate scene.
-7. Add target selection and a clean target-health panel.
-8. Only then decide whether Notcurses, `hecs`, `glam`, `rayon` or model loading are
-   justified by the measured prototype.
+4. Replace the current horizon/sky composition with a top-down world-space
+   viewport. Terrain, props, actors and effects must use the same player-following
+   camera transform so stationary mobs never appear to move under input.
+ 5. Build the first reference-shaped scene: irregular forest ground, open dark
+    space, paths, clustered trees/ruins, larger readable actors, floating labels,
+    target markers and localized blue-white impact effects. Keep debug text out of
+    the playfield; retain it only in a small footer while the prototype is tested.
+ 6. Add a minimal depth-aware glyph conversion experiment and frame dump after the
+    layered prototype has a stable visual baseline.
+7. Recreate one forest path, one dungeon corridor and one gate scene.
+8. Add target selection and a clean target-health panel.
+9. Decide whether Notcurses, `hecs`, `glam`, `rayon` or model loading are justified
+   only after measured prototype results.
 
-## 14. Reference documents
+### M2A — Reference-shaped viewport (active build slice)
+
+This is the immediate implementation slice, not a claim that the original engine
+has been recovered. It deliberately uses the existing ANSI canvas and authored
+assets before introducing a 3D dependency.
+
+- Use world coordinates for deterministic terrain and prop placement.
+- Follow the local player with one shared camera transform for every world layer.
+- Remove the artificial horizon and sky/ground split.
+- Prefer dark negative space, irregular green/teal glyph clusters and sparse
+  landmarks over repeated horizontal patterns.
+- Keep actor silhouettes readable and animate only their authored pose frames.
+- Treat attack/cast visuals as localized, short-lived event feedback rather than a
+  persistent beam.
+
+**Exit criteria:** walking moves the world consistently; the mob remains stationary
+in world space; the scene reads as a top-down forest/ruin viewport; no pink stream
+or side-on horizon remains; renderer tests cover camera consistency and stable
+terrain across presentation frames.
+
+## 14. Asset plan: models through glyph conversion
+
+The visual plan assumes that the world is built from low-poly 3D models and then
+rendered through the glyph converter. True hand-authored ASCII is reserved mainly
+for item icons, title screens and UI mockups. This distinction prevents us from
+trying to draw every environment directly as static text.
+
+### 14.1 Candidate sources
+
+| Source | Use | License check |
+| --- | --- | --- |
+| Quaternius | Skeletons, dragons, characters, RPG props and environments | CC0 collection; verify the specific download page |
+| KayKit | Dungeon pieces, RPG props and animated fantasy characters | Verify the pack's included license |
+| Kenney | Buildings, towers, walls, siege and general props | CC0 |
+| Poly Pizza | Occasional one-off props | Usually CC-BY; record author and attribution |
+
+Specific first candidates are Quaternius' Animated Monster Pack for skeleton and
+dragon silhouettes, a Quaternius Low Poly RPG Pack for general characters and
+props, and KayKit or Kenney dungeon/gate pieces. These are candidates, not yet
+imported assets.
+
+### 14.2 Conversion and runtime strategy
+
+1. Download or receive one legally usable candidate pack.
+2. Record the exact source URL, pack name, license, author and local file hashes
+   in `assets/ASSET_SOURCES.md`.
+3. Convert FBX, OBJ or Blend assets in Blender, or initially load OBJ from the
+   `tools` crate if that is enough for the experiment. Do not add a model loader
+   to the gameplay client before the converter prototype proves it is needed.
+4. Convert a static pose first. Do not build skeletal animation for the alpha;
+   split rigid parts or use a static silhouette until the renderer is validated.
+5. Pass the model through the glyph pipeline: geometry -> depth/normal/material
+   buffers -> cell sampling -> glyph and colour selection.
+6. Compare silhouette, lighting and readability in Windows Terminal and one Linux
+   terminal before accepting the asset.
+
+### 14.3 ASCII and terminal tools
+
+- **REXPaint:** author and polish item icons, title screens, inventory panels and
+  paper-doll UI; use its `.xp` format where practical.
+- **`rexpaint` Rust crate:** evaluate for reading `.xp` UI assets in the tools or
+  client pipeline.
+- **Chafa:** use only as an offline image-to-cell draft/conversion tool; its
+  LGPLv3-or-later license must remain isolated from shipped gameplay code.
+- **Notcurses blitters:** evaluate before adding Chafa or another converter to the
+  runtime, because Notcurses may already cover image-to-cell conversion.
+
+### 14.4 First asset import slice
+
+1. Quaternius animated monster pack: one skeleton and one dragon silhouette.
+2. KayKit or Quaternius dungeon/RPG pack: gate, wall, torch and ruin pieces.
+3. Kenney: supplementary castle/building pieces only if the first pack lacks a
+   coherent structure set.
+4. REXPaint: player/enemy item icons, title treatment and inventory mockup.
+
+**Asset milestone exit criteria:** one imported low-poly player or enemy, one
+environment prop and one torch/gate scene render through the glyph converter with
+recorded licensing, stable silhouettes, readable material colours and a frame dump.
+Do not copy a whole project. Reuse small, well-understood converter, camera,
+terminal and UI components from compatible open-source projects only after checking
+their licenses and adapting them to this architecture.
+
+## 15. Reference documents
 
 Repository architecture and decisions:
 
