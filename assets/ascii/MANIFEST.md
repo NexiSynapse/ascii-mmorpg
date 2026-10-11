@@ -6,12 +6,12 @@ third-party artwork or generated binary data.
 
 | File | Use | Frames |
 | --- | --- | ---: |
-| `player_warrior.txt` | Player/warrior animation | 2 |
-| `monster_mossling.txt` | Mossling monster animation | 2 |
-| `npc_herbalist.txt` | NPC fallback animation | 2 |
-| `tree.txt` | Forest prop animation | 2 |
-| `ruin.txt` | Ruin prop animation | 2 |
-| `gate.txt` | Static medieval gate adaptation | 1 |
+| `player_warrior.txt` | Player/warrior volumetric animation | 4 |
+| `monster_mossling.txt` | Mossling monster volumetric animation | 4 |
+| `npc_herbalist.txt` | NPC fallback animation | 4 |
+| `tree.txt` | Forest prop animated wind sway | 2 |
+| `ruin.txt` | Ruin prop weathered stone animation | 2 |
+| `gate.txt` | Static medieval gatehouse adaptation | 1 |
 | `item_icons.txt` | Sword, shield, and generic item icons | 3 |
 | `spell_effect.txt` | Spell trail/impact glyphs | 4 |
 

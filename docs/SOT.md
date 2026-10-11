@@ -464,12 +464,50 @@ The current project has repeatedly passed formatting, workspace tests, clippy wi
 ### 15.7 Atmospheric weather shader overlay layer (Rain, Snowfall, and Storm)
 - **Top-level shader overlay pass**: Elevated atmospheric weather from baked ground backdrop cells into a dedicated post-processing overlay layer (`apply_weather_shader`). Running above the scene backdrop, combat effects, and character models creates realistic 3D depth and parallax.
 - **Multiple weather shader modes (`WeatherMode`)**:
-  - `WeatherMode::Rain`: Multi-layer angled streaks (`/`, `·`, `|`), wind shear drift, and ground impact splash ripples (`~`, `.`).
-  - `WeatherMode::Snow`: Volumetric snowflakes (`*`, `•`, `·`, `°`) with fluttering horizontal sinusoidal sway (`sin(y * freq + frame * 0.1) * amp`) and multi-speed descent layers.
-  - `WeatherMode::Storm`: High-velocity tempest streaks with violent wind drift and periodic electrical lightning flash cycles illuminating the atmosphere.
+  - `WeatherMode::Rain`: Calm, multi-layer angled streaks (`/`, `·`, `|`) falling at a serene, slow atmospheric speed (`frame / 24` distant drizzle, `frame / 18` midground, `frame / 12` foreground streaks) calibrated specifically for high-framerate/uncapped smoothness without strobing, subtle wind drift, and smoothed ground impact splash ripples (`~`, `.`).
+  - `WeatherMode::Snow`: Volumetric snowflakes (`*`, `•`, `·`, `°`) with fluttering horizontal sinusoidal sway (`sin(y * freq + (frame / 6) * 0.1) * amp`) and slow multi-speed descent layers (`frame / 24 .. frame / 16`).
+  - `WeatherMode::Storm`: High-velocity tempest streaks (`frame / 8 .. frame / 4`) with violent wind drift and periodic electrical lightning flash cycles illuminating the atmosphere.
 - **Translucent UI / anchor masking (`is_ui_or_anchor_cell`)**: Precipitation composites over empty space, terrain, props, and player plate armor while automatically protecting nameplates, health bars (`[########]`), and actor anchors (`@`, `m`).
 - **Interactive controls & CLI**:
   - In-game keybinding `V` / `T`: Instantly cycles weather modes (Rain → Snowfall → Storm) during real-time gameplay with immediate HUD notification.
   - CLI flag `--weather <rain|snow|storm>`: Configures initial weather mode on startup.
-- **24-bit TrueColor weather tokens**: Added `Ink::Snow` (`\x1b[38;2;230;245;255m`), `Ink::SnowGlow` (`\x1b[38;2;255;255;255m`), `Ink::SnowSoft` (`\x1b[38;2;160;195;225m`), and `Ink::Splash` (`\x1b[38;2;180;225;255m`).
+### 15.8 Volumetric depth-aware ASCII models, animation & calm scene display
+- **Volumetric ASCII character & monster models**:
+  - **Player knight (`assets/ascii/player_warrior.txt`)**: Upgraded to an 11-row, 13-column volumetric knight with 4 authored animation frames. Features a golden crested helm (`KnightGold`), steel visor eye slit (`KnightVisor`), gleaming plate breastplate with emblem `<|()|>` / `>|<>|<` (`KnightSteel`), crimson cape trims (`KnightCape`), and ground drop foundation shadow (`DropShadow`).
+  - **Monster mossling (`assets/ascii/monster_mossling.txt`)**: Upgraded to a 10-row volumetric organic beast with 4 animation frames. Features glowing amber eyes (`MossEye`), textured organic moss mass (`MossBody`), shadowed core hide (`MossHide`), and living tendrils (`Moss`).
+  - **NPC herbalist (`assets/ascii/npc_herbalist.txt`)**: Upgraded to a 7-row model with 4 animation frames (idle breathing, blinking eyes, linen robe shift).
+  - **Environmental props**:
+    - `tree.txt`: 9-row layered pine trees with 2-frame wind canopy sway (`PineTree`, `PineCanopy`, `WoodPost`).
+    - `ruin.txt`: 7-row ancient stone pillars and archways with weathered highlights (`StoneLight`), deep shadow crevices (`StoneDark`), stone walls (`RuinWall`), and window arch openings (`RuinWindow`).
+    - `gate.txt`: 10-row fortified gatehouse with arched portcullis and timber supports.
+- **Per-glyph depth-aware shading pipelines**:
+  - Replaced monolithic entity colors with per-glyph material shading: `draw_player_knight`, `draw_monster_mossling`, `draw_npc_herbalist`, `draw_tree_prop`, `draw_ruin_prop`, and `draw_gate_prop`.
+  - Preserved actor identity anchors (`@`, `m`, `h`) with their ANSI color codes for HUD and camera tracking compatibility while rendering surrounding body mass with full 24-bit TrueColor depth gradients.
+- **Calm, less chaotic, atmospheric scene composition**:
+  - **Serene negative space**: Eliminated high-contrast character noise (`*`, `#`, `%`, `&`) from the open terrain. Replaced with deep midnight void (`\x1b[38;2;12;15;22m`) and subtle, sparse ground dither (`·`, `.`, ` `) using `GrassDark` and `Moss`.
+  - **Winding cobblestone highway**: Softened highway curbs and road tiles (`o`, `·`, `Q`, `.`) illuminated by warm amber radiant halos from timber lantern posts (`TorchFlame`, `TorchGlow`).
+  - **Gentle weather overlay pacing**: Calibrated rain and snow descent rates (`frame / 24` to `frame / 12`) to maintain smooth, tranquil ambiance even under high-framerate/uncapped rendering.
 
+## 16. Depth awareness & animation techniques in terminal ASCII engines
+
+### 16.1 Depth awareness mechanisms
+1. **Luminance & normal-based glyph density ramps**:
+   - In 3D graphics, lighting is determined by the Lambertian cosine law ($I = \vec{N} \cdot \vec{L}$). In ASCII, brightness levels are mapped to visual character density:
+     `"  .,:;+*#%@"` or `·-=≡8#@▓`.
+   - Characters facing the light source (specular/diffuse) use high-density, sharp glyphs (`▓`, `8`, `@`, `Q`), while surfaces angled away or in shadow use low-density, open glyphs (`:`, `·`, `.`).
+2. **Aerial perspective & atmospheric depth (Z-distance falloff)**:
+   - Contrast and saturation decrease with distance from the camera. Distant terrain and props use darker, lower-contrast inks (`StoneDark`, `GrassDark`, `Background`), while foreground actors and illuminated focal points use high-contrast, radiant TrueColor tones (`KnightSteel`, `TorchFlame`).
+3. **Drop shadows & contact occlusion**:
+   - Anchoring characters to the ground plane requires an elliptical contact shadow (`( _____ )`) directly beneath their base using dark drop-shadow ink (`\x1b[38;2;16;20;28m`). This immediately establishes spatial grounding and depth separation from the backdrop.
+4. **Z-order layer compositing**:
+   - The scene is rendered in strict depth order:
+     `Backdrop terrain` → `Drop shadows` → `Static props (trees, ruins)` → `Entities (monsters, NPCs, player)` → `Combat VFX & lightning` → `Weather shader overlay (rain, snow)` → `UI HUD & status labels`.
+
+### 16.2 Terminal ASCII animation techniques
+1. **Multi-frame keyframe cycling**:
+   - Splitting authored frames with `---` enables deterministic tick/frame selection (`frame / phase % frame_count`). Keyframes capture subtle secondary motion: chest expansion during breathing, leg weight shifts, eye blinks (`(^^)` → `(..)`), and fabric swaying.
+2. **Sinusoidal procedural vertex/column deformation**:
+   - For fluid natural phenomena (wind swaying trees, banners fluttering, snow drifting), procedural trigonometric offsets are applied:
+     $$x_{\text{offset}} = \sin\left(y \cdot \omega + \frac{\text{frame}}{T}\right) \cdot A$$
+3. **Sub-glyph phase shifting**:
+   - Rather than displacing whole character coordinates (which can look jarring on a discrete terminal grid), motion can be conveyed by cycling glyph shapes in place: alternating between directional strokes (`/` → `|` → `\` → `|`), creating the visual impression of continuous rotation or waving without jitter.

@@ -12,6 +12,8 @@ use crate::assets::{AssetLibrary, PropKind};
 enum Ink {
     Background,
     Stone,
+    StoneDark,
+    StoneLight,
     Moss,
     Foliage,
     Rain,
@@ -29,13 +31,16 @@ enum Ink {
     KnightSteel,
     KnightGold,
     KnightCape,
+    KnightVisor,
     DropShadow,
     CobbleRoad,
     CobbleGlow,
     CobbleBorder,
     GrassMeadow,
+    GrassDark,
     GrassTorch,
     PineTree,
+    PineCanopy,
     TreeShadow,
     TorchFlame,
     TorchGlow,
@@ -44,6 +49,16 @@ enum Ink {
     BannerRed,
     WoodPost,
     FloatingDamage,
+    // Monster depth palette
+    MossBody,
+    MossEye,
+    MossHide,
+    // NPC depth palette
+    NpcRobe,
+    NpcSkin,
+    // Ruin depth palette
+    RuinWall,
+    RuinWindow,
     // Atmospheric Weather Shader Tokens
     Snow,
     SnowGlow,
@@ -56,6 +71,8 @@ impl Ink {
         match self {
             Self::Background => "\x1b[38;2;12;15;22m", // Deep midnight dark fantasy void
             Self::Stone => "\x1b[38;5;101m",
+            Self::StoneDark => "\x1b[38;2;65;60;55m", // Shadowed stone face
+            Self::StoneLight => "\x1b[38;2;175;165;150m", // Sunlit stone highlight
             Self::Moss => "\x1b[38;5;65m",
             Self::Foliage => "\x1b[38;5;22m",
             Self::Rain => "\x1b[38;5;67m",
@@ -71,25 +88,38 @@ impl Ink {
             Self::KnightSteel => "\x1b[38;2;225;232;240m", // Polished steel plate
             Self::KnightGold => "\x1b[38;2;255;210;75m",   // Golden helm crest / horns
             Self::KnightCape => "\x1b[38;2;195;35;48m",    // Crimson battle cape
+            Self::KnightVisor => "\x1b[38;2;140;180;220m", // Eye slit steel blue
             Self::DropShadow => "\x1b[38;2;16;20;28m",     // 3D ground drop shadow
-            Self::CobbleRoad => "\x1b[38;2;155;142;128m",  // Warm ancient cobblestone
-            Self::CobbleGlow => "\x1b[38;2;245;195;110m",  // Torchlit cobblestone
-            Self::CobbleBorder => "\x1b[38;2;85;78;70m",   // Cobblestone curb
-            Self::GrassMeadow => "\x1b[38;2;42;104;72m",   // Lush deep emerald grass
-            Self::GrassTorch => "\x1b[38;2;118;202;158m",  // Torchlit vibrant grass
-            Self::PineTree => "\x1b[38;2;40;95;80m",       // Frosty pine needles
+            Self::CobbleRoad => "\x1b[38;2;125;115;105m",  // Warm ancient cobblestone (dimmed)
+            Self::CobbleGlow => "\x1b[38;2;200;160;95m",   // Torchlit cobblestone (softened)
+            Self::CobbleBorder => "\x1b[38;2;65;60;55m",   // Cobblestone curb (dimmed)
+            Self::GrassMeadow => "\x1b[38;2;32;75;55m",    // Deep emerald grass (darker)
+            Self::GrassDark => "\x1b[38;2;22;50;38m",      // Shadowed grass
+            Self::GrassTorch => "\x1b[38;2;85;155;115m",   // Torchlit grass (softer)
+            Self::PineTree => "\x1b[38;2;35;80;65m",       // Frosty pine needles (darker)
+            Self::PineCanopy => "\x1b[38;2;25;60;48m",     // Deep pine shadow
             Self::TreeShadow => "\x1b[38;2;12;20;16m",     // Tree base drop shadow
             Self::TorchFlame => "\x1b[38;2;255;95;25m",    // Blazing orange flame
-            Self::TorchGlow => "\x1b[38;2;255;185;55m",    // Radiant amber halo
+            Self::TorchGlow => "\x1b[38;2;200;145;45m",    // Radiant amber halo (dimmed)
             Self::Lightning => "\x1b[38;2;76;201;240m",    // Electric cyan lightning bolt
             Self::LightningWhite => "\x1b[38;2;255;255;255m", // White lightning core
-            Self::BannerRed => "\x1b[38;2;195;30;45m",     // Crimson war banner
-            Self::WoodPost => "\x1b[38;2;120;85;60m",      // Timber post
+            Self::BannerRed => "\x1b[38;2;165;25;38m",     // Crimson war banner (darker)
+            Self::WoodPost => "\x1b[38;2;95;68;48m",       // Timber post (darker)
             Self::FloatingDamage => "\x1b[38;2;255;220;50m", // Popping combat numbers
-            Self::Snow => "\x1b[38;2;230;245;255m",        // Crisp winter snowflake
-            Self::SnowGlow => "\x1b[38;2;255;255;255m",    // Crystalline specular highlight
-            Self::SnowSoft => "\x1b[38;2;160;195;225m",    // Twilight soft snow flurry
-            Self::Splash => "\x1b[38;2;180;225;255m",      // Impact water spray
+            // Monster depth palette - mossy green/brown organic tones
+            Self::MossBody => "\x1b[38;2;88;130;72m", // Mossy green body mass
+            Self::MossEye => "\x1b[38;2;255;200;60m", // Glowing amber eyes
+            Self::MossHide => "\x1b[38;2;55;85;48m",  // Dark moss hide shadow
+            // NPC depth palette
+            Self::NpcRobe => "\x1b[38;2;160;140;100m", // Worn linen robe
+            Self::NpcSkin => "\x1b[38;2;220;185;150m", // Warm skin tone
+            // Ruin depth palette
+            Self::RuinWall => "\x1b[38;2;110;100;88m", // Weathered ruin wall
+            Self::RuinWindow => "\x1b[38;2;45;55;80m", // Dark interior through window
+            Self::Snow => "\x1b[38;2;230;245;255m",    // Crisp winter snowflake
+            Self::SnowGlow => "\x1b[38;2;255;255;255m", // Crystalline specular highlight
+            Self::SnowSoft => "\x1b[38;2;160;195;225m", // Twilight soft snow flurry
+            Self::Splash => "\x1b[38;2;180;225;255m",  // Impact water spray
         }
     }
 }
@@ -243,7 +273,7 @@ impl Renderer {
         canvas: &mut Canvas,
         assets: &AssetLibrary,
         camera: ascii_mmorpg_shared::Point,
-        _frame: u64,
+        frame: u64,
     ) {
         for y in 0..canvas.height {
             for x in 0..canvas.width {
@@ -268,40 +298,40 @@ impl Renderer {
                     // Radial warm amber illumination on road & grass
                     if path {
                         match patch % 4 {
-                            0 => ('0', Ink::CobbleGlow),
-                            1 => ('o', Ink::CobbleGlow),
-                            2 => ('8', Ink::CobbleGlow),
+                            0 => ('o', Ink::CobbleGlow),
+                            1 => ('·', Ink::CobbleGlow),
+                            2 => ('Q', Ink::CobbleGlow),
                             _ => ('.', Ink::CobbleGlow),
                         }
                     } else {
                         match patch % 4 {
                             0 => ('"', Ink::GrassTorch),
                             1 => ('\'', Ink::GrassTorch),
-                            2 => ('|', Ink::GrassTorch),
+                            2 => ('·', Ink::GrassTorch),
                             _ => ('.', Ink::GrassMeadow),
                         }
                     }
                 } else if path {
-                    // Ancient textured cobblestone highway with stone curbs
+                    // Ancient cobblestone pathway matching the dark fantasy reference
                     let road_col = (wx - wy / 3).rem_euclid(13);
                     if road_col == 0 || road_col == 2 {
                         (if road_col == 0 { '/' } else { '\\' }, Ink::CobbleBorder)
                     } else {
-                        match patch % 5 {
-                            0 => ('0', Ink::CobbleRoad),
-                            1 => ('o', Ink::CobbleRoad),
-                            2 => ('8', Ink::CobbleRoad),
-                            3 => ('%', Ink::CobbleRoad),
-                            _ => ('.', Ink::CobbleBorder),
+                        match patch % 6 {
+                            0 => ('o', Ink::CobbleRoad),
+                            1 => ('·', Ink::CobbleBorder),
+                            2 => ('Q', Ink::CobbleBorder),
+                            3 => ('.', Ink::CobbleBorder),
+                            _ => (' ', Ink::Background),
                         }
                     }
                 } else if torch_distance <= 6 {
-                    // Ambient twilight meadow grass blades
-                    match patch % 5 {
-                        0 => ('"', Ink::GrassMeadow),
-                        1 => ('\'', Ink::GrassMeadow),
-                        2 => (',', Ink::GrassMeadow),
-                        3 => ('|', Ink::GrassMeadow),
+                    // Ambient twilight meadow with calm subtle grass blades
+                    match patch % 6 {
+                        0 => (',', Ink::GrassDark),
+                        1 => ('·', Ink::GrassDark),
+                        2 => ('.', Ink::GrassDark),
+                        3 => ('"', Ink::GrassMeadow),
                         _ => (' ', Ink::Background),
                     }
                 } else {
@@ -311,40 +341,37 @@ impl Renderer {
             }
         }
 
-        // 3D Pine Trees with ground foundation shadows
+        // 3D Pine Trees with animated wind sway and ground foundation shadows
         for (x, y) in [(-10, -1), (12, -3), (-7, 8), (15, 9)] {
             let screen = self.screen_position(ascii_mmorpg_shared::Point { x, y }, camera);
-            canvas.text(screen.0 - 4, screen.1 + 3, "( _____ )", Ink::TreeShadow);
-            self.draw_asset(
+            canvas.text(screen.0 - 4, screen.1 + 4, "( _____ )", Ink::TreeShadow);
+            self.draw_tree_prop(
                 canvas,
-                assets.prop(PropKind::Tree, 0),
-                screen.0 - 3,
-                screen.1 - 2,
-                Ink::PineTree,
+                assets.prop(PropKind::Tree, frame / 16),
+                screen.0 - 5,
+                screen.1 - 4,
             );
         }
 
-        // Ancient Stone Ruins
+        // Ancient Stone Ruins with weathered stone highlights and arches
         for (x, y) in [(-2, -5), (9, 7)] {
             let screen = self.screen_position(ascii_mmorpg_shared::Point { x, y }, camera);
             canvas.text(screen.0 - 4, screen.1 + 3, "( _____ )", Ink::TreeShadow);
-            self.draw_asset(
+            self.draw_ruin_prop(
                 canvas,
-                assets.prop(PropKind::Ruin, 0),
-                screen.0 - 3,
-                screen.1 - 2,
-                Ink::Stone,
+                assets.prop(PropKind::Ruin, frame / 32),
+                screen.0 - 6,
+                screen.1 - 3,
             );
         }
 
         // Medieval Stone Gate
         let gate = self.screen_position(ascii_mmorpg_shared::Point { x: 2, y: -8 }, camera);
-        self.draw_asset(
+        self.draw_gate_prop(
             canvas,
             assets.prop(PropKind::Gate, 0),
             gate.0 - 5,
-            gate.1 - 4,
-            Ink::Stone,
+            gate.1 - 5,
         );
 
         // Hanging Crimson War Banners
@@ -355,12 +382,12 @@ impl Renderer {
             canvas.set(screen.0, screen.1 + 2, '▼', Ink::BannerRed);
         }
 
-        // Dense Wild Grass Clumps
+        // Calm, sparse wild grass tufts
         for (x, y) in [(-14, 4), (-11, 5), (4, 10), (11, 3), (17, 6)] {
             let screen = self.screen_position(ascii_mmorpg_shared::Point { x, y }, camera);
-            canvas.set(screen.0, screen.1, '|', Ink::GrassTorch);
-            canvas.set(screen.0 - 1, screen.1 + 1, '/', Ink::GrassMeadow);
-            canvas.set(screen.0 + 1, screen.1 + 1, '\\', Ink::GrassMeadow);
+            canvas.set(screen.0, screen.1, '·', Ink::GrassDark);
+            canvas.set(screen.0 - 1, screen.1 + 1, '/', Ink::GrassDark);
+            canvas.set(screen.0 + 1, screen.1 + 1, '\\', Ink::GrassDark);
             canvas.set(screen.0, screen.1 + 1, '"', Ink::Moss);
         }
 
@@ -412,14 +439,27 @@ impl Renderer {
         let width = canvas.width;
         let height = canvas.height as isize;
         let layers = if is_storm { 4 } else { 3 };
-        let speed_mult = if is_storm { 2 } else { 1 };
         let is_lightning_flash = is_storm && (frame % 45 < 2);
 
         for x in 0..width {
             for layer in 0..layers {
-                let speed = (2 + layer) * speed_mult;
+                let fall_step = if is_storm {
+                    match layer {
+                        0 => frame / 8,
+                        1 => frame / 6,
+                        2 => frame / 4,
+                        _ => (frame * 3) / 8,
+                    }
+                } else {
+                    match layer {
+                        0 => frame / 24,
+                        1 => frame / 18,
+                        _ => frame / 12,
+                    }
+                } as usize;
+
                 let span = canvas.height.max(1) + 9;
-                let phase = (x * 29 + layer * 47 + frame as usize * speed + 11) % span;
+                let phase = (x * 29 + layer * 47 + fall_step + 11) % span;
                 let head = phase as isize - 4;
                 let wind_drift = if is_storm { head / 4 } else { 0 };
                 let px = (x as isize + wind_drift).rem_euclid(width as isize);
@@ -459,7 +499,7 @@ impl Renderer {
                     let splash_y = (head + 1).min(height - 1);
                     let current = canvas.get(splash_x, splash_y);
                     if !Self::is_ui_or_anchor_cell(current) && current.glyph != ' ' {
-                        let splash_glyph = if (frame + x as u64) % 2 == 0 {
+                        let splash_glyph = if ((frame / 6) + x as u64) % 2 == 0 {
                             '~'
                         } else {
                             '.'
@@ -477,16 +517,16 @@ impl Renderer {
 
         for layer in 0..3usize {
             let num_columns = canvas.width;
-            let fall_speed = match layer {
-                0 => 1,
-                1 => 2,
-                _ => 1,
-            };
+            let fall_step = match layer {
+                0 => frame / 24,
+                1 => frame / 16,
+                _ => frame / 20,
+            } as usize;
             let span = canvas.height.max(1) + 8;
 
             for x in (layer..num_columns).step_by(2) {
                 let seed = x * 37 + layer * 73;
-                let phase = (seed + frame as usize * fall_speed) % span;
+                let phase = (seed + fall_step) % span;
                 let y = phase as isize - 2;
 
                 if y < 0 || y >= height {
@@ -495,7 +535,7 @@ impl Renderer {
 
                 let sway_freq = 0.25;
                 let sway_amp = if layer == 0 { 2.5 } else { 1.5 };
-                let sway = ((y as f64 * sway_freq + frame as f64 * 0.1 + seed as f64).sin()
+                let sway = ((y as f64 * sway_freq + (frame as f64 / 6.0) * 0.1 + seed as f64).sin()
                     * sway_amp) as isize;
                 let px = (x as isize + sway).rem_euclid(width);
 
@@ -504,7 +544,7 @@ impl Renderer {
                     continue;
                 }
 
-                let (glyph, ink) = match (layer, (seed + frame as usize) % 4) {
+                let (glyph, ink) = match (layer, (seed + (frame / 6) as usize) % 4) {
                     (0, 0) => ('*', Ink::SnowGlow),
                     (0, _) => ('*', Ink::Snow),
                     (1, 0) => ('•', Ink::Snow),
@@ -626,11 +666,22 @@ impl Renderer {
         canvas.set(x + 1, y + 3, '_', Ink::DropShadow);
         canvas.set(x + 2, y + 3, ')', Ink::DropShadow);
 
-        if actor.kind == EntityKind::Player {
-            // Authentic Skyrim / Elden Ring knight plate armor with golden trim and crimson cape
-            self.draw_player_knight(canvas, artwork, x - artwork_width / 2, y - 2);
-        } else {
-            self.draw_asset(canvas, artwork, x - artwork_width / 2, y - 2, ink);
+        match actor.kind {
+            EntityKind::Player => {
+                // Volumetric knight plate armor with golden crest, glowing visor, and crimson cape
+                self.draw_player_knight(canvas, artwork, x - artwork_width / 2, y - 2);
+            }
+            EntityKind::Monster => {
+                // Organic volumetric mossling with glowing amber eyes and textured moss hide
+                self.draw_monster_mossling(canvas, artwork, x - artwork_width / 2, y - 2);
+            }
+            EntityKind::Npc => {
+                // Robed NPC herbalist with linen folds and gentle idle breathing
+                self.draw_npc_herbalist(canvas, artwork, x - artwork_width / 2, y - 2);
+            }
+            EntityKind::Item => {
+                self.draw_asset(canvas, artwork, x - artwork_width / 2, y - 2, ink);
+            }
         }
 
         // Keep the server-provided glyph visible as a compact identity cue
@@ -655,12 +706,115 @@ impl Renderer {
                 let py = y + row as isize;
                 let ink = match glyph {
                     '▲' | '^' => Ink::KnightGold,              // Golden crest / horns
+                    ':' => Ink::KnightVisor,                   // Visor eye slit
                     '▓' | '8' | '[' | ']' => Ink::KnightSteel, // Gleaming plate armor
-                    '|' | '<' | '>' | '(' | ')' if row <= 3 => Ink::KnightSteel,
+                    '|' | '<' | '>' | '(' | ')' if row <= 4 => Ink::KnightSteel,
                     '/' | '\\' if column <= 1 || column >= 5 => Ink::KnightCape, // Crimson cape edges
                     '/' | '\\' => Ink::KnightSteel, // Steel greaves / arms
                     '_' => Ink::DropShadow,         // Ground shadow
                     _ => Ink::Player,
+                };
+                canvas.set(px, py, glyph, ink);
+            }
+        }
+    }
+
+    fn draw_monster_mossling(&self, canvas: &mut Canvas, artwork: &str, x: isize, y: isize) {
+        for (row, line) in artwork.lines().enumerate() {
+            for (column, glyph) in line.trim_end_matches('\r').chars().enumerate() {
+                if glyph.is_whitespace() {
+                    continue;
+                }
+                let px = x + column as isize;
+                let py = y + row as isize;
+                let ink = match glyph {
+                    '^' | 'v' | '.' if row == 2 || row == 3 => Ink::MossEye, // Glowing amber eyes
+                    '@' | 'o' | 'O' => Ink::MossBody, // Organic moss body mass
+                    '#' | '%' => Ink::MossHide,       // Shadowed hide core
+                    '{' | '}' | '/' | '\\' | '|' => Ink::Moss, // Living moss tendrils
+                    '_' => Ink::DropShadow,           // Ground drop shadow
+                    _ => Ink::Monster,
+                };
+                canvas.set(px, py, glyph, ink);
+            }
+        }
+    }
+
+    fn draw_npc_herbalist(&self, canvas: &mut Canvas, artwork: &str, x: isize, y: isize) {
+        for (row, line) in artwork.lines().enumerate() {
+            for (column, glyph) in line.trim_end_matches('\r').chars().enumerate() {
+                if glyph.is_whitespace() {
+                    continue;
+                }
+                let px = x + column as isize;
+                let py = y + row as isize;
+                let ink = match glyph {
+                    'o' | '.' | '-' if row <= 2 => Ink::NpcSkin, // Subtle facial features
+                    '@' | '|' | '/' | '\\' => Ink::NpcRobe,      // Worn woven linen robes
+                    '_' => Ink::DropShadow,
+                    _ => Ink::Npc,
+                };
+                canvas.set(px, py, glyph, ink);
+            }
+        }
+    }
+
+    fn draw_tree_prop(&self, canvas: &mut Canvas, artwork: &str, x: isize, y: isize) {
+        for (row, line) in artwork.lines().enumerate() {
+            for (column, glyph) in line.trim_end_matches('\r').chars().enumerate() {
+                if glyph.is_whitespace() {
+                    continue;
+                }
+                let px = x + column as isize;
+                let py = y + row as isize;
+                let ink = match glyph {
+                    '▲' => Ink::PineTree,
+                    '▓' | '▒' => Ink::PineCanopy,
+                    '|' => Ink::WoodPost,
+                    '_' => Ink::TreeShadow,
+                    _ => Ink::Foliage,
+                };
+                canvas.set(px, py, glyph, ink);
+            }
+        }
+    }
+
+    fn draw_ruin_prop(&self, canvas: &mut Canvas, artwork: &str, x: isize, y: isize) {
+        for (row, line) in artwork.lines().enumerate() {
+            for (column, glyph) in line.trim_end_matches('\r').chars().enumerate() {
+                if glyph.is_whitespace() {
+                    continue;
+                }
+                let px = x + column as isize;
+                let py = y + row as isize;
+                let ink = match glyph {
+                    '=' | '-' => Ink::StoneLight,
+                    '[' | ']' => Ink::RuinWindow,
+                    '/' | '\\' => Ink::StoneDark,
+                    '|' => Ink::RuinWall,
+                    '_' => Ink::TreeShadow,
+                    _ => Ink::Stone,
+                };
+                canvas.set(px, py, glyph, ink);
+            }
+        }
+    }
+
+    fn draw_gate_prop(&self, canvas: &mut Canvas, artwork: &str, x: isize, y: isize) {
+        for (row, line) in artwork.lines().enumerate() {
+            for (column, glyph) in line.trim_end_matches('\r').chars().enumerate() {
+                if glyph.is_whitespace() {
+                    continue;
+                }
+                let px = x + column as isize;
+                let py = y + row as isize;
+                let ink = match glyph {
+                    '#' => Ink::RuinWall,
+                    '[' | ']' => Ink::RuinWindow,
+                    '=' | '-' => Ink::StoneLight,
+                    '/' | '\\' => Ink::StoneDark,
+                    '|' => Ink::WoodPost,
+                    _ => Ink::Stone,
                 };
                 canvas.set(px, py, glyph, ink);
             }
@@ -682,7 +836,7 @@ impl Renderer {
         let distance = i32::from(x - camera.x).abs() + i32::from(y - camera.y).abs();
         let seed = Self::terrain_seed(x, y);
         let ridge = ((seed % 17) as i32 + i32::from(patch) * 2 - distance / 20).max(0);
-        let glyphs = [' ', '·', '.', ':', ';', '+', '*', '#', '%', '&'];
+        let glyphs = [' ', '·', '.', '·', '.', ' ', '·', '.', ' ', '·'];
         if ridge < 5 {
             (' ', Ink::Background)
         } else {
@@ -690,7 +844,7 @@ impl Renderer {
                 .rem_euclid(glyphs.len() as i32) as usize;
             let glyph = glyphs[glyph_index];
             let ink = if ridge > 13 {
-                Ink::Foliage
+                Ink::GrassDark
             } else if ridge > 9 {
                 Ink::Moss
             } else {
