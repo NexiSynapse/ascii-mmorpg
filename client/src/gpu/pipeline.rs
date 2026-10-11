@@ -7,6 +7,7 @@ use super::shaders::{ASCII_POST_WGSL, SCENE_3D_WGSL};
 use super::uniforms::{CameraUniforms, LightingUniforms};
 
 pub const RING_SIZE: usize = 2;
+pub const SSAA_FACTOR: u32 = 2;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -18,7 +19,14 @@ pub struct GpuCell {
     pub bg_r: u32,
     pub bg_g: u32,
     pub bg_b: u32,
-    pub _pad: u32,
+    pub depth_bits: u32, // Encodes IEEE-754 f32 depth from GPU Depth32Float for O(1) unprojection
+}
+
+impl GpuCell {
+    /// Returns the floating-point depth value (0.0 = camera near, 1.0 = camera far).
+    pub fn depth(&self) -> f32 {
+        f32::from_bits(self.depth_bits)
+    }
 }
 
 #[repr(C)]
@@ -510,22 +518,25 @@ impl GpuPipeline {
             cache: None,
         });
 
-        // 4. Create Textures
+        // 4. Create Textures at 2x Super-Sampled Resolution (Asciicker 2x G-buffer logic)
+        let render_width = width * SSAA_FACTOR;
+        let render_height = height * SSAA_FACTOR;
         let (color_texture, color_view) = create_target_texture(
             device,
-            width,
-            height,
+            render_width,
+            render_height,
             wgpu::TextureFormat::Rgba8UnormSrgb,
             "Color",
         );
         let (normal_depth_texture, normal_depth_view) = create_target_texture(
             device,
-            width,
-            height,
+            render_width,
+            render_height,
             wgpu::TextureFormat::Rgba8Unorm,
             "NormalDepth",
         );
-        let (depth_texture, depth_view) = create_depth_texture(device, width, height);
+        let (depth_texture, depth_view) =
+            create_depth_texture(device, render_width, render_height);
 
         // 5. Create Multi-Buffered Frame Slots
         let slot0 = FrameSlot::new(
@@ -659,21 +670,24 @@ impl GpuPipeline {
         self.height = height;
         let device = &ctx.device;
 
+        let render_width = width * SSAA_FACTOR;
+        let render_height = height * SSAA_FACTOR;
+
         let (c_tex, c_view) = create_target_texture(
             device,
-            width,
-            height,
+            render_width,
+            render_height,
             wgpu::TextureFormat::Rgba8UnormSrgb,
             "Color",
         );
         let (nd_tex, nd_view) = create_target_texture(
             device,
-            width,
-            height,
+            render_width,
+            render_height,
             wgpu::TextureFormat::Rgba8Unorm,
             "NormalDepth",
         );
-        let (d_tex, d_view) = create_depth_texture(device, width, height);
+        let (d_tex, d_view) = create_depth_texture(device, render_width, render_height);
 
         self.color_texture = c_tex;
         self.color_view = c_view;
@@ -1062,6 +1076,18 @@ impl GpuPipeline {
         }
 
         Ok(results)
+    }
+
+    /// O(1) mathematical screen-to-world unprojection borrowed from Asciicker's depth unprojection logic.
+    /// Maps a screen cell coordinate (screen_x, screen_y) and its GPU depth buffer value into exact 3D world coordinates.
+    pub fn unproject_screen_to_world(
+        &self,
+        screen_x: f32,
+        screen_y: f32,
+        depth: f32,
+        camera: &CameraUniforms,
+    ) -> glam::Vec3 {
+        camera.unproject_screen_to_world(screen_x, screen_y, depth)
     }
 }
 

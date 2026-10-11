@@ -4,11 +4,30 @@
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniforms {
     pub view_proj: [[f32; 4]; 4],
+    pub inv_view_proj: [[f32; 4]; 4],
     pub camera_pos: [f32; 4],
     pub time: f32,
     pub weather_mode: u32,
     pub width: u32,
     pub height: u32,
+}
+
+impl CameraUniforms {
+    /// O(1) mathematical screen-to-world unprojection borrowed from Asciicker's depth unprojection logic.
+    /// Maps a screen cell coordinate (x, y) and its GPU depth buffer value into exact 3D world coordinates.
+    pub fn unproject_screen_to_world(&self, screen_x: f32, screen_y: f32, depth: f32) -> glam::Vec3 {
+        let inv_vp = glam::Mat4::from_cols_array_2d(&self.inv_view_proj);
+        let ndc_x = (screen_x / self.width as f32) * 2.0 - 1.0;
+        let ndc_y = 1.0 - (screen_y / self.height as f32) * 2.0; // Y is inverted in NDC
+        let ndc_z = depth; // 0.0 to 1.0 in wgpu Depth32Float
+        let ndc = glam::Vec4::new(ndc_x, ndc_y, ndc_z, 1.0);
+        let world = inv_vp * ndc;
+        if world.w.abs() > 1e-6 {
+            glam::Vec3::new(world.x / world.w, world.y / world.w, world.z / world.w)
+        } else {
+            glam::Vec3::new(world.x, world.y, world.z)
+        }
+    }
 }
 
 #[repr(C)]

@@ -6,7 +6,7 @@ use glam::{Mat4, Vec3};
 use ascii_mmorpg_shared::{EntityKind, WorldSnapshot};
 
 use super::context::GpuContext;
-use super::mesh::{MeshBuffer, SceneBatches};
+use super::mesh::{Frustum, MeshBuffer, SceneBatches};
 use super::pipeline::{GpuCell, GpuPipeline};
 use super::uniforms::{CameraUniforms, GpuPointLight, LightingUniforms};
 use crate::renderer::WeatherMode;
@@ -170,6 +170,8 @@ impl GpuRenderer {
         let aspect = (width as f32 / height as f32) * 0.48;
         let proj = Mat4::perspective_rh(42.0f32.to_radians(), aspect, 0.1, 100.0);
         let view_proj = proj * view;
+        let inv_view_proj = view_proj.inverse();
+        let frustum = Frustum::from_view_proj(&view_proj);
 
         let weather_id = match weather {
             WeatherMode::Rain => 0,
@@ -179,6 +181,7 @@ impl GpuRenderer {
 
         let camera_uniforms = CameraUniforms {
             view_proj: view_proj.to_cols_array_2d(),
+            inv_view_proj: inv_view_proj.to_cols_array_2d(),
             camera_pos: [cam_eye.x, cam_eye.y, cam_eye.z, 1.0],
             time,
             weather_mode: weather_id,
@@ -275,18 +278,47 @@ impl GpuRenderer {
         };
         mesh.add_humanoid([px, 0.0, pz], 0.0, walk_phase, 0.0);
 
-        // 4. Instanced Props (Pine Trees, Ruin Pillars, Weather Particles)
-        batches.add_pine_tree([-5.0, 0.0, -4.0], 1.0, (time * 2.0).sin());
-        batches.add_pine_tree([6.0, 0.0, -2.5], 1.1, (time * 2.3).sin());
-        batches.add_pine_tree([7.5, 0.0, 8.0], 0.95, (time * 1.8).sin());
-        batches.add_pine_tree([-8.0, 0.0, 10.0], 1.05, (time * 2.1).sin());
+        // 4. Instanced Props with View-Frustum Culling (Asciicker plane culling optimization)
+        let trees = [
+            ([-5.0, 0.0, -4.0], 1.0, (time * 2.0).sin()),
+            ([6.0, 0.0, -2.5], 1.1, (time * 2.3).sin()),
+            ([7.5, 0.0, 8.0], 0.95, (time * 1.8).sin()),
+            ([-8.0, 0.0, 10.0], 1.05, (time * 2.1).sin()),
+        ];
+        for (pos, scale, sway) in trees {
+            if frustum.test_sphere(Vec3::from(pos) + Vec3::new(0.0, 2.0, 0.0), scale * 4.5) {
+                batches.add_pine_tree(pos, scale, sway);
+            }
+        }
 
-        batches.add_pillar([-7.9, 0.0, 4.0], 1.0);
-        batches.add_pillar([-5.1, 0.0, 4.0], 0.76);
+        let pillars = [
+            ([-7.9, 0.0, 4.0], 1.0),
+            ([-5.1, 0.0, 4.0], 0.76),
+        ];
+        for (pos, height_scale) in pillars {
+            if frustum.test_sphere(Vec3::from(pos) + Vec3::new(0.0, 1.5, 0.0), 3.0) {
+                batches.add_pillar(pos, height_scale);
+            }
+        }
 
         batches.add_weather_particles(px, pz, time, weather_id);
 
         (camera_uniforms, lighting)
+    }
+
+    /// O(1) mathematical screen-to-world depth unprojection (borrowed from Asciicker's depth unprojection).
+    /// Given screen cell coordinates (screen_x, screen_y) and the GPU cell buffer, recovers the exact 3D world coordinate.
+    pub fn unproject_at(
+        &self,
+        screen_x: usize,
+        screen_y: usize,
+        cells: &[GpuCell],
+        camera: &CameraUniforms,
+    ) -> Option<Vec3> {
+        let idx = screen_y * self.width as usize + screen_x;
+        let cell = cells.get(idx)?;
+        let depth = cell.depth();
+        Some(camera.unproject_screen_to_world(screen_x as f32, screen_y as f32, depth))
     }
 
     /// High-performance zero-allocation ANSI string formatter.
@@ -485,6 +517,85 @@ mod tests {
             batches.particle_instances.len(),
             180,
             "Should have 180 instanced weather particles"
+        );
+    }
+
+    #[test]
+    fn test_frustum_culling() {
+        let view = glam::Mat4::look_at_rh(
+            glam::Vec3::new(0.0, 10.0, -10.0),
+            glam::Vec3::new(0.0, 0.0, 0.0),
+            glam::Vec3::new(0.0, 1.0, 0.0),
+        );
+        let proj = glam::Mat4::perspective_rh(45.0f32.to_radians(), 1.0, 0.1, 100.0);
+        let vp = proj * view;
+        let frustum = Frustum::from_view_proj(&vp);
+
+        // Object at origin should be inside
+        assert!(frustum.test_sphere(glam::Vec3::new(0.0, 0.0, 0.0), 1.0));
+        assert!(frustum.test_aabb(
+            glam::Vec3::new(-1.0, -1.0, -1.0),
+            glam::Vec3::new(1.0, 1.0, 1.0),
+        ));
+
+        // Object far behind camera should be culled
+        assert!(!frustum.test_sphere(glam::Vec3::new(0.0, 10.0, -50.0), 1.0));
+        assert!(!frustum.test_aabb(
+            glam::Vec3::new(-1.0, 9.0, -51.0),
+            glam::Vec3::new(1.0, 11.0, -49.0),
+        ));
+    }
+
+    #[test]
+    fn test_wavefront_obj_loader() {
+        let obj_cube = r#"
+# Simple 3D OBJ Pyramid
+v 0.0 1.0 0.0
+v -1.0 0.0 -1.0
+v 1.0 0.0 -1.0
+v 1.0 0.0 1.0
+v -1.0 0.0 1.0
+f 1 2 3
+f 1 3 4
+f 1 4 5
+f 1 5 2
+f 2 5 4 3
+"#;
+        let mb = MeshBuffer::load_obj(obj_cube, [1.0, 0.8, 0.2, 1.0], 1.0, 0.3)
+            .expect("Should parse valid OBJ string");
+        assert!(!mb.vertices.is_empty(), "MeshBuffer should contain vertices");
+        assert!(!mb.indices.is_empty(), "MeshBuffer should contain triangle indices");
+        // 4 triangular sides (4 * 3 = 12 indices) + quad base (2 * 3 = 6 indices) = 18 indices
+        assert_eq!(mb.indices.len(), 18, "Pyramid should have 6 triangles = 18 indices");
+    }
+
+    #[test]
+    fn test_depth_unproject() {
+        let cam_eye = glam::Vec3::new(0.0, 10.0, -10.0);
+        let cam_target = glam::Vec3::new(0.0, 0.0, 0.0);
+        let view = glam::Mat4::look_at_rh(cam_eye, cam_target, glam::Vec3::new(0.0, 1.0, 0.0));
+        let proj = glam::Mat4::perspective_rh(45.0f32.to_radians(), 1.0, 0.1, 100.0);
+        let view_proj = proj * view;
+        let inv_view_proj = view_proj.inverse();
+
+        let cam_uniforms = CameraUniforms {
+            view_proj: view_proj.to_cols_array_2d(),
+            inv_view_proj: inv_view_proj.to_cols_array_2d(),
+            camera_pos: [cam_eye.x, cam_eye.y, cam_eye.z, 1.0],
+            time: 0.0,
+            weather_mode: 0,
+            width: 100,
+            height: 100,
+        };
+
+        // Center of screen (50, 50) projected forward to depth corresponding to target
+        let target_ndc = view_proj * cam_target.extend(1.0);
+        let target_depth = target_ndc.z / target_ndc.w;
+
+        let reconstructed = cam_uniforms.unproject_screen_to_world(50.0, 50.0, target_depth);
+        assert!(
+            (reconstructed - cam_target).length() < 0.01,
+            "Unprojected point should match original target: {reconstructed:?} vs {cam_target:?}"
         );
     }
 }

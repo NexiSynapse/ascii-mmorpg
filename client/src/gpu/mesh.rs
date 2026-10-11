@@ -72,6 +72,84 @@ impl InstanceRaw {
     }
 }
 
+/// Camera view-frustum plane for high-speed AABB & bounding sphere culling
+/// borrowed from Asciicker's plane culling optimization.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct FrustumPlane {
+    pub normal: Vec3,
+    pub distance: f32,
+}
+
+impl FrustumPlane {
+    #[inline]
+    pub fn distance_to_point(&self, p: Vec3) -> f32 {
+        self.normal.dot(p) + self.distance
+    }
+}
+
+/// 6-plane Camera View Frustum for CPU instance culling.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct Frustum {
+    pub planes: [FrustumPlane; 6],
+}
+
+impl Frustum {
+    /// Extracts the 6 frustum planes from a view-projection matrix (Gribb-Hartmann algorithm).
+    pub fn from_view_proj(vp: &Mat4) -> Self {
+        let r0 = vp.row(0);
+        let r1 = vp.row(1);
+        let r2 = vp.row(2);
+        let r3 = vp.row(3);
+
+        let raw = [
+            r3 + r0, // Left
+            r3 - r0, // Right
+            r3 + r1, // Bottom
+            r3 - r1, // Top
+            r3 + r2, // Near
+            r3 - r2, // Far
+        ];
+
+        let mut planes = [FrustumPlane::default(); 6];
+        for (i, p) in raw.iter().enumerate() {
+            let n = Vec3::new(p.x, p.y, p.z);
+            let len = n.length();
+            if len > 1e-6 {
+                planes[i] = FrustumPlane {
+                    normal: n / len,
+                    distance: p.w / len,
+                };
+            }
+        }
+        Self { planes }
+    }
+
+    /// Tests if an axis-aligned bounding box intersects or lies within the view frustum.
+    pub fn test_aabb(&self, min: Vec3, max: Vec3) -> bool {
+        for plane in &self.planes {
+            let p = Vec3::new(
+                if plane.normal.x > 0.0 { max.x } else { min.x },
+                if plane.normal.y > 0.0 { max.y } else { min.y },
+                if plane.normal.z > 0.0 { max.z } else { min.z },
+            );
+            if plane.distance_to_point(p) < 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Tests if a bounding sphere intersects or lies within the view frustum.
+    pub fn test_sphere(&self, center: Vec3, radius: f32) -> bool {
+        for plane in &self.planes {
+            if plane.distance_to_point(center) < -radius {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// Batched prop and particle instances for high-throughput GPU instanced drawing.
 #[derive(Default, Clone, Debug)]
 pub struct SceneBatches {
@@ -869,5 +947,162 @@ impl MeshBuffer {
         let stone = [0.52, 0.54, 0.58, 1.0];
         mb.add_box([0.0, 1.25, 0.0], [0.65, 2.50, 0.65], stone, 0.0, 0.6);
         mb
+    }
+
+    /// Parses a Wavefront `.obj` text string and appends all triangles to the mesh buffer.
+    /// Transforms all vertices by `transform` and assigns `default_color`, `material_id`, and `roughness`.
+    /// Supports vertex positions (v), vertex normals (vn), and face indices (f v, f v//vn, f v/vt/vn).
+    pub fn add_obj(
+        &mut self,
+        obj_content: &str,
+        transform: Mat4,
+        default_color: [f32; 4],
+        material_id: f32,
+        roughness: f32,
+    ) -> Result<usize, String> {
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut triangles_added = 0;
+
+        for line in obj_content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let mut parts = line.split_whitespace();
+            let prefix = match parts.next() {
+                Some(p) => p,
+                None => continue,
+            };
+
+            match prefix {
+                "v" => {
+                    let x: f32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let y: f32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let z: f32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    positions.push(Vec3::new(x, y, z));
+                }
+                "vn" => {
+                    let x: f32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let y: f32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let z: f32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+                    normals.push(Vec3::new(x, y, z).normalize_or_zero());
+                }
+                "f" => {
+                    let face_vertices: Vec<&str> = parts.collect();
+                    if face_vertices.len() < 3 {
+                        continue;
+                    }
+
+                    let parse_corner = |token: &str| -> (usize, Option<usize>) {
+                        let mut sub = token.split('/');
+                        let v_idx = sub.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(1);
+                        let _vt = sub.next();
+                        let vn_idx = sub.next().and_then(|s| s.parse::<i32>().ok());
+
+                        let pos_idx = if v_idx > 0 {
+                            (v_idx as usize).saturating_sub(1)
+                        } else {
+                            (positions.len() as i32 + v_idx).max(0) as usize
+                        };
+
+                        let norm_idx = vn_idx.map(|vn| {
+                            if vn > 0 {
+                                (vn as usize).saturating_sub(1)
+                            } else {
+                                (normals.len() as i32 + vn).max(0) as usize
+                            }
+                        });
+
+                        (pos_idx, norm_idx)
+                    };
+
+                    let corners: Vec<(usize, Option<usize>)> =
+                        face_vertices.iter().map(|&tok| parse_corner(tok)).collect();
+
+                    // Triangulate n-gon using triangle fan
+                    for i in 1..(corners.len() - 1) {
+                        let c0 = corners[0];
+                        let c1 = corners[i];
+                        let c2 = corners[i + 1];
+
+                        let p0 = *positions.get(c0.0).unwrap_or(&Vec3::ZERO);
+                        let p1 = *positions.get(c1.0).unwrap_or(&Vec3::ZERO);
+                        let p2 = *positions.get(c2.0).unwrap_or(&Vec3::ZERO);
+
+                        let default_face_normal = (p1 - p0).cross(p2 - p0).normalize_or_zero();
+
+                        let n0 = c0
+                            .1
+                            .and_then(|idx| normals.get(idx).copied())
+                            .unwrap_or(default_face_normal);
+                        let n1 = c1
+                            .1
+                            .and_then(|idx| normals.get(idx).copied())
+                            .unwrap_or(default_face_normal);
+                        let n2 = c2
+                            .1
+                            .and_then(|idx| normals.get(idx).copied())
+                            .unwrap_or(default_face_normal);
+
+                        let tp0 = (transform * p0.extend(1.0)).truncate();
+                        let tp1 = (transform * p1.extend(1.0)).truncate();
+                        let tp2 = (transform * p2.extend(1.0)).truncate();
+
+                        let tn0 = (transform * n0.extend(0.0)).truncate().normalize_or_zero();
+                        let tn1 = (transform * n1.extend(0.0)).truncate().normalize_or_zero();
+                        let tn2 = (transform * n2.extend(0.0)).truncate().normalize_or_zero();
+
+                        let base = self.vertices.len() as u32;
+                        self.vertices.push(Vertex::new(
+                            tp0.into(),
+                            tn0.into(),
+                            default_color,
+                            material_id,
+                            roughness,
+                        ));
+                        self.vertices.push(Vertex::new(
+                            tp1.into(),
+                            tn1.into(),
+                            default_color,
+                            material_id,
+                            roughness,
+                        ));
+                        self.vertices.push(Vertex::new(
+                            tp2.into(),
+                            tn2.into(),
+                            default_color,
+                            material_id,
+                            roughness,
+                        ));
+
+                        self.indices.extend_from_slice(&[base, base + 1, base + 2]);
+                        triangles_added += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(triangles_added)
+    }
+
+    /// Loads a Wavefront `.obj` file string directly into a new `MeshBuffer`.
+    pub fn load_obj(
+        obj_content: &str,
+        default_color: [f32; 4],
+        material_id: f32,
+        roughness: f32,
+    ) -> Result<Self, String> {
+        let mut mb = Self::new();
+        mb.add_obj(
+            obj_content,
+            Mat4::IDENTITY,
+            default_color,
+            material_id,
+            roughness,
+        )?;
+        Ok(mb)
     }
 }

@@ -567,3 +567,21 @@ Path C implements a pure hardware-accelerated 3D graphics and compute pipeline u
 6. **Zero-Allocation Fast ANSI String Formatter**:
    - Directly converts color changes into pre-allocated terminal strings via integer math without heap allocations, guaranteeing that the CPU formatting loop never bottlenecks the GPU command queue.
 
+### 18.2 Sub-Pixel 3D Rendering & Optimization Architecture (Asciicker Innovations Adapted)
+To achieve razor-sharp asset silhouettes and mathematical depth precision while maintaining our distinct **Ansenjeo volumetric ASCII aesthetic**, the pipeline incorporates key optimization and rendering logic adapted from Michał Sokalski's `asciicker`:
+1. **$2\times$ Super-Sampled G-Buffer (SSAA)**:
+   - Offscreen textures (`color_texture`, `normal_depth_texture`, `depth_texture`) are rasterized at $2\times$ terminal resolution ($2W \times 2H$).
+   - In `ASCII_POST_WGSL`, each compute invocation for cell $(x, y)$ samples the $2 \times 2$ sub-pixel quadrant ($p_{00}, p_{10}, p_{01}, p_{11}$).
+   - Integrates 4-sample sub-pixel color and luminance, eliminating polygon edge swimming and pixel shimmering during camera movement.
+   - Evaluates sub-pixel horizontal and vertical depth/normal differences ($\Delta Z_h, \Delta Z_v$) to orient silhouette edges (`_`, `|`, `/`, `\`) with sub-pixel boundary precision.
+2. **$O(1)$ Depth Unprojection (`CameraUniforms::unproject_screen_to_world`)**:
+   - `GpuCell` encodes GPU 32-bit depth (`depth_bits: u32`).
+   - Using the inverted view-projection matrix (`inv_view_proj`), any screen cell under the cursor is unprojected into exact 3D world $(X, Y, Z)$ coordinates in $O(1)$ constant time with zero CPU mesh-triangle raycasting.
+3. **Camera View-Frustum Plane Culling (`Frustum`)**:
+   - Extracts 6 frustum planes directly from `view_proj` via the Gribb-Hartmann algorithm.
+   - Evaluates `Frustum::test_sphere` and `Frustum::test_aabb` before instance packing, culling off-screen trees, pillars, and entities before they enter the GPU instance buffer.
+4. **Native 3D Wavefront `.obj` Asset Loader**:
+   - `MeshBuffer::load_obj()` and `MeshBuffer::add_obj()` parse standard 3D `.obj` files exported from Blender.
+   - Automatically parses vertex positions, vertex normals, and triangulates polygonal faces with custom materials and roughness, providing a clean path for custom 3D asset importation.
+
+

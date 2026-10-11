@@ -5,6 +5,7 @@
 pub const SCENE_3D_WGSL: &str = r#"
 struct CameraUniforms {
     view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
     camera_pos: vec4<f32>,
     time: f32,
     weather_mode: u32,
@@ -165,7 +166,7 @@ struct GpuCell {
     bg_r: u32,
     bg_g: u32,
     bg_b: u32,
-    _pad: u32,
+    depth_bits: u32,
 };
 
 struct CellBuffer {
@@ -205,50 +206,86 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
 
-    let coords = vec2<i32>(i32(x), i32(y));
-    let center_color = textureLoad(color_tex, coords, 0);
-    let center_nd = textureLoad(normal_depth_tex, coords, 0);
+    // 2x Super-Sampling Quadrant Texel Coordinates (Asciicker 2x sub-sample resolution logic)
+    let base_x = i32(x * 2u);
+    let base_y = i32(y * 2u);
+    let tex_w = i32(config.width * 2u);
+    let tex_h = i32(config.height * 2u);
 
-    // Sobel edge filter over 3x3 normal and depth neighborhood
-    let x_prev = max(coords.x - 1, 0);
-    let x_next = min(coords.x + 1, i32(config.width) - 1);
-    let y_prev = max(coords.y - 1, 0);
-    let y_next = min(coords.y + 1, i32(config.height) - 1);
+    let p00 = vec2<i32>(base_x, base_y);
+    let p10 = vec2<i32>(min(base_x + 1, tex_w - 1), base_y);
+    let p01 = vec2<i32>(base_x, min(base_y + 1, tex_h - 1));
+    let p11 = vec2<i32>(min(base_x + 1, tex_w - 1), min(base_y + 1, tex_h - 1));
 
-    let nd_top = textureLoad(normal_depth_tex, vec2<i32>(coords.x, y_prev), 0);
-    let nd_bot = textureLoad(normal_depth_tex, vec2<i32>(coords.x, y_next), 0);
-    let nd_left = textureLoad(normal_depth_tex, vec2<i32>(x_prev, coords.y), 0);
-    let nd_right = textureLoad(normal_depth_tex, vec2<i32>(x_next, coords.y), 0);
+    let c00 = textureLoad(color_tex, p00, 0);
+    let c10 = textureLoad(color_tex, p10, 0);
+    let c01 = textureLoad(color_tex, p01, 0);
+    let c11 = textureLoad(color_tex, p11, 0);
 
-    let depth_diff_x = abs(nd_right.w - nd_left.w);
-    let depth_diff_y = abs(nd_bot.w - nd_top.w);
-    let normal_diff_x = length(nd_right.xyz - nd_left.xyz);
-    let normal_diff_y = length(nd_bot.xyz - nd_top.xyz);
+    let nd00 = textureLoad(normal_depth_tex, p00, 0);
+    let nd10 = textureLoad(normal_depth_tex, p10, 0);
+    let nd01 = textureLoad(normal_depth_tex, p01, 0);
+    let nd11 = textureLoad(normal_depth_tex, p11, 0);
 
-    let edge_x = depth_diff_x * 8.0 + normal_diff_x;
-    let edge_y = depth_diff_y * 8.0 + normal_diff_y;
+    // 1. Integrated Sub-Pixel Color & Normal/Depth (SSAA Anti-Aliasing)
+    let avg_color = (c00 + c10 + c01 + c11) * 0.25;
+    let avg_nd = (nd00 + nd10 + nd01 + nd11) * 0.25;
+
+    // 2. Sub-Pixel Horizontal & Vertical Gradient Evaluation (Discontinuity detection)
+    // Horizontal difference (Left vs Right)
+    let depth_diff_x = abs((nd10.w + nd11.w) - (nd00.w + nd01.w)) * 0.5;
+    let normal_diff_x = length((nd10.xyz + nd11.xyz) - (nd00.xyz + nd01.xyz)) * 0.5;
+
+    // Vertical difference (Top vs Bottom)
+    let depth_diff_y = abs((nd01.w + nd11.w) - (nd00.w + nd10.w)) * 0.5;
+    let normal_diff_y = length((nd01.xyz + nd11.xyz) - (nd00.xyz + nd10.xyz)) * 0.5;
+
+    // Expanded 1-cell neighborhood context
+    let p_left = vec2<i32>(max(base_x - 1, 0), base_y);
+    let p_right = vec2<i32>(min(base_x + 2, tex_w - 1), base_y);
+    let p_top = vec2<i32>(base_x, max(base_y - 1, 0));
+    let p_bot = vec2<i32>(base_x, min(base_y + 2, tex_h - 1));
+
+    let nd_l = textureLoad(normal_depth_tex, p_left, 0);
+    let nd_r = textureLoad(normal_depth_tex, p_right, 0);
+    let nd_t = textureLoad(normal_depth_tex, p_top, 0);
+    let nd_b = textureLoad(normal_depth_tex, p_bot, 0);
+
+    let neigh_depth_x = abs(nd_r.w - nd_l.w);
+    let neigh_depth_y = abs(nd_b.w - nd_t.w);
+    let neigh_norm_x = length(nd_r.xyz - nd_l.xyz);
+    let neigh_norm_y = length(nd_b.xyz - nd_t.xyz);
+
+    let edge_x = max(depth_diff_x * 10.0 + normal_diff_x, neigh_depth_x * 6.0 + neigh_norm_x);
+    let edge_y = max(depth_diff_y * 10.0 + normal_diff_y, neigh_depth_y * 6.0 + neigh_norm_y);
     let edge_mag = edge_x + edge_y;
 
     var glyph: u32 = 32u; // ' ' default
     var is_edge = false;
 
-    // Detect structural edges (silhouette and geometry creases)
-    if (edge_mag > 0.42 && center_nd.w < 0.999) {
+    // Detect structural edges (silhouettes and creases)
+    if (edge_mag > 0.38 && avg_nd.w < 0.999) {
         is_edge = true;
-        if (edge_y > edge_x * 1.8) {
+        if (edge_y > edge_x * 1.6) {
             glyph = 95u; // '_'
-        } else if (edge_x > edge_y * 1.8) {
+        } else if (edge_x > edge_y * 1.6) {
             glyph = 124u; // '|'
-        } else if (edge_x > 0.3 && edge_y > 0.3) {
-            glyph = 43u; // '+'
+        } else if (edge_x > 0.22 && edge_y > 0.22) {
+            let diag1 = abs(nd00.w - nd11.w);
+            let diag2 = abs(nd10.w - nd01.w);
+            if (diag1 < diag2) {
+                glyph = 47u; // '/'
+            } else {
+                glyph = 92u; // '\'
+            }
         } else {
-            glyph = 47u; // '/'
+            glyph = 43u; // '+'
         }
     }
 
-    // Perceived luminance
-    let luma = dot(center_color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let dither = bayer4(x, y) * 0.06;
+    // Integrated perceived luminance with SSAA smoothing
+    let luma = dot(avg_color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let dither = bayer4(x, y) * 0.05;
     let dithered_luma = clamp(luma + dither, 0.0, 1.0);
 
     if (!is_edge) {
@@ -277,9 +314,9 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     // Boosted vibrant foreground color
-    let fg_rgb = clamp(center_color.rgb * 1.15, vec3<f32>(0.0), vec3<f32>(1.0));
+    let fg_rgb = clamp(avg_color.rgb * config.contrast_boost, vec3<f32>(0.0), vec3<f32>(1.0));
     // Atmospheric dark background tint for deep contrast
-    let bg_rgb = clamp(center_color.rgb * 0.12, vec3<f32>(0.0), vec3<f32>(1.0));
+    let bg_rgb = clamp(avg_color.rgb * 0.12, vec3<f32>(0.0), vec3<f32>(1.0));
 
     let out_idx = y * config.width + x;
     var cell: GpuCell;
@@ -290,7 +327,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     cell.bg_r = u32(clamp(bg_rgb.r * 255.0, 0.0, 255.0));
     cell.bg_g = u32(clamp(bg_rgb.g * 255.0, 0.0, 255.0));
     cell.bg_b = u32(clamp(bg_rgb.b * 255.0, 0.0, 255.0));
-    cell._pad = 0u;
+    cell.depth_bits = bitcast<u32>(avg_nd.w);
 
     cell_output.cells[out_idx] = cell;
 }
