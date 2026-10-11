@@ -241,6 +241,14 @@ impl Renderer {
         self
     }
 
+    pub fn weather(&self) -> WeatherMode {
+        self.weather
+    }
+
+    pub fn set_weather(&mut self, weather: WeatherMode) {
+        self.weather = weather;
+    }
+
     pub fn resize(&mut self, width: i16, height: i16) {
         self.width = width.max(1);
         self.height = height.max(1);

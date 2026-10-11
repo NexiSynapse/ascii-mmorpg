@@ -51,7 +51,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 - `play_wezterm*.bat` locate WezTerm via `%WEZTERM_EXE%`, then `where wezterm-gui.exe`, then `%ProgramFiles%` / `%LOCALAPPDATA%` install dirs; they must keep targeting `wezterm-gui.exe start --always-new-process` (wrapper `wezterm.exe` detaches early → error 10054).
 - All `.bat` launchers default `--fps uncapped`.
 
-## wgpu scene (`wgpu-scene` feature, opt-in)
-- Default builds never touch the GPU: `wgpu`/`pollster` are optional deps. CI (default features) is unaffected.
-- Flags: `--wgpu` (realtime 3D, combines with `--connect`/`--fps`/`--notcurses`), `--wgpu-fallback` (software rasterizer), `--wgpu-demo [N]` (headless benchmark). Env: `WGPU_FORCE_FALLBACK=1`, `WGPU_POWER=low`.
-- Keep wgpu code warning-free under `cargo clippy -p ascii-mmorpg-client --features wgpu-scene --all-targets -- -D warnings`, and keep new std API calls at or below Rust 1.70 (`div_ceil` etc. break the workspace MSRV lint) even though wgpu itself needs a modern toolchain.
+## GPU rendering (Path C, `gpu` feature, default)
+- Offscreen 3D scene + real-time compute ASCII shader (`client/src/gpu/`). Default feature: `gpu` (`wgpu`, `bytemuck`, `pollster`, `glam`).
+- Automatically falls back to CPU procedural renderer if GPU initialization fails, or can be forced with `--cpu`: `cargo run -p ascii-mmorpg-client -- --cpu`.
+- Uses asynchronous staging rings (`RING_SIZE = 2`) and instanced batch rendering for high throughput.
+- Keep GPU code warning-free under `cargo clippy --workspace --all-targets -- -D warnings`.

@@ -5,11 +5,89 @@ use ascii_mmorpg_shared::{
 use std::io::{self, Write};
 
 pub mod assets;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod network;
 pub mod renderer;
-#[cfg(feature = "wgpu-scene")]
-pub mod wgpu_ascii;
 pub use renderer::{Renderer, WeatherMode};
+
+pub trait SceneRenderer {
+    fn resize(&mut self, width: i16, height: i16);
+    fn weather(&self) -> WeatherMode;
+    fn set_weather(&mut self, weather: WeatherMode);
+    fn render(&mut self, world: &WorldSnapshot) -> String {
+        self.render_frame(world, world.tick)
+    }
+    fn render_frame(&mut self, world: &WorldSnapshot, frame: u64) -> String;
+}
+
+impl SceneRenderer for Renderer {
+    fn resize(&mut self, width: i16, height: i16) {
+        self.resize(width, height);
+    }
+    fn weather(&self) -> WeatherMode {
+        self.weather
+    }
+    fn set_weather(&mut self, weather: WeatherMode) {
+        self.weather = weather;
+    }
+    fn render_frame(&mut self, world: &WorldSnapshot, frame: u64) -> String {
+        Renderer::render_frame(self, world, frame)
+    }
+}
+
+#[cfg(feature = "gpu")]
+impl SceneRenderer for gpu::GpuRenderer {
+    fn resize(&mut self, width: i16, height: i16) {
+        self.resize(width, height);
+    }
+    fn weather(&self) -> WeatherMode {
+        self.weather
+    }
+    fn set_weather(&mut self, weather: WeatherMode) {
+        self.weather = weather;
+    }
+    fn render_frame(&mut self, world: &WorldSnapshot, frame: u64) -> String {
+        self.render_frame(world, frame)
+    }
+}
+
+pub enum ActiveRenderer {
+    Cpu(Renderer),
+    #[cfg(feature = "gpu")]
+    Gpu(Box<gpu::GpuRenderer>),
+}
+
+impl SceneRenderer for ActiveRenderer {
+    fn resize(&mut self, width: i16, height: i16) {
+        match self {
+            Self::Cpu(r) => r.resize(width, height),
+            #[cfg(feature = "gpu")]
+            Self::Gpu(r) => r.resize(width, height),
+        }
+    }
+    fn weather(&self) -> WeatherMode {
+        match self {
+            Self::Cpu(r) => r.weather(),
+            #[cfg(feature = "gpu")]
+            Self::Gpu(r) => r.weather(),
+        }
+    }
+    fn set_weather(&mut self, weather: WeatherMode) {
+        match self {
+            Self::Cpu(r) => r.set_weather(weather),
+            #[cfg(feature = "gpu")]
+            Self::Gpu(r) => r.set_weather(weather),
+        }
+    }
+    fn render_frame(&mut self, world: &WorldSnapshot, frame: u64) -> String {
+        match self {
+            Self::Cpu(r) => r.render_frame(world, frame),
+            #[cfg(feature = "gpu")]
+            Self::Gpu(r) => r.render_frame(world, frame),
+        }
+    }
+}
 
 pub trait Terminal {
     fn size(&self) -> (u16, u16);

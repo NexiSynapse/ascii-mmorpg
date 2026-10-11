@@ -1,124 +1,12 @@
 use ascii_mmorpg_client::{
-    apply_local_command, network::ClientConnection, parse_command, sample_world, PlainTerminal,
-    Renderer, Terminal, WeatherMode,
+    apply_local_command, network::ClientConnection, parse_command, sample_world, ActiveRenderer,
+    PlainTerminal, Renderer, SceneRenderer, Terminal, WeatherMode,
 };
 use ascii_mmorpg_shared::{ServerEvent, PROTOCOL_VERSION};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use std::io::{self, BufRead};
 use std::time::{Duration, Instant};
-
-/// Frame production behind the realtime loop: the CPU diorama or the wgpu
-/// offscreen scene. Both end up as strings on any [`Terminal`].
-trait ScenePaint {
-    fn note_size(&mut self, width: u16, height: u16);
-    fn paint(
-        &mut self,
-        world: &ascii_mmorpg_shared::WorldSnapshot,
-        frame: u64,
-    ) -> Result<String, String>;
-    fn handles_weather(&self) -> bool {
-        false
-    }
-    fn cycle_weather(&mut self) -> &'static str {
-        ""
-    }
-    fn status_label(&self) -> String {
-        String::new()
-    }
-}
-
-struct AnsiPaint {
-    renderer: Renderer,
-}
-
-impl AnsiPaint {
-    fn new(width: u16, height: u16, weather: WeatherMode) -> Self {
-        Self {
-            renderer: Renderer {
-                width: width as i16,
-                height: height.saturating_sub(5) as i16,
-                weather,
-            },
-        }
-    }
-}
-
-impl ScenePaint for AnsiPaint {
-    fn note_size(&mut self, width: u16, height: u16) {
-        self.renderer
-            .resize(width as i16, height.saturating_sub(5) as i16);
-    }
-
-    fn paint(
-        &mut self,
-        world: &ascii_mmorpg_shared::WorldSnapshot,
-        frame: u64,
-    ) -> Result<String, String> {
-        Ok(self.renderer.render_frame(world, frame))
-    }
-
-    fn handles_weather(&self) -> bool {
-        true
-    }
-
-    fn cycle_weather(&mut self) -> &'static str {
-        self.renderer.weather = match self.renderer.weather {
-            WeatherMode::Rain => WeatherMode::Snow,
-            WeatherMode::Snow => WeatherMode::Storm,
-            WeatherMode::Storm => WeatherMode::Rain,
-        };
-        match self.renderer.weather {
-            WeatherMode::Rain => "Rain",
-            WeatherMode::Snow => "Snowfall",
-            WeatherMode::Storm => "Storm",
-        }
-    }
-
-    fn status_label(&self) -> String {
-        match self.renderer.weather {
-            WeatherMode::Rain => "Rain",
-            WeatherMode::Snow => "Snowfall",
-            WeatherMode::Storm => "Storm",
-        }
-        .into()
-    }
-}
-
-#[cfg(feature = "wgpu-scene")]
-struct WgpuPaint {
-    backend: ascii_mmorpg_client::wgpu_ascii::WgpuAscii,
-    width: u16,
-    height: u16,
-}
-
-#[cfg(feature = "wgpu-scene")]
-impl ScenePaint for WgpuPaint {
-    fn note_size(&mut self, width: u16, height: u16) {
-        self.width = width;
-        self.height = height;
-    }
-
-    fn paint(
-        &mut self,
-        world: &ascii_mmorpg_shared::WorldSnapshot,
-        frame: u64,
-    ) -> Result<String, String> {
-        self.backend
-            .render_snapshot(world, frame, self.width, self.height)
-    }
-
-    fn status_label(&self) -> String {
-        format!(
-            "3D{}",
-            if self.backend.used_fallback() {
-                " fallback"
-            } else {
-                ""
-            }
-        )
-    }
-}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -128,44 +16,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|arg| arg == "--line") {
         return run_line_mode();
     }
-    if args.iter().any(|arg| arg == "--wgpu-demo") {
-        #[cfg(feature = "wgpu-scene")]
-        {
-            return run_wgpu_demo(&args);
-        }
-        #[cfg(not(feature = "wgpu-scene"))]
-        {
-            return Err(
-                "--wgpu-demo requires cargo run -p ascii-mmorpg-client --features wgpu-scene"
-                    .into(),
-            );
-        }
-    }
 
     let fps = target_fps(&args);
     let weather = weather_mode(&args);
+    let force_cpu = args.iter().any(|arg| arg == "--cpu");
     let address = connect_address(&args)?;
-    if args.iter().any(|arg| arg == "--wgpu") {
-        #[cfg(feature = "wgpu-scene")]
-        {
-            return run_wgpu_realtime(
-                address.as_deref(),
-                fps,
-                args.iter().any(|arg| arg == "--wgpu-fallback"),
-                args.iter().any(|arg| arg == "--notcurses"),
-            );
-        }
-        #[cfg(not(feature = "wgpu-scene"))]
-        {
-            return Err(
-                "--wgpu requires cargo run -p ascii-mmorpg-client --features wgpu-scene".into(),
-            );
-        }
-    }
     if args.iter().any(|arg| arg == "--notcurses") {
         #[cfg(feature = "notcurses")]
         {
-            return run_realtime_notcurses(address.as_deref(), fps, weather);
+            return run_realtime_notcurses(address.as_deref(), fps, weather, force_cpu);
         }
         #[cfg(not(feature = "notcurses"))]
         {
@@ -174,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    run_realtime(address.as_deref(), fps, weather)
+    run_realtime(address.as_deref(), fps, weather, force_cpu)
 }
 
 fn weather_mode(args: &[String]) -> WeatherMode {
@@ -259,12 +118,10 @@ fn run_realtime(
     address: Option<&str>,
     fps: u32,
     weather: WeatherMode,
+    force_cpu: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
-    let terminal = PlainTerminal::new();
-    let (width, height) = terminal.size();
-    let mut paint = AnsiPaint::new(width, height, weather);
-    run_realtime_with_paint(address, terminal, fps, &mut paint)
+    run_realtime_with_terminal(address, PlainTerminal::new(), fps, weather, force_cpu)
 }
 
 #[cfg(feature = "notcurses")]
@@ -272,103 +129,42 @@ fn run_realtime_notcurses(
     address: Option<&str>,
     fps: u32,
     weather: WeatherMode,
+    force_cpu: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
-    let terminal = ascii_mmorpg_client::NotcursesTerminal::new()?;
-    let (width, height) = terminal.size();
-    let mut paint = AnsiPaint::new(width, height, weather);
-    run_realtime_with_paint(address, terminal, fps, &mut paint)
+    let term = ascii_mmorpg_client::NotcursesTerminal::new()?;
+    run_realtime_with_terminal(address, term, fps, weather, force_cpu)
 }
 
-#[cfg(feature = "wgpu-scene")]
-fn run_wgpu_realtime(
-    address: Option<&str>,
-    fps: u32,
-    fallback: bool,
-    notcurses: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let backend = ascii_mmorpg_client::wgpu_ascii::WgpuAscii::init(fallback)
-        .map_err(|error| format!("wgpu init failed: {error}"))?;
-    eprintln!(
-        "wgpu scene on {}{}",
-        backend.adapter_name(),
-        if backend.used_fallback() {
-            " [software fallback]"
-        } else {
-            ""
-        }
-    );
-    enable_raw_mode()?;
-    let mut paint = WgpuPaint {
-        backend,
-        width: 80,
-        height: 24,
-    };
-    if notcurses {
-        #[cfg(feature = "notcurses")]
-        {
-            return run_realtime_with_paint(
-                address,
-                ascii_mmorpg_client::NotcursesTerminal::new()?,
-                fps,
-                &mut paint,
-            );
-        }
-        #[cfg(not(feature = "notcurses"))]
-        {
-            return Err(
-                "--notcurses requires cargo run -p ascii-mmorpg-client --features notcurses".into(),
-            );
-        }
-    }
-    run_realtime_with_paint(address, PlainTerminal::new(), fps, &mut paint)
-}
-
-#[cfg(feature = "wgpu-scene")]
-fn run_wgpu_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let frames = args
-        .iter()
-        .position(|arg| arg == "--wgpu-demo")
-        .and_then(|index| args.get(index + 1))
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(10);
-    let fallback = args.iter().any(|arg| arg == "--wgpu-fallback");
-    let mut backend = ascii_mmorpg_client::wgpu_ascii::WgpuAscii::init(fallback)
-        .map_err(|error| format!("wgpu init failed: {error}"))?;
-    eprintln!(
-        "adapter: {}{}",
-        backend.adapter_name(),
-        if backend.used_fallback() {
-            " [software fallback]"
-        } else {
-            ""
-        }
-    );
-    let world = sample_world();
-    let started = Instant::now();
-    let mut last = String::new();
-    for frame in 0..frames.max(1) {
-        last = backend.render_snapshot(&world, frame, 80, 40)?;
-    }
-    let ms = started.elapsed().as_secs_f64() * 1000.0 / frames.max(1) as f64;
-    println!("{last}");
-    eprintln!(
-        "rendered {frames} frames at 80x40: {ms:.1} ms/frame ({:.0} FPS) | gpu submit {:.2} ms",
-        if ms > 0.0 { 1000.0 / ms } else { 0.0 },
-        backend.last_submit_ms(),
-    );
-    Ok(())
-}
-
-fn run_realtime_with_paint<T: Terminal>(
+fn run_realtime_with_terminal<T: Terminal>(
     address: Option<&str>,
     mut terminal: T,
     fps: u32,
-    paint: &mut dyn ScenePaint,
+    weather: WeatherMode,
+    force_cpu: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = address.map(ClientConnection::connect).transpose()?;
     let (width, height) = terminal.size();
-    paint.note_size(width, height);
+    let render_w = width as i16;
+    let render_h = height.saturating_sub(5) as i16;
+
+    let mut renderer = if !force_cpu {
+        #[cfg(feature = "gpu")]
+        {
+            match ascii_mmorpg_client::gpu::GpuRenderer::new(render_w, render_h, weather) {
+                Ok(gpu_r) => ActiveRenderer::Gpu(Box::new(gpu_r)),
+                Err(err) => {
+                    eprintln!("[WGPU] GPU offscreen init failed ({err}). Falling back to CPU.");
+                    ActiveRenderer::Cpu(Renderer::new(render_w, render_h).with_weather(weather))
+                }
+            }
+        }
+        #[cfg(not(feature = "gpu"))]
+        ActiveRenderer::Cpu(Renderer::new(render_w, render_h).with_weather(weather))
+    } else {
+        ActiveRenderer::Cpu(Renderer::new(render_w, render_h).with_weather(weather))
+    };
+
     let mut world = sample_world();
     world.messages = vec![match address {
         Some(address) => {
@@ -383,13 +179,15 @@ fn run_realtime_with_paint<T: Terminal>(
         let _ = event::read()?;
     }
 
-    terminal.draw(
-        &paint
-            .paint(&world, world.tick)
-            .map_err(|error| format!("scene paint failed: {error}"))?,
-    )?;
+    terminal.draw(&renderer.render(&world))?;
 
-    let result = realtime_loop(&mut terminal, paint, &mut world, connection.as_mut(), fps);
+    let result = realtime_loop(
+        &mut terminal,
+        &mut renderer,
+        &mut world,
+        connection.as_mut(),
+        fps,
+    );
     let disable_result = disable_raw_mode();
     if let Some(connection) = connection.as_mut() {
         connection.close();
@@ -403,7 +201,7 @@ fn run_realtime_with_paint<T: Terminal>(
 
 fn realtime_loop(
     terminal: &mut impl Terminal,
-    paint: &mut dyn ScenePaint,
+    renderer: &mut impl SceneRenderer,
     world: &mut ascii_mmorpg_shared::WorldSnapshot,
     mut connection: Option<&mut ClientConnection>,
     target_fps: u32,
@@ -419,7 +217,7 @@ fn realtime_loop(
     let mut last_draw_ms = 0.0f64;
     'game: loop {
         let (width, height) = terminal.refresh_size();
-        paint.note_size(width, height);
+        renderer.resize(width as i16, height.saturating_sub(5) as i16);
         let mut disconnected = false;
         if let Some(connection) = connection.as_deref_mut() {
             while let Some(event) = connection.try_recv() {
@@ -437,8 +235,8 @@ fn realtime_loop(
                             }
                             welcomed = true;
                             world.messages = vec![format!(
-                                    "Connected as player {player_id}. Awaiting authoritative snapshots."
-                                )];
+                                "Connected as player {player_id}. Awaiting authoritative snapshots."
+                            )];
                         }
                         ServerEvent::Snapshot(snapshot) => *world = snapshot,
                         ServerEvent::Error(message) => {
@@ -491,11 +289,19 @@ fn realtime_loop(
                         KeyCode::Char('f') => Some("f"),
                         KeyCode::Char('r') => Some("r"),
                         KeyCode::Char('v') | KeyCode::Char('t') => {
-                            if paint.handles_weather() {
-                                let weather_label = paint.cycle_weather();
-                                world.messages =
-                                    vec![format!("Weather overlay changed to {weather_label}.")];
-                            }
+                            let next_weather = match renderer.weather() {
+                                WeatherMode::Rain => WeatherMode::Snow,
+                                WeatherMode::Snow => WeatherMode::Storm,
+                                WeatherMode::Storm => WeatherMode::Rain,
+                            };
+                            renderer.set_weather(next_weather);
+                            let weather_label = match next_weather {
+                                WeatherMode::Rain => "Rain",
+                                WeatherMode::Snow => "Snowfall",
+                                WeatherMode::Storm => "Storm",
+                            };
+                            world.messages =
+                                vec![format!("Weather overlay changed to {weather_label}.")];
                             None
                         }
                         _ => None,
@@ -573,11 +379,7 @@ fn realtime_loop(
 
         animation_frame = animation_frame.wrapping_add(1);
         let draw_start = Instant::now();
-        terminal.draw(
-            &paint
-                .paint(world, animation_frame)
-                .map_err(|error| format!("scene paint failed: {error}"))?,
-        )?;
+        terminal.draw(&renderer.render_frame(world, animation_frame))?;
         let draw_ms = draw_start.elapsed().as_secs_f64() * 1000.0;
         last_draw_ms = if last_draw_ms == 0.0 {
             draw_ms
@@ -598,13 +400,13 @@ fn realtime_loop(
                 } else {
                     format!("{target_fps} target")
                 };
-                let mode_help = if paint.handles_weather() {
-                    format!("V weather ({}), ", paint.status_label())
-                } else {
-                    format!("{} renderer, ", paint.status_label())
+                let weather_label = match renderer.weather() {
+                    WeatherMode::Rain => "Rain",
+                    WeatherMode::Snow => "Snowfall",
+                    WeatherMode::Storm => "Storm",
                 };
                 world.messages = vec![format!(
-                    "Real-time mode: WASD move, F attack, R rest, {mode_help}Q quit. [{display_fps} FPS ({target_label}) | draw: {last_draw_ms:.2}ms]"
+                    "Real-time mode: WASD move, F attack, R rest, V weather ({weather_label}), Q quit. [{display_fps} FPS ({target_label}) | draw: {last_draw_ms:.2}ms]"
                 )];
             }
         }
