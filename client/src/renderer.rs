@@ -69,6 +69,12 @@ enum Ink {
     SnowGlow,
     SnowSoft,
     Splash,
+    // Living Water Surface & Bridge Palette
+    WaterDeep,
+    WaterShallow,
+    WaterRipple,
+    WaterShimmer,
+    BridgeWood,
 }
 
 impl Ink {
@@ -130,6 +136,12 @@ impl Ink {
             Self::SnowGlow => "\x1b[38;2;255;255;255m", // Crystalline specular highlight
             Self::SnowSoft => "\x1b[38;2;160;195;225m", // Twilight soft snow flurry
             Self::Splash => "\x1b[38;2;180;225;255m",  // Impact water spray
+            // Living Water Surface & Bridge Palette
+            Self::WaterDeep => "\x1b[38;2;24;62;120m", // Deep sapphire/azure current
+            Self::WaterShallow => "\x1b[38;2;48;128;185m", // Clear cerulean shallows
+            Self::WaterRipple => "\x1b[38;2;85;188;225m", // Cresting aquamarine wave ripple
+            Self::WaterShimmer => "\x1b[38;2;215;242;255m", // Sparkling specular glint
+            Self::BridgeWood => "\x1b[38;2;130;85;48m", // Weathered timber bridge plank
         }
     }
 }
@@ -225,6 +237,7 @@ pub struct Renderer {
     pub width: i16,
     pub height: i16,
     pub weather: WeatherMode,
+    pub active_modal: crate::ui::ActiveModal,
     pub last_player_pos: std::cell::Cell<Option<ascii_mmorpg_shared::Point>>,
     pub last_move_instant: std::cell::Cell<Option<std::time::Instant>>,
 }
@@ -241,6 +254,7 @@ impl Renderer {
             width: width.max(1),
             height: height.max(1),
             weather: WeatherMode::Rain,
+            active_modal: crate::ui::ActiveModal::None,
             last_player_pos: std::cell::Cell::new(None),
             last_move_instant: std::cell::Cell::new(None),
         }
@@ -257,6 +271,14 @@ impl Renderer {
 
     pub fn set_weather(&mut self, weather: WeatherMode) {
         self.weather = weather;
+    }
+
+    pub fn active_modal(&self) -> crate::ui::ActiveModal {
+        self.active_modal
+    }
+
+    pub fn set_active_modal(&mut self, modal: crate::ui::ActiveModal) {
+        self.active_modal = modal;
     }
 
     pub fn resize(&mut self, width: i16, height: i16) {
@@ -310,12 +332,18 @@ impl Renderer {
         let canvas = self.render_canvas(world, frame);
         let mut output = canvas.rows();
         let mut hud = crate::ui::RatatuiHud::new();
-        let hud_overlay = hud.render_hud_overlay(
+        let hud_height = if self.active_modal != crate::ui::ActiveModal::None {
+            12
+        } else {
+            7
+        };
+        let hud_overlay = hud.render_hud_overlay_with_modal(
             world,
             self.width.max(40) as u16,
-            7,
+            hud_height,
             self.weather,
             "CPU PROCEDURAL",
+            self.active_modal,
         );
         output.push('\n');
         output.push_str(&hud_overlay);
@@ -444,11 +472,47 @@ impl Renderer {
                 let wy = camera.y + y as i16 - canvas.height as i16 / 2;
                 let patch = (wx * 17 + wy * 31).rem_euclid(23);
                 let path = (wx - wy / 3).rem_euclid(13) <= 2;
-                // Calibrated so the old Manhattan bands map across: core at the
-                // fixture, lit within ~3 cells, meadow within ~6.
                 let level = Self::light_level(wx, wy, camera);
+                let river_center = 8 + (wx / 5);
+                let river_dist = (wy - river_center).abs();
+                let is_river = river_dist <= 1;
+                let is_bridge = is_river && path;
 
-                let (glyph, ink) = if level > 0.8 {
+                let (glyph, ink) = if is_bridge {
+                    if river_dist == 0 {
+                        ('=', Ink::BridgeWood)
+                    } else {
+                        ('#', Ink::BridgeWood)
+                    }
+                } else if is_river {
+                    let ripple_phase = (wx.wrapping_mul(7) as i32
+                        + wy.wrapping_mul(11) as i32
+                        + (frame / 3) as i32)
+                        .rem_euclid(10);
+                    if level > 0.6 {
+                        match ripple_phase {
+                            0 => ('~', Ink::TorchGlow),
+                            1 | 2 => ('≈', Ink::WaterShimmer),
+                            3 | 4 => ('~', Ink::WaterShallow),
+                            _ => ('-', Ink::WaterDeep),
+                        }
+                    } else {
+                        match ripple_phase {
+                            0 => ('~', Ink::WaterShimmer),
+                            1 | 2 => ('≈', Ink::WaterRipple),
+                            3 | 4 => ('~', Ink::WaterShallow),
+                            5 | 6 => ('-', Ink::WaterDeep),
+                            _ => ('·', Ink::WaterDeep),
+                        }
+                    }
+                } else if river_dist == 2 && !path && level <= 0.55 {
+                    match patch % 4 {
+                        0 => ('%', Ink::Moss),
+                        1 => (',', Ink::GrassMeadow),
+                        2 => ('~', Ink::WaterDeep),
+                        _ => ('.', Ink::GrassDark),
+                    }
+                } else if level > 0.8 {
                     // Blazing torch/lantern core
                     match patch % 3 {
                         0 => ('*', Ink::TorchFlame),
@@ -576,8 +640,8 @@ impl Renderer {
         canvas.text(2, 1, "+", Ink::Muted);
     }
 
-    /// Inks the weather overlay is allowed to paint. Everything else counts as
-    /// stable scene content for the shimmer metric.
+    /// Inks the weather and dynamic water surface overlay is allowed to paint.
+    /// Everything else counts as stable scene content for the shimmer metric.
     #[cfg(test)]
     fn is_weather_ink(ink: Ink) -> bool {
         matches!(
@@ -589,6 +653,10 @@ impl Renderer {
                 | Ink::SnowSoft
                 | Ink::Splash
                 | Ink::LightningWhite
+                | Ink::WaterShimmer
+                | Ink::WaterRipple
+                | Ink::WaterShallow
+                | Ink::WaterDeep
         )
     }
 
@@ -612,6 +680,11 @@ impl Renderer {
             Ink::CobbleGlow => Ink::CobbleRoad,
             Ink::CobbleRoad => Ink::CobbleBorder,
             Ink::CobbleBorder => Ink::StoneDark,
+            Ink::WaterShimmer => Ink::WaterRipple,
+            Ink::WaterRipple => Ink::WaterShallow,
+            Ink::WaterShallow => Ink::WaterDeep,
+            Ink::WaterDeep => Ink::Background,
+            Ink::BridgeWood => Ink::WoodPost,
             other => other,
         }
     }
@@ -1604,7 +1677,10 @@ mod tests {
         let renderer = Renderer::new(40, 20).with_weather(WeatherMode::Rain);
         let world = scene_world();
         // Stationary player is idle: feet must remain in Frame 0 pose across frames
-        assert!(!renderer.is_player_walking(&world), "Stationary player should be idle");
+        assert!(
+            !renderer.is_player_walking(&world),
+            "Stationary player should be idle"
+        );
         let canvas0 = renderer.render_canvas(&world, 0);
         let canvas1 = renderer.render_canvas(&world, 1);
         let canvas3 = renderer.render_canvas(&world, 3);

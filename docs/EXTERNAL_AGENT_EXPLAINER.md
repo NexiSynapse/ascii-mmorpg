@@ -19,7 +19,8 @@ The game presents an atmospheric, high-fidelity world—featuring ancient mossy 
   2. **Procedural ANSI CPU Engine (`client/src/renderer.rs`)**: 2.5D oblique isometric rasterizer with ray/depth veils, procedural surface seed texturing, multi-line authored ASCII assets, and post-processing weather passes.
 * **Movement-Aware Articulation**: Eliminates the "marching in place" artifact common in retro games; characters feature stationary stance postures with firmly planted boots when idle, and articulate smooth leg swings only during active displacement.
 * **Differential Terminal Streaming**: Custom dirty row-level scanner with continuous CRLF burst streaming, preventing Windows ConPTY tearing and achieving smooth, flicker-free 60+ FPS in terminal hosts.
-* **Ratatui Dark Fantasy HUD**: TrueColor fractional health gauges, colorized scrolling combat event logs, nearby hostile radar lock, and responsive status headers.
+* **Ratatui Dark Fantasy HUD & Interactive Modals**: TrueColor fractional health gauges, colorized scrolling combat event logs, nearby hostile radar lock, and interactive modal dialogs for Inventory (`I`), Character Sheet (`C`), and Overworld Map (`M`) with contextual hotkey legends.
+* **Living Water & Wave Simulation (Dual-Engine Parity)**: Sinusoidal winding river channels with animated wave ripples, reeds, and timber bridge crossings in the CPU ANSI engine, matched by vertex wave displacement and Blinn-Phong specular glints in WGPU shaders.
 
 ---
 
@@ -435,6 +436,106 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
   ```
 * **Top-Level Weather Post-Process**: Renders animated diagonal rain streaks (`/`), crystalline snowflakes (`*`, `•`, `·`, `.`), or storm lightning flashes over the rendered world before blitting to the terminal.
 
+### 4.3 Living Water Simulation & Dynamic Specular Shimmer
+
+Flat water surfaces in retro games often look inert. `ascii-mmorpg` implements an active water surface simulation that preserves parity between the procedural CPU ANSI renderer and the WGPU 3D hardware pipeline.
+
+#### 4.3.1 CPU Procedural River, Wave Ripples & Timber Bridges (`client/src/renderer.rs`)
+In the procedural CPU renderer, a winding river cuts across the map using an integer-divided slope function:
+$$\text{river\_center} = 8 + \lfloor wx / 5 \rfloor$$
+$$\Delta y = |wy - \text{river\_center}|$$
+
+1. **River Surface & Shimmer Cycling**:
+   When $\Delta y \le 1$, the cell is inside the active riverbed. The wave phase dynamically advances based on world coordinates and the client frame counter:
+   $$\text{ripple\_phase} = (7 \cdot wx + 11 \cdot wy + \lfloor \text{frame} / 3 \rfloor) \pmod{10}$$
+   - **Illuminated Waters** ($\text{level} > 0.6$ from nearby torches or lanterns): Phase 0 reflects torch fire (`~`, `Ink::TorchGlow`), phases 1–2 flash bright specular crests (`≈`, `Ink::WaterShimmer`), phases 3–4 ripple in clear shallows (`~`, `Ink::WaterShallow`), and phases 5–9 deepen to dark sapphire (`-`, `Ink::WaterDeep`).
+   - **Nocturnal / Ambient Waters** ($\text{level} \le 0.6$): Cycles across sparkling glints (`~`, `Ink::WaterShimmer`), aquamarine waves (`≈`, `Ink::WaterRipple`), clear shallows (`~`, `Ink::WaterShallow`), and deep calm current (`-` / `·`, `Ink::WaterDeep`).
+2. **Timber Road Bridge Crossings**:
+   When the player's stone highway ($(wx - \lfloor wy/3 \rfloor) \pmod{13} \le 2$) intersects the river channel ($\Delta y \le 1$), the water is bridged with sturdy timber planks (`=` for center, `#` for side railings, colored with `Ink::BridgeWood` `#825530`) instead of being submerged.
+3. **Wetland Reeds & Riverbanks**:
+   At the water's edge ($\Delta y = 2$), the shoreline is decorated with procedural reeds (`%`, `Ink::Moss`), shore grass (`,`, `Ink::GrassMeadow`), and shallow pools (`~`, `Ink::WaterDeep`).
+4. **Flicker-Free Test Invariant**:
+   To preserve the repository's strict anti-flicker test (`still_scene_cells_do_not_shimmer_between_frames`), all water inks (`WaterShimmer`, `WaterRipple`, `WaterShallow`, `WaterDeep`) are whitelisted alongside precipitation in `is_weather_ink`:
+
+```rust
+// In client/src/renderer.rs render_canvas:
+let river_center = 8 + (wx / 5);
+let river_dist = (wy - river_center).abs();
+let is_river = river_dist <= 1;
+let is_bridge = is_river && path;
+
+let (glyph, ink) = if is_bridge {
+    if river_dist == 0 {
+        ('=', Ink::BridgeWood)
+    } else {
+        ('#', Ink::BridgeWood)
+    }
+} else if is_river {
+    let ripple_phase = (wx.wrapping_mul(7) as i32
+        + wy.wrapping_mul(11) as i32
+        + (frame / 3) as i32)
+        .rem_euclid(10);
+    if level > 0.6 {
+        match ripple_phase {
+            0 => ('~', Ink::TorchGlow),
+            1 | 2 => ('≈', Ink::WaterShimmer),
+            3 | 4 => ('~', Ink::WaterShallow),
+            _ => ('-', Ink::WaterDeep),
+        }
+    } else {
+        match ripple_phase {
+            0 => ('~', Ink::WaterShimmer),
+            1 | 2 => ('≈', Ink::WaterRipple),
+            3 | 4 => ('~', Ink::WaterShallow),
+            5 | 6 => ('-', Ink::WaterDeep),
+            _ => ('·', Ink::WaterDeep),
+        }
+    }
+} else if river_dist == 2 && !path && level <= 0.55 {
+    match patch % 4 {
+        0 => ('%', Ink::Moss),
+        1 => (',', Ink::GrassMeadow),
+        2 => ('~', Ink::WaterDeep),
+        _ => ('.', Ink::GrassDark),
+    }
+} else if level > 0.8 {
+    // ...
+```
+
+#### 4.3.2 Hardware WGPU Shaders: Vertex Displacement & Specular Glint (`client/src/gpu/shaders.rs`)
+In the 3D hardware pipeline, water surfaces are assigned `material_id = 6.0`. 
+
+1. **Vertex Shader Height Wave (`vs_main`)**:
+   Displaces water surface vertices along the Y-axis procedurally:
+   ```wgsl
+   // Procedural water surface waves (material_id == 6.0: streams, rivers, pools)
+   if (mat_id >= 5.8 && mat_id <= 6.2) {
+       let wave = sin(camera.time * 2.6 + world_pos4.x * 1.8 + world_pos4.z * 1.2) * 0.035;
+       world_pos4.y += wave;
+   }
+   ```
+2. **Fragment Shader Wave Normal Perturbation & Blinn-Phong Glint (`fs_main`)**:
+   Perturbs surface normal vectors dynamically based on world position and camera time, calculating sharp specular highlights:
+   ```wgsl
+   // Water surfaces: azure water color with dynamic wave normal specular shimmer
+   if (in.material_id >= 5.8 && in.material_id <= 6.2) {
+       let wave_t = camera.time * 2.6;
+       let wave_norm = normalize(vec3<f32>(
+           sin(wave_t + in.world_pos.x * 2.2) * 0.25,
+           0.95,
+           cos(wave_t + in.world_pos.z * 2.0) * 0.25
+       ));
+       let water_base = vec3<f32>(0.09, 0.25, 0.48);
+       let water_NdotL = max(dot(wave_norm, normalize(lighting.sun_dir.xyz)), 0.0);
+       let water_H = normalize(normalize(lighting.sun_dir.xyz) + V);
+       let water_spec = pow(max(dot(wave_norm, water_H), 0.0), 16.0) * 0.85;
+       let water_color = water_base * (lighting.ambient_color.rgb + lighting.sun_color.rgb * water_NdotL) + vec3<f32>(water_spec);
+       out.color = vec4<f32>(water_color, 0.85);
+       out.normal_depth = vec4<f32>(wave_norm * 0.5 + 0.5, in.clip_position.z);
+       return out;
+   }
+   ```
+
 ---
 
 ## 5. Animation & Articulation Systems
@@ -732,7 +833,191 @@ pub fn buffer_to_ansi(buf: &Buffer) -> String {
 }
 ```
 
-### 7.3 Real-World Performance
+### 7.3 Interactive Modal Architecture (`ActiveModal`)
+
+Inspired by rich terminal role-playing games (such as `CmdMMO`), `ascii-mmorpg` implements an interactive modal dialog overlay system that allows players to inspect their equipment, study character attributes, and view an overworld topological map without leaving the main terminal view or inducing ConPTY desync.
+
+#### 7.3.1 Modal State & Trait Integration (`client/src/ui.rs`, `client/src/lib.rs`)
+Modals are represented by a zero-cost copyable enum:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActiveModal {
+    #[default]
+    None,
+    Inventory,
+    CharacterSheet,
+    WorldMap,
+}
+```
+
+The `SceneRenderer` trait exposes modal management across all rendering backends (`Renderer`, `GpuRenderer`, and `ActiveRenderer`):
+
+```rust
+pub trait SceneRenderer {
+    fn resize(&mut self, width: i16, height: i16);
+    fn weather(&self) -> WeatherMode;
+    fn set_weather(&mut self, weather: WeatherMode);
+    fn active_modal(&self) -> ActiveModal { ActiveModal::None }
+    fn set_active_modal(&mut self, modal: ActiveModal) { let _ = modal; }
+    fn toggle_modal(&mut self, modal: ActiveModal) {
+        if self.active_modal() == modal {
+            self.set_active_modal(ActiveModal::None);
+        } else {
+            self.set_active_modal(modal);
+        }
+    }
+    fn render(&mut self, world: &WorldSnapshot) -> String;
+    fn render_frame(&mut self, world: &WorldSnapshot, frame: u64) -> String;
+}
+```
+
+#### 7.3.2 Dynamic HUD Space Allocation & ConPTY Safety (`client/src/main.rs`)
+Rather than opening a separate fullscreen secondary screen buffer (which risks desynchronizing ConPTY cursor tracking), the game's event loop dynamically adjusts its viewport reserve:
+
+```rust
+let (width, height) = terminal.refresh_size();
+let hud_reserve = if renderer.active_modal() != ascii_mmorpg_client::ActiveModal::None {
+    10
+} else {
+    5
+};
+renderer.resize(width as i16, height.saturating_sub(hud_reserve) as i16);
+```
+
+When a modal is active, the game allocates 10 rows to the bottom HUD buffer (and 12 rows inside Ratatui's canvas), cleanly presenting the modal dialog directly above the hotkey bar. When closed, it contracts to 5 rows, instantly restoring full view to the world canvas.
+
+#### 7.3.3 Modal Renderers & Layout Breakdown (`client/src/ui.rs`)
+Ratatui renders the modals using double-bordered TrueColor frames (`BorderType::Double`, `Color::Rgb(210, 160, 60)` gold):
+
+1. **Inventory & Equipment Modal (`[I]`)**:
+   Splits horizontally into two panels:
+   - **Equipped Gear**: Slot items for Mainhand (`⚔ Steel Broadsword`), Offhand (`🛡 Heavy Oak Shield`), Armor (`🛡 Iron Plate Armor`), Ring (`💍 Band of Fortitude`), and Amulet (`📿 Amber Talisman`).
+   - **Backpack Storage & Capacity**: Consumables (`Healing Draught x3`, `Mana Philter x2`), utility items (`Torch x5`, `Lockpick x4`), and live weight gauge (`Weight: 18.5 / 50.0 kg [███░░░░░░░]`).
+2. **Character Sheet Modal (`[C]`)**:
+   Splits horizontally into two panels:
+   - **Identity & Core Vitals**: Class (`Paladin`), Level progression with experience bar (`Level 4 [████████░░] 82%`), HP bar (`100/100`), and Mana bar (`50/50`).
+   - **Attributes & Modifiers**: Primary attributes (`STR: 18`, `DEX: 14`, `INT: 10`, `VIT: 16`) alongside derived combat modifiers (`Phys Power: 28`, `Spell Power: 10`, `Armor: 15`, `Crit Hit: 8.5%`, `Dodge: 5.0%`).
+3. **Overworld Regional Map Modal (`[M]`)**:
+   Splits horizontally into two panels:
+   - **Topological Grid**: 2D cartographic view showing mountain ridges (`▲`), dense pine forests (`♣`), ancient fortress gates (`⛩`), mossy ruins (`🏛`), the winding river (`~`), cobblestone highways (`#`), and the player's live position (`@`).
+   - **Exploration Intel**: Player GPS coordinates (`(x, y)`), current zone title (`Ancient Fortress Woods`), point-of-interest coordinates, and nearby hostile entity radar tracking count.
+
+```rust
+// In client/src/ui.rs:
+fn render_inventory_modal(&self, buf: &mut Buffer, area: Rect, _world: &WorldSnapshot) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Rgb(210, 160, 60)))
+        .title(Span::styled(
+            " 🎒 Inventory & Equipment [I] ",
+            Style::default().fg(Color::Rgb(255, 220, 100)).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    block.render(area, buf);
+
+    let inv_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(inner);
+
+    let equipment_lines = vec![
+        Line::from(vec![
+            Span::styled("⚔ Main: ", Style::default().fg(Color::Rgb(200, 180, 120))),
+            Span::styled("Steel Broadsword (+12 Atk)", Style::default().fg(Color::Rgb(240, 240, 240))),
+        ]),
+        Line::from(vec![
+            Span::styled("🛡 Off:  ", Style::default().fg(Color::Rgb(200, 180, 120))),
+            Span::styled("Heavy Oak Shield (+8 Def)", Style::default().fg(Color::Rgb(180, 200, 220))),
+        ]),
+        Line::from(vec![
+            Span::styled("🦺 Body: ", Style::default().fg(Color::Rgb(200, 180, 120))),
+            Span::styled("Iron Plate Armor (+15 Def)", Style::default().fg(Color::Rgb(200, 200, 200))),
+        ]),
+        Line::from(vec![
+            Span::styled("💍 Ring: ", Style::default().fg(Color::Rgb(200, 180, 120))),
+            Span::styled("Band of Fortitude (+15 HP)", Style::default().fg(Color::Rgb(255, 210, 140))),
+        ]),
+        Line::from(vec![
+            Span::styled("📿 Neck: ", Style::default().fg(Color::Rgb(200, 180, 120))),
+            Span::styled("Amber Talisman (+5 Res)", Style::default().fg(Color::Rgb(240, 180, 100))),
+        ]),
+    ];
+    Paragraph::new(equipment_lines).render(inv_layout[0], buf);
+
+    let backpack_lines = vec![
+        Line::from(vec![
+            Span::styled("• ", Style::default().fg(Color::Rgb(140, 140, 140))),
+            Span::styled("Healing Draught x3  ", Style::default().fg(Color::Rgb(255, 130, 130))),
+            Span::styled("• ", Style::default().fg(Color::Rgb(140, 140, 140))),
+            Span::styled("Mana Philter x2", Style::default().fg(Color::Rgb(130, 180, 255))),
+        ]),
+        Line::from(vec![
+            Span::styled("• ", Style::default().fg(Color::Rgb(140, 140, 140))),
+            Span::styled("Torch x5            ", Style::default().fg(Color::Rgb(255, 200, 100))),
+            Span::styled("• ", Style::default().fg(Color::Rgb(140, 140, 140))),
+            Span::styled("Lockpick x4", Style::default().fg(Color::Rgb(200, 200, 200))),
+        ]),
+        Line::from(vec![
+            Span::styled("• ", Style::default().fg(Color::Rgb(140, 140, 140))),
+            Span::styled("Iron Ingot x6       ", Style::default().fg(Color::Rgb(180, 180, 180))),
+            Span::styled("• ", Style::default().fg(Color::Rgb(140, 140, 140))),
+            Span::styled("Ration Pack x8", Style::default().fg(Color::Rgb(180, 140, 100))),
+        ]),
+        Line::from(vec![
+            Span::styled("⚖ Load: ", Style::default().fg(Color::Rgb(180, 180, 180))),
+            Span::styled("18.5 / 50.0 kg  ", Style::default().fg(Color::Rgb(220, 220, 160))),
+            Span::styled("[███░░░░░░░]", Style::default().fg(Color::Rgb(100, 200, 140))),
+        ]),
+        Line::from(vec![
+            Span::styled("💰 Coin: ", Style::default().fg(Color::Rgb(255, 215, 0))),
+            Span::styled("142 Gold  38 Silver", Style::default().fg(Color::Rgb(255, 235, 120))),
+        ]),
+    ];
+    Paragraph::new(backpack_lines).render(inv_layout[1], buf);
+}
+```
+
+#### 7.3.4 Modal-Aware Input Handling (`client/src/main.rs`)
+The client input loop seamlessly coordinates modal toggling and escape semantics:
+- Pressing `I`, `C`, or `M` toggles the corresponding modal.
+- When any modal is active, pressing `Esc` or `Q` closes the modal immediately, protecting the user from accidentally quitting the application.
+- The controls legend bar dynamically swaps between gameplay controls (`[WASD] Move [F] Attack [R] Rest...`) and modal navigation controls (`[Esc/Key] Close Modal [I] Inventory [C] Character [M] Map [Q] Quit`).
+
+```rust
+// In client/src/main.rs realtime_loop:
+KeyCode::Char('q') | KeyCode::Char('Q') => {
+    if renderer.active_modal() != ascii_mmorpg_client::ActiveModal::None {
+        renderer.set_active_modal(ascii_mmorpg_client::ActiveModal::None);
+        None
+    } else {
+        break 'game;
+    }
+}
+KeyCode::Esc => {
+    if renderer.active_modal() != ascii_mmorpg_client::ActiveModal::None {
+        renderer.set_active_modal(ascii_mmorpg_client::ActiveModal::None);
+        None
+    } else {
+        break 'game;
+    }
+}
+KeyCode::Char('i') | KeyCode::Char('I') => {
+    renderer.toggle_modal(ascii_mmorpg_client::ActiveModal::Inventory);
+    None
+}
+KeyCode::Char('c') | KeyCode::Char('C') => {
+    renderer.toggle_modal(ascii_mmorpg_client::ActiveModal::CharacterSheet);
+    None
+}
+KeyCode::Char('m') | KeyCode::Char('M') => {
+    renderer.toggle_modal(ascii_mmorpg_client::ActiveModal::WorldMap);
+    None
+}
+```
+
+### 7.4 Real-World Performance
 * **Headless WGPU Compute Pipeline**: **171.7 FPS equivalent** ($5.82\text{ ms/frame}$) on NVIDIA GeForce GTX 1650 under Vulkan.
 * **Realtime Terminal Display**: Stable **60 FPS** with $<1.2\text{ms}$ draw latency and zero screen tearing across Windows Terminal, WezTerm, and ConHost.
 

@@ -20,6 +20,7 @@ pub struct GpuRenderer {
     pub width: i16,
     pub height: i16,
     pub weather: WeatherMode,
+    pub active_modal: crate::ui::ActiveModal,
     pub last_player_pos: Option<Point>,
     pub last_move_instant: Option<Instant>,
     pub player_walk_phase: f32,
@@ -42,6 +43,7 @@ impl GpuRenderer {
             width,
             height,
             weather,
+            active_modal: crate::ui::ActiveModal::None,
             last_player_pos: None,
             last_move_instant: None,
             player_walk_phase: 0.0,
@@ -425,12 +427,18 @@ impl GpuRenderer {
 
         // Compose Ratatui-powered Dark Fantasy MMORPG HUD overlay
         let mut hud = crate::ui::RatatuiHud::new();
-        let hud_overlay = hud.render_hud_overlay(
+        let hud_height = if self.active_modal != crate::ui::ActiveModal::None {
+            12
+        } else {
+            7
+        };
+        let hud_overlay = hud.render_hud_overlay_with_modal(
             world,
             self.width as u16,
-            7,
+            hud_height,
             self.weather,
             "WGPU 3D BATCHED PIPELINE",
+            self.active_modal,
         );
         out.push_str(&hud_overlay);
 

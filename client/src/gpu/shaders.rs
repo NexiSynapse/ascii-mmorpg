@@ -79,6 +79,12 @@ fn vs_main(in: VertexInput, inst: InstanceInput) -> VertexOutput {
         world_pos4.z += sway * 0.45;
     }
 
+    // Procedural water surface waves (material_id == 6.0: streams, rivers, pools)
+    if (mat_id >= 5.8 && mat_id <= 6.2) {
+        let wave = sin(camera.time * 2.6 + world_pos4.x * 1.8 + world_pos4.z * 1.2) * 0.035;
+        world_pos4.y += wave;
+    }
+
     out.world_pos = world_pos4.xyz;
     out.world_normal = normalize((model * vec4<f32>(in.normal, 0.0)).xyz);
     out.color = in.color * inst.instance_color;
@@ -105,14 +111,33 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
     }
 
     // Weather particles
-    if (in.material_id >= 4.9) {
+    if (in.material_id >= 4.9 && in.material_id <= 5.1) {
         out.color = in.color;
         out.normal_depth = vec4<f32>(vec3<f32>(0.5, 1.0, 0.5), in.clip_position.z);
         return out;
     }
 
-    let N = normalize(in.world_normal);
     let V = normalize(camera.camera_pos.xyz - in.world_pos);
+
+    // Water surfaces: azure water color with dynamic wave normal specular shimmer
+    if (in.material_id >= 5.8 && in.material_id <= 6.2) {
+        let wave_t = camera.time * 2.6;
+        let wave_norm = normalize(vec3<f32>(
+            sin(wave_t + in.world_pos.x * 2.2) * 0.25,
+            0.95,
+            cos(wave_t + in.world_pos.z * 2.0) * 0.25
+        ));
+        let water_base = vec3<f32>(0.09, 0.25, 0.48);
+        let water_NdotL = max(dot(wave_norm, normalize(lighting.sun_dir.xyz)), 0.0);
+        let water_H = normalize(normalize(lighting.sun_dir.xyz) + V);
+        let water_spec = pow(max(dot(wave_norm, water_H), 0.0), 16.0) * 0.85;
+        let water_color = water_base * (lighting.ambient_color.rgb + lighting.sun_color.rgb * water_NdotL) + vec3<f32>(water_spec);
+        out.color = vec4<f32>(water_color, 0.85);
+        out.normal_depth = vec4<f32>(wave_norm * 0.5 + 0.5, in.clip_position.z);
+        return out;
+    }
+
+    let N = normalize(in.world_normal);
 
     // Directional Sunlight / Moonlight
     let L_sun = normalize(lighting.sun_dir.xyz);

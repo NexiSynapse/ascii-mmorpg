@@ -71,11 +71,8 @@ fn target_fps(args: &[String]) -> u32 {
 fn run_demo_mode() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = PlainTerminal::new();
     let (width, height) = terminal.size();
-    let renderer = Renderer::new(
-        width as i16,
-        height.saturating_sub(6) as i16,
-    )
-    .with_weather(WeatherMode::Rain);
+    let renderer = Renderer::new(width as i16, height.saturating_sub(6) as i16)
+        .with_weather(WeatherMode::Rain);
     let mut world = sample_world();
     world.messages =
         vec!["Finite glyph-scene demo: authored frames, ruins, rain, and spell trail.".into()];
@@ -143,11 +140,8 @@ fn connect_address(args: &[String]) -> Result<Option<String>, String> {
 fn run_line_mode() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = PlainTerminal::new();
     let (width, height) = terminal.size();
-    let renderer = Renderer::new(
-        width as i16,
-        (height.saturating_sub(5)) as i16,
-    )
-    .with_weather(WeatherMode::Rain);
+    let renderer = Renderer::new(width as i16, (height.saturating_sub(5)) as i16)
+        .with_weather(WeatherMode::Rain);
     let mut world = sample_world();
     terminal.draw(&renderer.render(&world))?;
     println!("Commands are local in alpha; networking is available through the server protocol.");
@@ -215,9 +209,9 @@ fn run_realtime_with_terminal<T: Terminal>(
     let mut world = sample_world();
     world.messages = vec![match address {
         Some(address) => {
-            format!("Connecting to {address}... WASD/arrows move, F attacks, R rests, Q quits.")
+            format!("Connecting to {address}... WASD move, F attack, R rest, I inv, C char, M map, Q quit.")
         }
-        None => "Real-time mode: WASD/arrows move, F attacks, R rests, Q quits.".into(),
+        None => "Real-time mode: WASD move, F attack, R rest, I inv, C char, M map, Q quit.".into(),
     }];
 
     // Drain any terminal capability responses or stale escape codes from stdin
@@ -264,7 +258,12 @@ fn realtime_loop(
     let mut last_draw_ms = 0.0f64;
     'game: loop {
         let (width, height) = terminal.refresh_size();
-        renderer.resize(width as i16, height.saturating_sub(5) as i16);
+        let hud_reserve = if renderer.active_modal() != ascii_mmorpg_client::ActiveModal::None {
+            10
+        } else {
+            5
+        };
+        renderer.resize(width as i16, height.saturating_sub(hud_reserve) as i16);
         let mut disconnected = false;
         if let Some(connection) = connection.as_deref_mut() {
             while let Some(event) = connection.try_recv() {
@@ -332,10 +331,40 @@ fn realtime_loop(
                     held[index] = kind != KeyEventKind::Release;
                 } else if kind == KeyEventKind::Press {
                     let input = match code {
-                        KeyCode::Char('q') => break 'game,
-                        KeyCode::Char('f') => Some("f"),
-                        KeyCode::Char('r') => Some("r"),
-                        KeyCode::Char('v') | KeyCode::Char('t') => {
+                        KeyCode::Char('q') | KeyCode::Char('Q') => {
+                            if renderer.active_modal() != ascii_mmorpg_client::ActiveModal::None {
+                                renderer.set_active_modal(ascii_mmorpg_client::ActiveModal::None);
+                                None
+                            } else {
+                                break 'game;
+                            }
+                        }
+                        KeyCode::Esc => {
+                            if renderer.active_modal() != ascii_mmorpg_client::ActiveModal::None {
+                                renderer.set_active_modal(ascii_mmorpg_client::ActiveModal::None);
+                                None
+                            } else {
+                                break 'game;
+                            }
+                        }
+                        KeyCode::Char('i') | KeyCode::Char('I') => {
+                            renderer.toggle_modal(ascii_mmorpg_client::ActiveModal::Inventory);
+                            None
+                        }
+                        KeyCode::Char('c') | KeyCode::Char('C') => {
+                            renderer.toggle_modal(ascii_mmorpg_client::ActiveModal::CharacterSheet);
+                            None
+                        }
+                        KeyCode::Char('m') | KeyCode::Char('M') => {
+                            renderer.toggle_modal(ascii_mmorpg_client::ActiveModal::WorldMap);
+                            None
+                        }
+                        KeyCode::Char('f') | KeyCode::Char('F') => Some("f"),
+                        KeyCode::Char('r') | KeyCode::Char('R') => Some("r"),
+                        KeyCode::Char('v')
+                        | KeyCode::Char('t')
+                        | KeyCode::Char('V')
+                        | KeyCode::Char('T') => {
                             let next_weather = match renderer.weather() {
                                 WeatherMode::Rain => WeatherMode::Snow,
                                 WeatherMode::Snow => WeatherMode::Storm,
@@ -453,7 +482,7 @@ fn realtime_loop(
                     WeatherMode::Storm => "Storm",
                 };
                 world.messages = vec![format!(
-                    "Real-time mode: WASD move, F attack, R rest, V weather ({weather_label}), Q quit. [{display_fps} FPS ({target_label}) | draw: {last_draw_ms:.2}ms]"
+                    "Real-time mode: WASD move, F attack, R rest, I inv, C char, M map, V weather ({weather_label}), Q quit. [{display_fps} FPS ({target_label}) | draw: {last_draw_ms:.2}ms]"
                 )];
             }
         }

@@ -12,6 +12,19 @@ use ratatui::widgets::{Block, BorderType, Borders, Gauge, Paragraph, Widget};
 
 use crate::renderer::WeatherMode;
 
+/// Interactive overlay modal window modes (CmdMMO-inspired windowed TUI).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ActiveModal {
+    #[default]
+    None,
+    /// Carried gear, equipped weapons/armor, satchel items, potions, and gold.
+    Inventory,
+    /// Attributes (STR, DEX, CON, INT, LUCK), level, experience, and active buffs.
+    CharacterSheet,
+    /// 2D Overworld radar map of the Whispering Forest and landmark positions.
+    WorldMap,
+}
+
 /// Comprehensive dark fantasy MMORPG HUD powered by Ratatui.
 pub struct RatatuiHud {
     /// Recent event and combat log messages
@@ -53,24 +66,51 @@ impl RatatuiHud {
         weather: WeatherMode,
         backend_name: &str,
     ) -> String {
+        self.render_hud_overlay_with_modal(
+            world,
+            width,
+            height,
+            weather,
+            backend_name,
+            ActiveModal::None,
+        )
+    }
+
+    /// Renders the complete HUD overlay with an optional active interactive modal window.
+    pub fn render_hud_overlay_with_modal(
+        &mut self,
+        world: &WorldSnapshot,
+        width: u16,
+        height: u16,
+        weather: WeatherMode,
+        backend_name: &str,
+        modal: ActiveModal,
+    ) -> String {
         self.update_messages(&world.messages);
 
         let area = Rect::new(0, 0, width.max(40), height.max(8));
         let mut buf = Buffer::empty(area);
 
-        // Layout: Top Status & Stats (3 rows) -> Middle Combat Log & Info -> Bottom Hotkey Legend (1 row)
+        // Layout: Top Status & Stats (3 rows) -> Middle Combat Log or Modal -> Bottom Hotkey Legend (1 row)
         let main_layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // Top Navigation & Vitality Bar
-                Constraint::Min(3),    // Event / Combat Log
+                Constraint::Min(3),    // Event / Combat Log or Active Modal
                 Constraint::Length(1), // Hotkey / Keybindings Legend
             ])
             .split(area);
 
         self.render_top_bar(&mut buf, main_layout[0], world, weather, backend_name);
-        self.render_combat_log(&mut buf, main_layout[1], world);
-        self.render_controls_legend(&mut buf, main_layout[2]);
+        match modal {
+            ActiveModal::None => self.render_combat_log(&mut buf, main_layout[1], world),
+            ActiveModal::Inventory => self.render_inventory_modal(&mut buf, main_layout[1], world),
+            ActiveModal::CharacterSheet => {
+                self.render_character_sheet_modal(&mut buf, main_layout[1], world)
+            }
+            ActiveModal::WorldMap => self.render_world_map_modal(&mut buf, main_layout[1], world),
+        }
+        self.render_controls_legend(&mut buf, main_layout[2], modal != ActiveModal::None);
 
         buffer_to_ansi(&buf)
     }
@@ -334,48 +374,429 @@ impl RatatuiHud {
         Paragraph::new(threat_spans).render(inner_threat, buf);
     }
 
+    /// Renders the Inventory modal window.
+    fn render_inventory_modal(&self, buf: &mut Buffer, area: Rect, _world: &WorldSnapshot) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Double)
+            .border_style(Style::default().fg(Color::Rgb(215, 175, 95)))
+            .title(Span::styled(
+                " 🎒 Inventory & Equipment [I to Close] ",
+                Style::default()
+                    .fg(Color::Rgb(255, 215, 115))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(area);
+        block.render(area, buf);
+
+        let inv_layout = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(inner);
+
+        // Column 1: Equipped Gear
+        let equip_lines = vec![
+            Line::from(vec![Span::styled(
+                "⚔ Equipped Gear:",
+                Style::default()
+                    .fg(Color::Rgb(220, 190, 120))
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![
+                Span::styled(
+                    "  Main Hand: ",
+                    Style::default().fg(Color::Rgb(160, 160, 160)),
+                ),
+                Span::styled(
+                    "Steel Broadsword (+6 ATK)",
+                    Style::default()
+                        .fg(Color::Rgb(225, 232, 240))
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  Off Hand:  ",
+                    Style::default().fg(Color::Rgb(160, 160, 160)),
+                ),
+                Span::styled(
+                    "Heater Shield (+4 DEF)",
+                    Style::default().fg(Color::Rgb(180, 200, 220)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  Armor:     ",
+                    Style::default().fg(Color::Rgb(160, 160, 160)),
+                ),
+                Span::styled(
+                    "Fluted Plate (+8 DEF)",
+                    Style::default().fg(Color::Rgb(180, 200, 220)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  Helm:      ",
+                    Style::default().fg(Color::Rgb(160, 160, 160)),
+                ),
+                Span::styled(
+                    "Knight Greathelm (+3 DEF)",
+                    Style::default().fg(Color::Rgb(180, 200, 220)),
+                ),
+            ]),
+        ];
+        Paragraph::new(equip_lines).render(inv_layout[0], buf);
+
+        // Column 2: Backpack & Satchel
+        let backpack_lines = vec![
+            Line::from(vec![Span::styled(
+                "📦 Satchel Items:",
+                Style::default()
+                    .fg(Color::Rgb(220, 190, 120))
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![
+                Span::styled("  [1] ", Style::default().fg(Color::Rgb(240, 200, 100))),
+                Span::styled(
+                    "Healing Draught x3",
+                    Style::default().fg(Color::Rgb(100, 220, 140)),
+                ),
+                Span::styled(
+                    " (Restores 15 HP)",
+                    Style::default().fg(Color::Rgb(120, 120, 120)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  [2] ", Style::default().fg(Color::Rgb(240, 200, 100))),
+                Span::styled(
+                    "Scroll of Town Portal",
+                    Style::default().fg(Color::Rgb(140, 180, 255)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  [3] ", Style::default().fg(Color::Rgb(240, 200, 100))),
+                Span::styled(
+                    "Ancient Fortress Key",
+                    Style::default().fg(Color::Rgb(255, 215, 115)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  Gold: ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled(
+                    "148 coins  ",
+                    Style::default()
+                        .fg(Color::Rgb(255, 215, 75))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Weight: ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled(
+                    "18.5 / 50.0 st",
+                    Style::default().fg(Color::Rgb(200, 200, 200)),
+                ),
+            ]),
+        ];
+        Paragraph::new(backpack_lines).render(inv_layout[1], buf);
+    }
+
+    /// Renders the Character Sheet & Attributes modal window.
+    fn render_character_sheet_modal(&self, buf: &mut Buffer, area: Rect, world: &WorldSnapshot) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Double)
+            .border_style(Style::default().fg(Color::Rgb(140, 180, 230)))
+            .title(Span::styled(
+                " 📜 Character Sheet & Attributes [C to Close] ",
+                Style::default()
+                    .fg(Color::Rgb(180, 215, 255))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(area);
+        block.render(area, buf);
+
+        let char_layout = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(inner);
+
+        let p = &world.player;
+        let stats_col = vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("🛡 {}", p.name),
+                    Style::default()
+                        .fg(Color::Rgb(240, 210, 140))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " - Paladin Champion (Lvl 3)",
+                    Style::default().fg(Color::Rgb(160, 160, 160)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  Experience: ",
+                    Style::default().fg(Color::Rgb(160, 160, 160)),
+                ),
+                Span::styled(
+                    "340 / 500 XP [███████░░░]",
+                    Style::default().fg(Color::Rgb(120, 190, 255)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    format!("  Vitality:   {}/{} HP", p.stats.hp, p.stats.max_hp),
+                    Style::default().fg(Color::Rgb(100, 220, 140)),
+                ),
+                Span::styled(
+                    "  Mana: 12/12 MP",
+                    Style::default().fg(Color::Rgb(100, 170, 240)),
+                ),
+            ]),
+            Line::from(vec![Span::styled(
+                format!(
+                    "  Attack:     {}  |  Defense: {}",
+                    p.stats.attack, p.stats.defense
+                ),
+                Style::default().fg(Color::Rgb(225, 232, 240)),
+            )]),
+        ];
+        Paragraph::new(stats_col).render(char_layout[0], buf);
+
+        let attr_col = vec![
+            Line::from(vec![Span::styled(
+                "⚔ Attributes & Modifiers:",
+                Style::default()
+                    .fg(Color::Rgb(220, 190, 120))
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![Span::styled(
+                "  Strength:     14 (+2 DMG)   Agility: 11 (+1 EVA)",
+                Style::default().fg(Color::Rgb(180, 180, 180)),
+            )]),
+            Line::from(vec![Span::styled(
+                "  Constitution: 15 (Hardy)    Arcana:  10 (+0 MAG)",
+                Style::default().fg(Color::Rgb(180, 180, 180)),
+            )]),
+            Line::from(vec![Span::styled(
+                format!(
+                    "  Luck:         {} (+{}% CRIT)",
+                    p.stats.luck,
+                    p.stats.luck * 2
+                ),
+                Style::default().fg(Color::Rgb(240, 200, 100)),
+            )]),
+            Line::from(vec![Span::styled(
+                "  Active Buff: Torch Radiance (+7 Light Radius)",
+                Style::default().fg(Color::Rgb(255, 185, 75)),
+            )]),
+        ];
+        Paragraph::new(attr_col).render(char_layout[1], buf);
+    }
+
+    /// Renders the 2D Overworld Radar Map modal window.
+    fn render_world_map_modal(&self, buf: &mut Buffer, area: Rect, world: &WorldSnapshot) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Double)
+            .border_style(Style::default().fg(Color::Rgb(100, 190, 120)))
+            .title(Span::styled(
+                " 🗺 Overworld Map: Whispering Forest [M to Close] ",
+                Style::default()
+                    .fg(Color::Rgb(140, 240, 160))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(area);
+        block.render(area, buf);
+
+        let map_layout = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(36), Constraint::Length(32)])
+            .split(inner);
+
+        let px = world.player.position.x;
+        let py = world.player.position.y;
+
+        // Visual radar map grid
+        let map_lines = vec![
+            Line::from(vec![Span::styled(
+                "  +---------------------------------+",
+                Style::default().fg(Color::Rgb(80, 120, 90)),
+            )]),
+            Line::from(vec![Span::styled(
+                "  | ♠ ♠ ♠  [==GATE==]  ♠ ♠ ♠  ▲RIDGE|",
+                Style::default().fg(Color::Rgb(100, 160, 110)),
+            )]),
+            Line::from(vec![Span::styled(
+                "  | ♠ 🏛RUIN        ☼TORCH    ♠ ♠ ♠ |",
+                Style::default().fg(Color::Rgb(160, 150, 120)),
+            )]),
+            Line::from(vec![Span::styled(
+                "  | ~~~~~~~[==BRIDGE==]~~~~~~~~~RIV |",
+                Style::default().fg(Color::Rgb(70, 150, 220)),
+            )]),
+            Line::from(vec![Span::styled(
+                "  | ♠ ♠ ♠     ☼TORCH      ♠MEADOW♠  |",
+                Style::default().fg(Color::Rgb(80, 140, 90)),
+            )]),
+            Line::from(vec![Span::styled(
+                "  +---------------------------------+",
+                Style::default().fg(Color::Rgb(80, 120, 90)),
+            )]),
+        ];
+        Paragraph::new(map_lines).render(map_layout[0], buf);
+
+        let legend_lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    "📍 Position: ",
+                    Style::default().fg(Color::Rgb(160, 160, 160)),
+                ),
+                Span::styled(
+                    format!("({}, {})", px, py),
+                    Style::default()
+                        .fg(Color::Rgb(240, 210, 140))
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("🧭 Zone: ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled(
+                    "Ancient Fortress Woods",
+                    Style::default().fg(Color::Rgb(140, 190, 230)),
+                ),
+            ]),
+            Line::from(vec![Span::styled(
+                "🏛 Ruins: (-8, -5)  |  ⛩ Gate: (2, -12)",
+                Style::default().fg(Color::Rgb(180, 170, 150)),
+            )]),
+            Line::from(vec![Span::styled(
+                "🌊 River: y ~ 8     |  ☼ Torches: (-6, 2)",
+                Style::default().fg(Color::Rgb(100, 180, 240)),
+            )]),
+            Line::from(vec![Span::styled(
+                format!(
+                    "👾 Hostiles: {} in radar reach",
+                    world
+                        .entities
+                        .iter()
+                        .filter(|e| e.kind == EntityKind::Monster)
+                        .count()
+                ),
+                Style::default().fg(Color::Rgb(255, 120, 120)),
+            )]),
+        ];
+        Paragraph::new(legend_lines).render(map_layout[1], buf);
+    }
+
     /// Renders the keybinding hotkey legend bar.
-    fn render_controls_legend(&self, buf: &mut Buffer, area: Rect) {
-        let legend = Line::from(vec![
-            Span::styled(
-                " [WASD/Arrows] ",
-                Style::default()
-                    .fg(Color::Rgb(240, 200, 100))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Move  ", Style::default().fg(Color::Rgb(160, 160, 160))),
-            Span::styled(
-                "[F] ",
-                Style::default()
-                    .fg(Color::Rgb(255, 110, 110))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Attack  ", Style::default().fg(Color::Rgb(160, 160, 160))),
-            Span::styled(
-                "[R] ",
-                Style::default()
-                    .fg(Color::Rgb(120, 220, 140))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Rest  ", Style::default().fg(Color::Rgb(160, 160, 160))),
-            Span::styled(
-                "[V/T] ",
-                Style::default()
-                    .fg(Color::Rgb(120, 190, 255))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Cycle Weather  ",
-                Style::default().fg(Color::Rgb(160, 160, 160)),
-            ),
-            Span::styled(
-                "[Q/Esc] ",
-                Style::default()
-                    .fg(Color::Rgb(220, 100, 100))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Quit", Style::default().fg(Color::Rgb(160, 160, 160))),
-        ]);
+    fn render_controls_legend(&self, buf: &mut Buffer, area: Rect, modal_open: bool) {
+        let legend = if modal_open {
+            Line::from(vec![
+                Span::styled(
+                    " [Esc/Key] ",
+                    Style::default()
+                        .fg(Color::Rgb(255, 210, 80))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Close Modal  ",
+                    Style::default().fg(Color::Rgb(180, 180, 180)),
+                ),
+                Span::styled(
+                    "[I] ",
+                    Style::default()
+                        .fg(Color::Rgb(240, 200, 100))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Inventory  ",
+                    Style::default().fg(Color::Rgb(160, 160, 160)),
+                ),
+                Span::styled(
+                    "[C] ",
+                    Style::default()
+                        .fg(Color::Rgb(140, 190, 255))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Character  ",
+                    Style::default().fg(Color::Rgb(160, 160, 160)),
+                ),
+                Span::styled(
+                    "[M] ",
+                    Style::default()
+                        .fg(Color::Rgb(120, 220, 140))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Map  ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled(
+                    "[Q] ",
+                    Style::default()
+                        .fg(Color::Rgb(220, 100, 100))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Quit", Style::default().fg(Color::Rgb(160, 160, 160))),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled(
+                    " [WASD] ",
+                    Style::default()
+                        .fg(Color::Rgb(240, 200, 100))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Move  ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled(
+                    "[F] ",
+                    Style::default()
+                        .fg(Color::Rgb(255, 110, 110))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Attack  ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled(
+                    "[R] ",
+                    Style::default()
+                        .fg(Color::Rgb(120, 220, 140))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Rest  ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled(
+                    "[I] ",
+                    Style::default()
+                        .fg(Color::Rgb(240, 200, 100))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Inv  ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled(
+                    "[C] ",
+                    Style::default()
+                        .fg(Color::Rgb(140, 190, 255))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Chars  ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled(
+                    "[M] ",
+                    Style::default()
+                        .fg(Color::Rgb(120, 220, 140))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Map  ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled(
+                    "[V/T] ",
+                    Style::default()
+                        .fg(Color::Rgb(120, 190, 255))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Weather  ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled(
+                    "[Q/Esc] ",
+                    Style::default()
+                        .fg(Color::Rgb(220, 100, 100))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Quit", Style::default().fg(Color::Rgb(160, 160, 160))),
+            ])
+        };
 
         Paragraph::new(legend)
             .alignment(Alignment::Center)
@@ -526,5 +947,53 @@ mod tests {
         assert!(rendered.contains("Skeleton Warrior"));
         assert!(rendered.contains("Action & Combat Log"));
         assert!(rendered.contains("You strike Skeleton Warrior for 15 damage!"));
+    }
+
+    #[test]
+    fn test_ratatui_hud_renders_interactive_modals() {
+        let mut hud = RatatuiHud::new();
+        let world = sample_world();
+
+        // 1. Inventory Modal
+        let inv_rendered = hud.render_hud_overlay_with_modal(
+            &world,
+            80,
+            12,
+            WeatherMode::Rain,
+            "WGPU 3D",
+            ActiveModal::Inventory,
+        );
+        assert!(inv_rendered.contains("Inventory & Equipment"));
+        assert!(inv_rendered.contains("Equipped Gear"));
+        assert!(inv_rendered.contains("Steel Broadsword"));
+        assert!(inv_rendered.contains("Healing Draught"));
+
+        // 2. Character Sheet Modal
+        let char_rendered = hud.render_hud_overlay_with_modal(
+            &world,
+            80,
+            12,
+            WeatherMode::Rain,
+            "WGPU 3D",
+            ActiveModal::CharacterSheet,
+        );
+        assert!(char_rendered.contains("Character Sheet"));
+        assert!(char_rendered.contains("Attributes & Modifiers"));
+        assert!(char_rendered.contains("Strength"));
+        assert!(char_rendered.contains("Vitality"));
+
+        // 3. World Map Modal
+        let map_rendered = hud.render_hud_overlay_with_modal(
+            &world,
+            80,
+            12,
+            WeatherMode::Rain,
+            "WGPU 3D",
+            ActiveModal::WorldMap,
+        );
+        assert!(map_rendered.contains("Overworld Map"));
+        assert!(map_rendered.contains("Whispering Forest"));
+        assert!(map_rendered.contains("Position:"));
+        assert!(map_rendered.contains("GATE"));
     }
 }

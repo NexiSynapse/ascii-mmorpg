@@ -11,12 +11,25 @@ pub mod network;
 pub mod renderer;
 pub mod ui;
 pub use renderer::{Renderer, WeatherMode};
-pub use ui::RatatuiHud;
+pub use ui::{ActiveModal, RatatuiHud};
 
 pub trait SceneRenderer {
     fn resize(&mut self, width: i16, height: i16);
     fn weather(&self) -> WeatherMode;
     fn set_weather(&mut self, weather: WeatherMode);
+    fn active_modal(&self) -> ActiveModal {
+        ActiveModal::None
+    }
+    fn set_active_modal(&mut self, modal: ActiveModal) {
+        let _ = modal;
+    }
+    fn toggle_modal(&mut self, modal: ActiveModal) {
+        if self.active_modal() == modal {
+            self.set_active_modal(ActiveModal::None);
+        } else {
+            self.set_active_modal(modal);
+        }
+    }
     fn render(&mut self, world: &WorldSnapshot) -> String {
         self.render_frame(world, world.tick)
     }
@@ -33,6 +46,12 @@ impl SceneRenderer for Renderer {
     fn set_weather(&mut self, weather: WeatherMode) {
         self.weather = weather;
     }
+    fn active_modal(&self) -> ActiveModal {
+        self.active_modal
+    }
+    fn set_active_modal(&mut self, modal: ActiveModal) {
+        self.active_modal = modal;
+    }
     fn render_frame(&mut self, world: &WorldSnapshot, frame: u64) -> String {
         Renderer::render_frame(self, world, frame)
     }
@@ -48,6 +67,12 @@ impl SceneRenderer for gpu::GpuRenderer {
     }
     fn set_weather(&mut self, weather: WeatherMode) {
         self.weather = weather;
+    }
+    fn active_modal(&self) -> ActiveModal {
+        self.active_modal
+    }
+    fn set_active_modal(&mut self, modal: ActiveModal) {
+        self.active_modal = modal;
     }
     fn render_frame(&mut self, world: &WorldSnapshot, frame: u64) -> String {
         self.render_frame(world, frame)
@@ -80,6 +105,20 @@ impl SceneRenderer for ActiveRenderer {
             Self::Cpu(r) => r.set_weather(weather),
             #[cfg(feature = "gpu")]
             Self::Gpu(r) => r.set_weather(weather),
+        }
+    }
+    fn active_modal(&self) -> ActiveModal {
+        match self {
+            Self::Cpu(r) => r.active_modal(),
+            #[cfg(feature = "gpu")]
+            Self::Gpu(r) => r.active_modal(),
+        }
+    }
+    fn set_active_modal(&mut self, modal: ActiveModal) {
+        match self {
+            Self::Cpu(r) => r.set_active_modal(modal),
+            #[cfg(feature = "gpu")]
+            Self::Gpu(r) => r.set_active_modal(modal),
         }
     }
     fn render_frame(&mut self, world: &WorldSnapshot, frame: u64) -> String {

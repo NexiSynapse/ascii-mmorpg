@@ -101,24 +101,54 @@ This document details the architectural analysis of six open-source ASCII/termin
 
 Following this analysis, we integrate the following enhancements directly into our codebase:
 
-### Upgrade 1: CPU Renderer Stationary Feet When Idle
+### Upgrade 1: CPU Renderer Stationary Feet When Idle (Implemented)
 * **Origin**: Movement-aware articulation (verified in `gpu/renderer.rs` and Blackwater rig).
-* **Implementation**: In `client/src/renderer.rs`, player rendering detects idle state. When stationary, the player is locked to Frame 0 (symmetrical planted boots `(_____)  (_____)` with zero leg swing) rather than cycling walking frames on every tick.
+* **Implementation**: In `client/src/renderer.rs`, player rendering detects idle state via `is_player_walking`. When stationary, the player is locked to Frame 0 (symmetrical planted boots `(_____)  (_____)` with zero leg swing) rather than cycling walking frames on every tick.
 
-### Upgrade 2: Foliage Wind Swaying in WGPU Shader
+### Upgrade 2: Foliage Wind Swaying in WGPU Shader (Implemented)
 * **Origin**: Inspired by `AndreaZero/ascii-mmorpg-game` (`grass.gdshader`).
 * **Implementation**: In `client/src/gpu/shaders.rs` (`vs_main`), apply lateral sinusoidal displacement to vertices where `material_id == 3.0` (Foliage):
   ```wgsl
-  if (vertex.material_id > 2.5 && vertex.material_id < 3.5) {
-      let wind_offset = sin(uniforms.time * 2.2 + world_pos.x * 0.8 + world_pos.z * 0.6) * (world_pos.y * 0.04);
-      world_pos.x += wind_offset;
+  if (mat_id >= 2.8 && mat_id <= 3.2 && world_pos4.y > 0.8) {
+      let wind_intensity = min((world_pos4.y - 0.8) * 0.045, 0.18);
+      let sway = sin(camera.time * 2.4 + world_pos4.x * 0.65 + world_pos4.z * 0.45) * wind_intensity;
+      world_pos4.x += sway;
+      world_pos4.z += sway * 0.45;
   }
   ```
   This creates swaying pine canopies and vegetation responsive to the simulation clock.
 
-### Upgrade 3: Water Shimmer & Animated Ripple Glyphs
-* **Origin**: Inspired by `water.gdshader`.
-* **Implementation**: In `client/src/renderer.rs` and GPU shaders, water surfaces modulate with time to produce shifting wave glyphs (`~`, `≈`, `-`) and specular shimmer.
+### Upgrade 3: Water Shimmer & Animated Ripple Glyphs (Implemented)
+* **Origin**: Inspired by `AndreaZero/ascii-mmorpg-game` (`water.gdshader`).
+* **Implementation**:
+  * **CPU 2.5D Renderer (`client/src/renderer.rs`)**:
+    * Defined `Ink::WaterDeep`, `Ink::WaterShallow`, `Ink::WaterRipple`, `Ink::WaterShimmer`, and `Ink::BridgeWood`.
+    * Implemented a winding river across the Whispering Forest meadow ($wy \approx 8 + wx / 5$).
+    * Where the stone road intersects the water, rendered a sturdy timber bridge (`'='`, `'#'`, `BridgeWood`).
+    * Generated real-time animated wave ripples modulating with frame time: shifting between `~`, `≈`, `-`, and `·` with dynamic specular highlights and riverbank reeds (`%`).
+  * **GPU WGPU Pipeline (`client/src/gpu/shaders.rs`)**:
+    * In `vs_main`, procedural wave displacement for water surfaces (`material_id == 6.0`):
+      ```wgsl
+      if (mat_id >= 5.8 && mat_id <= 6.2) {
+          let wave = sin(camera.time * 2.6 + world_pos4.x * 1.8 + world_pos4.z * 1.2) * 0.035;
+          world_pos4.y += wave;
+      }
+      ```
+    * In `fs_main`, dynamic wave normal perturbing with Blinn-Phong sun/moon specular glints.
 
-### Upgrade 4: High-Detail Character Models & Assets
-* **Origin**: Enhancing multi-frame ASCII models ([player_warrior.txt](file:///d:/Personal/codes/Projects/ASCII-Game/ascii-mmorpg/assets/ascii/player_warrior.txt), [skeleton_warrior.txt](file:///d:/Personal/codes/Projects/ASCII-Game/ascii-mmorpg/assets/ascii/skeleton_warrior.txt), [monster_mossling.txt](file:///d:/Personal/codes/Projects/ASCII-Game/ascii-mmorpg/assets/ascii/monster_mossling.txt), [npc_herbalist.txt](file:///d:/Personal/codes/Projects/ASCII-Game/ascii-mmorpg/assets/ascii/npc_herbalist.txt)) with richer shading and distinct idle vs. stride frames.
+### Upgrade 4: Interactive Overlay Modals (CmdMMO-Inspired Windowed TUI) (Implemented)
+* **Origin**: Inspired by `jonatasfernandespimenta/CmdMMO` (`client/game/ui/`).
+* **Implementation**:
+  * **`ActiveModal` Architecture (`client/src/ui.rs`, `client/src/lib.rs`)**:
+    * Defined `ActiveModal` enum with `None`, `Inventory`, `CharacterSheet`, and `WorldMap`.
+    * Extended `SceneRenderer` trait with `active_modal()`, `set_active_modal()`, and `toggle_modal()`.
+    * In `client/src/main.rs`, added keybindings:
+      * `[I]`: Toggles Inventory & Equipment modal (equipped weapons/armor, satchel items, healing draughts, gold, encumbrance).
+      * `[C]`: Toggles Character Attributes & Skills modal (Level, XP progress bar, STR, DEX, CON, INT, LUCK, active buffs).
+      * `[M]`: Toggles 2D Overworld Radar Map modal (Whispering Forest ASCII minimap with coordinates, fortress gate, ruins, torches, and hostile radar reach).
+      * `[Esc]` / `[Q]`: Closes any open modal window gracefully before handling exit.
+    * Adaptive HUD layout: Expands reserve space from 7 to 12 rows when a modal is open, with double-bordered TrueColor styling and dynamic hotkey legend banners.
+
+### Upgrade 5: Fast Integer Arithmetic & Loop Optimizations (Implemented)
+* **Origin**: Inspired by `justMoritz/3d-game-engine`.
+* **Implementation**: Cached lighting constants, fast Euclidean coordinate wrapping via `div_euclid` and `rem_euclid`, precomputed light radii, and differential dirty-row blitting in `PlainTerminal` to minimize terminal parser overhead.
