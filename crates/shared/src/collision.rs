@@ -126,70 +126,83 @@ pub fn terrain_seed(x: i16, y: i16) -> u32 {
 pub const WORLD_BOUNDS: BoundingBox = BoundingBox::new(-35, -35, 35, 35);
 
 /// Returns the complete registry of static obstacles and scenery boundaries in the overworld.
+///
+/// Depth-Aware Ground Footprint Principle:
+/// In 2.5D and isometric perspective with height elevation, characters stand on the ground
+/// at their feet, while tree canopies, roofs, and lintels extend upward into the air.
+/// Collision boundaries strictly represent the ground-contact footprint (tree trunks,
+/// pillar bases, and foundation walls) where an actor's feet make physical contact.
+/// Upper visual geometry (foliage, branches, headers) does not impede ground movement,
+/// allowing foreground actors to stand in front of trees and overlap them naturally.
 pub fn overworld_obstacles() -> Vec<Obstacle> {
     vec![
         // --- Stone Fortress Gatehouse & Towers ---
+        // Tower foundation footprints along the northern gateway line at y = -12
         Obstacle::new(
             "gate_west_tower",
             "Stone Gate (West Tower)",
             ObstacleKind::Gate,
-            BoundingBox::new(-4, -12, -2, -9),
+            BoundingBox::new(-4, -12, -2, -12),
         ),
         Obstacle::new(
             "gate_east_tower",
             "Stone Gate (East Tower)",
             ObstacleKind::Gate,
-            BoundingBox::new(2, -12, 4, -9),
+            BoundingBox::new(2, -12, 4, -12),
         ),
         Obstacle::new(
             "gate_portcullis",
             "Fortress Portcullis Grate",
             ObstacleKind::Gate,
-            BoundingBox::new(-1, -11, 1, -10),
+            BoundingBox::new(-1, -12, 1, -12),
         ),
         // --- Ancient Stone Ruins, Pillars & Altar ---
+        // Stone altar pedestal ground base at y = -5
         Obstacle::new(
             "ruin_altar",
             "Overgrown Stone Altar",
             ObstacleKind::Ruins,
-            BoundingBox::new(-9, -6, -7, -4),
+            BoundingBox::new(-8, -5, -7, -5),
         ),
+        // Colonnade pillar ground bases at y = -5
         Obstacle::new(
             "ruin_pillar_west",
             "Ancient Colonnade Pillar (West)",
             ObstacleKind::Ruins,
-            BoundingBox::new(-11, -6, -10, -4),
+            BoundingBox::point(-10, -5),
         ),
         Obstacle::new(
             "ruin_pillar_east",
             "Ancient Colonnade Pillar (East)",
             ObstacleKind::Ruins,
-            BoundingBox::new(-7, -6, -6, -4),
+            BoundingBox::point(-6, -5),
         ),
-        // --- Landmark Pine Trees ---
+        // --- Landmark Pine Trees (Trunk Ground Contact) ---
+        // Ground trunk base is strictly a single tile footprint where the trunk meets the dirt.
+        // The canopy extends overhead without blocking character movement on the ground.
         Obstacle::new(
             "pine_tree_sw",
             "Towering Pine Tree (West Woods)",
             ObstacleKind::Tree,
-            BoundingBox::new(-7, -5, -6, -4),
+            BoundingBox::point(-7, -2),
         ),
         Obstacle::new(
             "pine_tree_se",
             "Towering Pine Tree (East Meadow)",
             ObstacleKind::Tree,
-            BoundingBox::new(7, -4, 8, -3),
+            BoundingBox::point(8, -3),
         ),
         Obstacle::new(
             "pine_tree_ne",
             "Towering Pine Tree (North-East Ridge)",
             ObstacleKind::Tree,
-            BoundingBox::new(9, -11, 10, -9),
+            BoundingBox::point(9, -10),
         ),
         Obstacle::new(
             "pine_tree_nw",
             "Towering Pine Tree (North-West Ridge)",
             ObstacleKind::Tree,
-            BoundingBox::new(-10, -11, -8, -9),
+            BoundingBox::point(-9, -10),
         ),
         // --- Timber Lantern Posts ---
         Obstacle::new(
@@ -222,13 +235,16 @@ pub fn overworld_obstacles() -> Vec<Obstacle> {
 
 /// Checks whether a given world tile collides with any static obstacle,
 /// procedural pine tree, procedural ruin, or breaches the world boundary.
+///
+/// Respects depth-aware ground footprints: only the physical base/trunk touching
+/// the ground blocks the actor's feet.
 pub fn is_point_obstructed(point: Point, obstacles: &[Obstacle]) -> Option<&'static str> {
     // 1. Zone Boundary Check
     if !WORLD_BOUNDS.contains(point) {
         return Some("Whispering Forest Boundary");
     }
 
-    // 2. Static Landmark Obstacles
+    // 2. Static Landmark Obstacles (Ground-contact footprints)
     for obstacle in obstacles {
         if obstacle.bounds.contains(point) {
             return Some(obstacle.name);
@@ -236,18 +252,21 @@ pub fn is_point_obstructed(point: Point, obstacles: &[Obstacle]) -> Option<&'sta
     }
 
     // 3. Procedural Background Trees (seed % 9 == 0 on 11x9 world grid)
+    // Only the trunk rooted at (tree_wx, tree_wy) blocks movement.
+    // The foliage canopy floats overhead, allowing actors to stand in front of
+    // or behind the tree without premature collision.
     let gx = point.x.div_euclid(11);
     let gy = point.y.div_euclid(9);
     let seed = terrain_seed(gx, gy);
     let tree_wx = gx * 11 + (seed % 5) as i16;
     let tree_wy = gy * 9 + ((seed / 7) % 5) as i16;
-    if seed % 9 == 0 && (point.x - tree_wx).abs() <= 1 && (point.y - tree_wy).abs() <= 1 {
-        return Some("Pine Tree Thicket");
+    if seed % 9 == 0 && point.x == tree_wx && point.y == tree_wy {
+        return Some("Pine Tree Trunk");
     }
 
     // 4. Procedural Background Ancient Ruins (seed % 23 == 1)
-    if seed % 23 == 1 && (point.x - tree_wx).abs() <= 1 && (point.y - tree_wy).abs() <= 1 {
-        return Some("Weathered Stone Ruins");
+    if seed % 23 == 1 && point.x == tree_wx && point.y == tree_wy {
+        return Some("Weathered Stone Ruins Base");
     }
 
     None
@@ -406,5 +425,114 @@ mod tests {
         assert!(!outcome.slid);
         assert_eq!(outcome.resolved_position, Point { x: 0, y: -1 });
         assert_eq!(outcome.obstacle, None);
+    }
+
+    #[test]
+    fn standing_in_front_of_tree_is_unobstructed() {
+        let obstacles = overworld_obstacles();
+        // Towering Pine Tree (West Woods) trunk is at (-7, -2).
+        // A player standing directly in front of the tree (South) has their feet at (-7, -1).
+        let in_front = Point { x: -7, y: -1 };
+        assert_eq!(is_point_obstructed(in_front, &obstacles), None);
+
+        // Moving North from (-7, 0) up to the front of the tree succeeds:
+        let outcome = resolve_movement(Point { x: -7, y: 0 }, Direction::North, &obstacles);
+        assert!(!outcome.blocked);
+        assert_eq!(outcome.resolved_position, in_front);
+
+        // Only moving directly INTO the trunk base from in front is blocked:
+        let hit_trunk = resolve_movement(in_front, Direction::North, &obstacles);
+        assert!(hit_trunk.blocked);
+        assert_eq!(hit_trunk.resolved_position, in_front);
+        assert_eq!(hit_trunk.obstacle, Some("Towering Pine Tree (West Woods)"));
+    }
+
+    #[test]
+    fn walking_around_tree_perimeter_is_unobstructed() {
+        let obstacles = overworld_obstacles();
+        // Tree trunk is at (-7, -2).
+        let behind = Point { x: -7, y: -3 };
+        let west_side = Point { x: -8, y: -2 };
+        let east_side = Point { x: -6, y: -2 };
+
+        // Feet can walk behind and beside the tree without hitting overhead foliage:
+        assert_eq!(is_point_obstructed(behind, &obstacles), None);
+        assert_eq!(is_point_obstructed(west_side, &obstacles), None);
+        assert_eq!(is_point_obstructed(east_side, &obstacles), None);
+
+        // Stepping into the trunk from behind is blocked:
+        let hit_from_behind = resolve_movement(behind, Direction::South, &obstacles);
+        assert!(hit_from_behind.blocked);
+        assert_eq!(hit_from_behind.resolved_position, behind);
+    }
+
+    #[test]
+    fn procedural_tree_only_blocks_trunk_ground_tile() {
+        let obstacles = overworld_obstacles();
+        // Find first procedural tree in region
+        let mut found_tree = None;
+        for gx in 0..10 {
+            for gy in 0..10 {
+                let seed = terrain_seed(gx, gy);
+                if seed % 9 == 0 {
+                    let wx = gx * 11 + (seed % 5) as i16;
+                    let wy = gy * 9 + ((seed / 7) % 5) as i16;
+                    found_tree = Some(Point { x: wx, y: wy });
+                    break;
+                }
+            }
+            if found_tree.is_some() {
+                break;
+            }
+        }
+
+        let trunk = found_tree.expect("expected at least one procedural tree");
+        // Ground trunk tile is blocked:
+        assert_eq!(
+            is_point_obstructed(trunk, &obstacles),
+            Some("Pine Tree Trunk")
+        );
+
+        // Surrounding tiles (including directly in front and behind) are clear:
+        assert_eq!(
+            is_point_obstructed(
+                Point {
+                    x: trunk.x,
+                    y: trunk.y + 1
+                },
+                &obstacles
+            ),
+            None
+        );
+        assert_eq!(
+            is_point_obstructed(
+                Point {
+                    x: trunk.x,
+                    y: trunk.y - 1
+                },
+                &obstacles
+            ),
+            None
+        );
+        assert_eq!(
+            is_point_obstructed(
+                Point {
+                    x: trunk.x + 1,
+                    y: trunk.y
+                },
+                &obstacles
+            ),
+            None
+        );
+        assert_eq!(
+            is_point_obstructed(
+                Point {
+                    x: trunk.x - 1,
+                    y: trunk.y
+                },
+                &obstacles
+            ),
+            None
+        );
     }
 }

@@ -209,15 +209,15 @@ impl GpuRenderer {
             color: [1.0, 0.82, 0.45, 1.2 + player_flicker],
         });
 
-        // Gate Torches at fixed world points
+        // Gate Torches at fixed world points (Gate at y = -12 -> z = -9.6)
         let gate_flicker1 = (time * 9.5).sin() * 0.15;
         let gate_flicker2 = (time * 11.2).cos() * 0.15;
         lights.push(GpuPointLight {
-            position: [-2.2, 2.6, -10.0 + 0.65, 8.5],
+            position: [-2.2, 2.6, -9.6 + 0.65, 8.5],
             color: [1.0, 0.62, 0.20, 1.4 + gate_flicker1],
         });
         lights.push(GpuPointLight {
-            position: [2.2, 2.6, -10.0 + 0.65, 8.5],
+            position: [2.2, 2.6, -9.6 + 0.65, 8.5],
             color: [1.0, 0.62, 0.20, 1.4 + gate_flicker2],
         });
 
@@ -242,8 +242,8 @@ impl GpuRenderer {
 
         // 3. Dynamic Scene Geometry (Cobblestone Highway, Altar, Gate, Entities)
         mesh.add_terrain(px, pz, 24.0);
-        mesh.add_gate([0.0, 0.0, -10.0]);
-        mesh.add_ruin_altar([-6.5, 0.0, -4.0]);
+        mesh.add_gate([0.0, 0.0, -9.6]);
+        mesh.add_ruin_altar([-6.4, 0.0, -4.0]);
 
         for entity in &world.entities {
             let ex = entity.position.x as f32 * 0.8;
@@ -279,11 +279,14 @@ impl GpuRenderer {
         mesh.add_humanoid([px, 0.0, pz], 0.0, walk_phase, 0.0);
 
         // 4. Instanced Props with View-Frustum Culling (Asciicker plane culling optimization)
+        // Scaled to exact 0.8 world tile grid:
+        // Tree (-7, -2) -> [-5.6, -1.6], Tree (8, -3) -> [6.4, -2.4],
+        // Tree (9, -10) -> [7.2, -8.0], Tree (-9, -10) -> [-7.2, -8.0]
         let trees = [
-            ([-5.0, 0.0, -4.0], 1.0, (time * 2.0).sin()),
-            ([6.0, 0.0, -2.5], 1.1, (time * 2.3).sin()),
-            ([7.5, 0.0, -8.0], 0.95, (time * 1.8).sin()),
-            ([-7.0, 0.0, -8.0], 1.05, (time * 2.1).sin()),
+            ([-5.6, 0.0, -1.6], 1.0, (time * 2.0).sin()),
+            ([6.4, 0.0, -2.4], 1.1, (time * 2.3).sin()),
+            ([7.2, 0.0, -8.0], 0.95, (time * 1.8).sin()),
+            ([-7.2, 0.0, -8.0], 1.05, (time * 2.1).sin()),
         ];
         for (pos, scale, sway) in trees {
             if frustum.test_sphere(Vec3::from(pos) + Vec3::new(0.0, 2.0, 0.0), scale * 4.5) {
@@ -291,7 +294,8 @@ impl GpuRenderer {
             }
         }
 
-        let pillars = [([-7.9, 0.0, -4.0], 1.0), ([-5.1, 0.0, -4.0], 0.76)];
+        // Colonnade Pillars: West (-10, -5) -> [-8.0, -4.0], East (-6, -5) -> [-4.8, -4.0]
+        let pillars = [([-8.0, 0.0, -4.0], 1.0), ([-4.8, 0.0, -4.0], 0.76)];
         for (pos, height_scale) in pillars {
             if frustum.test_sphere(Vec3::from(pos) + Vec3::new(0.0, 1.5, 0.0), 3.0) {
                 batches.add_pillar(pos, height_scale);
