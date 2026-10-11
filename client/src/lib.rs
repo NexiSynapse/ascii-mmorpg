@@ -479,14 +479,24 @@ pub fn sample_world() -> WorldSnapshot {
             stats: Stats::healthy(20, 6, 2),
             glyph: '@',
         },
-        entities: vec![ActorSnapshot {
-            id: 2,
-            name: "Mossling".into(),
-            kind: EntityKind::Monster,
-            position: Point { x: 3, y: 2 },
-            stats: Stats::healthy(8, 3, 1),
-            glyph: 'm',
-        }],
+        entities: vec![
+            ActorSnapshot {
+                id: 2,
+                name: "Mossling".into(),
+                kind: EntityKind::Monster,
+                position: Point { x: 3, y: 2 },
+                stats: Stats::healthy(8, 3, 1),
+                glyph: 'm',
+            },
+            ActorSnapshot {
+                id: 3,
+                name: "Skeleton".into(),
+                kind: EntityKind::Monster,
+                position: Point { x: 9, y: 7 },
+                stats: Stats::healthy(10, 4, 1),
+                glyph: 's',
+            },
+        ],
         messages: vec!["Glyph scene ready. Type w/a/s/d, f, r, or chat.".into()],
     }
 }

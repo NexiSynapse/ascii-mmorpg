@@ -40,3 +40,17 @@ its exact licence here and verify redistribution terms.
 - Runtime conversion: `assets/ascii/gate.txt`
 - Status: first static terminal adaptation; geometry/depth conversion remains a
   planned follow-up and the OBJ remains the provenance reference.
+
+## Workspace-authored skeletal undead (reference-look, no third-party art)
+
+- Files: `assets/ascii/skeleton.txt`, `assets/ascii/skeleton_warrior.txt`
+- Licence: original workspace-authored art, same as the repository (MIT).
+  No pixels or glyphs copied from any external collection.
+- Provenance: visual idiom (pale spiky humanoid, rib striations, bone-white
+  palette) studied from the project's own reference clips in `data/videos/`
+  (multiplayer forest combat). Online ASCII collections (e.g. asciiart.eu's
+  mythology/skeletons gallery) were deliberately NOT sourced: per-work
+  licensing there is unclear and most ASCII art is copyrighted by default.
+- Selection: client picks them by monster label (`Skeleton Warrior` before
+  `Skeleton`, case-insensitive; see `client/src/assets.rs`), mirroring the
+  existing item-icon label convention.
