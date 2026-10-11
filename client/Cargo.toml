@@ -6,10 +6,15 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-default = []
+default = ["gpu"]
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster", "dep:glam"]
 notcurses = ["dep:notcurses"]
 
 [dependencies]
 ascii-mmorpg-shared = { path = "../crates/shared" }
 crossterm = "0.29"
 notcurses = { version = "3.6", optional = true }
+wgpu = { version = "24", optional = true }
+bytemuck = { version = "1.21", features = ["derive"], optional = true }
+pollster = { version = "0.4", optional = true }
+glam = { version = "0.29", optional = true }

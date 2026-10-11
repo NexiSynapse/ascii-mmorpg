@@ -205,6 +205,25 @@ cargo run -p ascii-mmorpg-client -- --demo
 
 The current `--demo` mode renders six deterministic animated frames and exits.
 
+### Rendering backends: WGPU 3D Shader Pipeline (Path C) vs CPU
+
+The client supports two rendering engines through `ActiveRenderer`:
+
+1. **WGPU 3D Offscreen Shader Pipeline (Path C, Default)**:
+   - Headless offscreen 3D scene rendering via `wgpu` (`DirectX 12` / `Vulkan` / `Metal`).
+   - Procedural 3D articulated humanoid warrior, mossling monster, herbalist NPC, pine trees, stone gate, and ancient ruins.
+   - Dynamic Blinn-Phong lighting: directional ambient/sunlight + multiple dynamic point lights (flickering player hip lantern, twin gate torches, staff lantern).
+   - Volumetric 3D falling weather particles (angled rain streaks, splashes, snow).
+   - Real-time ASCII compute shader: Sobel edge detection on depth/normals (`|`, `_`, `/`, `\`, `+`) + 4x4 Bayer dithered luminance ramp (` `, `.`, `:`, `*`, `=`, `o`, `O`, `%`, `#`, `@`) + boosted truecolor foreground with atmospheric deep contrast background.
+   - Zero-overhead PCIe staging readback directly to terminal stdout.
+
+2. **Procedural ANSI CPU Fallback**:
+   - Pure terminal CPU rendering for headless servers or environments without GPU drivers.
+   - Force CPU mode with `--cpu`:
+     ```text
+     cargo run -p ascii-mmorpg-client -- --cpu
+     ```
+
 ## 7. ASCII asset system
 
 The current visible art is ASCII-native and workspace-authored. It is embedded at compile time with `include_str!`, so the executable does not depend on its runtime working directory.

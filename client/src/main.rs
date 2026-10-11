@@ -1,6 +1,6 @@
 use ascii_mmorpg_client::{
-    apply_local_command, network::ClientConnection, parse_command, sample_world, PlainTerminal,
-    Renderer, Terminal, WeatherMode,
+    apply_local_command, network::ClientConnection, parse_command, sample_world, ActiveRenderer,
+    PlainTerminal, Renderer, SceneRenderer, Terminal, WeatherMode,
 };
 use ascii_mmorpg_shared::{ServerEvent, PROTOCOL_VERSION};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
@@ -19,11 +19,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let fps = target_fps(&args);
     let weather = weather_mode(&args);
+    let force_cpu = args.iter().any(|arg| arg == "--cpu");
     let address = connect_address(&args)?;
     if args.iter().any(|arg| arg == "--notcurses") {
         #[cfg(feature = "notcurses")]
         {
-            return run_realtime_notcurses(address.as_deref(), fps, weather);
+            return run_realtime_notcurses(address.as_deref(), fps, weather, force_cpu);
         }
         #[cfg(not(feature = "notcurses"))]
         {
@@ -32,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    run_realtime(address.as_deref(), fps, weather)
+    run_realtime(address.as_deref(), fps, weather, force_cpu)
 }
 
 fn weather_mode(args: &[String]) -> WeatherMode {
@@ -117,9 +118,10 @@ fn run_realtime(
     address: Option<&str>,
     fps: u32,
     weather: WeatherMode,
+    force_cpu: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
-    run_realtime_with_terminal(address, PlainTerminal::new(), fps, weather)
+    run_realtime_with_terminal(address, PlainTerminal::new(), fps, weather, force_cpu)
 }
 
 #[cfg(feature = "notcurses")]
@@ -127,10 +129,11 @@ fn run_realtime_notcurses(
     address: Option<&str>,
     fps: u32,
     weather: WeatherMode,
+    force_cpu: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let term = ascii_mmorpg_client::NotcursesTerminal::new()?;
-    run_realtime_with_terminal(address, term, fps, weather)
+    run_realtime_with_terminal(address, term, fps, weather, force_cpu)
 }
 
 fn run_realtime_with_terminal<T: Terminal>(
@@ -138,14 +141,30 @@ fn run_realtime_with_terminal<T: Terminal>(
     mut terminal: T,
     fps: u32,
     weather: WeatherMode,
+    force_cpu: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = address.map(ClientConnection::connect).transpose()?;
     let (width, height) = terminal.size();
-    let mut renderer = Renderer {
-        width: width as i16,
-        height: (height.saturating_sub(5)) as i16,
-        weather,
+    let render_w = width as i16;
+    let render_h = height.saturating_sub(5) as i16;
+
+    let mut renderer = if !force_cpu {
+        #[cfg(feature = "gpu")]
+        {
+            match ascii_mmorpg_client::gpu::GpuRenderer::new(render_w, render_h, weather) {
+                Ok(gpu_r) => ActiveRenderer::Gpu(Box::new(gpu_r)),
+                Err(err) => {
+                    eprintln!("[WGPU] GPU offscreen init failed ({err}). Falling back to CPU.");
+                    ActiveRenderer::Cpu(Renderer::new(render_w, render_h).with_weather(weather))
+                }
+            }
+        }
+        #[cfg(not(feature = "gpu"))]
+        ActiveRenderer::Cpu(Renderer::new(render_w, render_h).with_weather(weather))
+    } else {
+        ActiveRenderer::Cpu(Renderer::new(render_w, render_h).with_weather(weather))
     };
+
     let mut world = sample_world();
     world.messages = vec![match address {
         Some(address) => {
@@ -182,7 +201,7 @@ fn run_realtime_with_terminal<T: Terminal>(
 
 fn realtime_loop(
     terminal: &mut impl Terminal,
-    renderer: &mut Renderer,
+    renderer: &mut impl SceneRenderer,
     world: &mut ascii_mmorpg_shared::WorldSnapshot,
     mut connection: Option<&mut ClientConnection>,
     target_fps: u32,
@@ -270,12 +289,13 @@ fn realtime_loop(
                         KeyCode::Char('f') => Some("f"),
                         KeyCode::Char('r') => Some("r"),
                         KeyCode::Char('v') | KeyCode::Char('t') => {
-                            renderer.weather = match renderer.weather {
+                            let next_weather = match renderer.weather() {
                                 WeatherMode::Rain => WeatherMode::Snow,
                                 WeatherMode::Snow => WeatherMode::Storm,
                                 WeatherMode::Storm => WeatherMode::Rain,
                             };
-                            let weather_label = match renderer.weather {
+                            renderer.set_weather(next_weather);
+                            let weather_label = match next_weather {
                                 WeatherMode::Rain => "Rain",
                                 WeatherMode::Snow => "Snowfall",
                                 WeatherMode::Storm => "Storm",
@@ -380,7 +400,7 @@ fn realtime_loop(
                 } else {
                     format!("{target_fps} target")
                 };
-                let weather_label = match renderer.weather {
+                let weather_label = match renderer.weather() {
                     WeatherMode::Rain => "Rain",
                     WeatherMode::Snow => "Snowfall",
                     WeatherMode::Storm => "Storm",
