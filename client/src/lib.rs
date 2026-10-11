@@ -189,6 +189,16 @@ mod tests {
     }
 
     #[test]
+    fn local_diagonal_move_updates_both_coordinates() {
+        let mut world = sample_world();
+        apply_local_command(
+            &mut world,
+            &ClientCommand::new(1, Command::Move(Direction::NorthEast)),
+        );
+        assert_eq!(world.player.position, Point { x: 3, y: 1 });
+    }
+
+    #[test]
     fn local_attack_hits_adjacent_mossling() {
         let mut world = sample_world();
         world.entities[0].position = Point { x: 5, y: 2 };

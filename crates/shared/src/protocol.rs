@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 pub type Tick = u64;
 pub type EntityId = u64;
@@ -27,6 +27,10 @@ pub enum Direction {
     South,
     East,
     West,
+    NorthEast,
+    NorthWest,
+    SouthEast,
+    SouthWest,
 }
 
 impl Direction {
@@ -36,6 +40,10 @@ impl Direction {
             Self::South => (0, 1),
             Self::East => (1, 0),
             Self::West => (-1, 0),
+            Self::NorthEast => (1, -1),
+            Self::NorthWest => (-1, -1),
+            Self::SouthEast => (1, 1),
+            Self::SouthWest => (-1, 1),
         }
     }
 }

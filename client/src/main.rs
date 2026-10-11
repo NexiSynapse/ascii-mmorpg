@@ -207,17 +207,46 @@ fn realtime_loop(
         }
 
         if Instant::now() >= next_move {
-            for input in [
-                held[0].then_some("w"),
-                held[1].then_some("a"),
-                held[2].then_some("s"),
-                held[3].then_some("d"),
-            ]
-            .into_iter()
-            .flatten()
-            {
+            let vertical = if held[0] {
+                Some("w")
+            } else if held[2] {
+                Some("s")
+            } else {
+                None
+            };
+            let horizontal = if held[1] {
+                Some("a")
+            } else if held[3] {
+                Some("d")
+            } else {
+                None
+            };
+            let input = match (vertical, horizontal) {
+                (Some("w"), Some("a")) => "nw",
+                (Some("w"), Some("d")) => "ne",
+                (Some("s"), Some("a")) => "sw",
+                (Some("s"), Some("d")) => "se",
+                (Some(input), None) | (None, Some(input)) => input,
+                (Some(_), Some(_)) => "",
+                (None, None) => "",
+            };
+            if !input.is_empty() {
                 tick += 1;
-                let command = parse_command(input, tick).expect("movement shortcut is valid");
+                let direction = match input {
+                    "nw" => ascii_mmorpg_shared::Direction::NorthWest,
+                    "ne" => ascii_mmorpg_shared::Direction::NorthEast,
+                    "sw" => ascii_mmorpg_shared::Direction::SouthWest,
+                    "se" => ascii_mmorpg_shared::Direction::SouthEast,
+                    "w" => ascii_mmorpg_shared::Direction::North,
+                    "a" => ascii_mmorpg_shared::Direction::West,
+                    "s" => ascii_mmorpg_shared::Direction::South,
+                    "d" => ascii_mmorpg_shared::Direction::East,
+                    _ => unreachable!("movement shortcut is valid"),
+                };
+                let command = ascii_mmorpg_shared::ClientCommand::new(
+                    tick,
+                    ascii_mmorpg_shared::Command::Move(direction),
+                );
                 if let Some(connection) = connection.as_deref_mut() {
                     if welcomed {
                         connection.send_command(&command)?;
