@@ -416,26 +416,16 @@ impl GpuRenderer {
             out.push_str("\x1b[0m\r\n");
         }
 
-        // HUD Status Bar
-        let p = &world.player;
-        let hp_bar = format_bar(p.stats.hp, p.stats.max_hp, 18, "\x1b[38;2;230;70;70m");
-        let status = format!(
-            "\x1b[1;37m[WARRIOR]\x1b[0m HP:{} \x1b[1;37m{}/{}\x1b[0m | ATK: \x1b[38;2;255;120;120m{}\x1b[0m DEF: \x1b[38;2;120;180;255m{}\x1b[0m LUCK: \x1b[38;2;255;220;80m{}\x1b[0m | POS: ({}, {}) | \x1b[38;2;120;220;255mWGPU 3D BATCHED PIPELINE\x1b[0m",
-            hp_bar,
-            p.stats.hp,
-            p.stats.max_hp,
-            p.stats.attack,
-            p.stats.defense,
-            p.stats.luck,
-            p.position.x,
-            p.position.y
+        // Compose Ratatui-powered Dark Fantasy MMORPG HUD overlay
+        let mut hud = crate::ui::RatatuiHud::new();
+        let hud_overlay = hud.render_hud_overlay(
+            world,
+            self.width as u16,
+            7,
+            self.weather,
+            "WGPU 3D BATCHED PIPELINE",
         );
-        out.push_str(&status);
-        out.push_str("\r\n");
-
-        if let Some(msg) = world.messages.last() {
-            out.push_str(&format!("\x1b[38;2;160;200;230m> {}\x1b[0m\r\n", msg));
-        }
+        out.push_str(&hud_overlay);
 
         out
     }
@@ -470,19 +460,6 @@ fn push_fast_u32(out: &mut String, mut val: u32) {
     } else {
         out.push((b'0' + val as u8) as char);
     }
-}
-
-fn format_bar(val: i32, max: i32, width: usize, color: &str) -> String {
-    let safe_max = max.max(1);
-    let ratio = (val as f32 / safe_max as f32).clamp(0.0, 1.0);
-    let filled = (ratio * width as f32).round() as usize;
-    let empty = width.saturating_sub(filled);
-    format!(
-        "{}[{}{}]\x1b[0m",
-        color,
-        "█".repeat(filled),
-        "░".repeat(empty)
-    )
 }
 
 #[cfg(test)]

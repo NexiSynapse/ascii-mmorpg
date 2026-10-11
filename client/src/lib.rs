@@ -9,7 +9,9 @@ pub mod assets;
 pub mod gpu;
 pub mod network;
 pub mod renderer;
+pub mod ui;
 pub use renderer::{Renderer, WeatherMode};
+pub use ui::RatatuiHud;
 
 pub trait SceneRenderer {
     fn resize(&mut self, width: i16, height: i16);

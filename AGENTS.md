@@ -35,6 +35,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 - Flags use `rposition` so CLI overrides `.bat` defaults: `--fps <N|uncapped|max>` (default 60, `0` = uncapped), `--weather <rain|snow|storm>` (default rain), `--notcurses` requires `--features notcurses`.
 - `PlainTerminal` is a differential dirty-line rasterizer (`\x1b[{row};1H` + `\x1b[K`, full repaint only when line count changes or on resize) to avoid Windows ConPTY tearing. Preserve that behavior.
 - Terminal backends stay behind `Terminal` trait in `client/src/lib.rs`. Notcurses parsing handles only `0m` / `38;5;Nm`; keep bindings out of gameplay/renderer code.
+- Client presentation: Ratatui-powered dark fantasy HUD (`Gauge`, `Block`, `Paragraph`, `Layout`) in `client/src/ui.rs`, composited seamlessly across both GPU and CPU renderers with dirty-state ANSI serialization.
 
 ## Assets (`assets/ascii/`, `assets/ASSET_SOURCES.md`)
 - Frames are `include_str!`-embedded, `---` on its own line separates animation frames; runtime never reads asset files from disk. Item icons key off label text (`sword`/`shield`/generic).

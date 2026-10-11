@@ -655,3 +655,29 @@ Previously, procedural 3D humanoid entities in the GPU pipeline drove leg swing 
    - Remote player entities (`EntityKind::Player`) at rest are likewise rendered with `walk_phase = 0.0`.
 3. **Active Stride Striding**:
    - When displacement occurs within the stride window, `player_walk_phase` articulates forward by `+0.35` radians per rendered frame, driving smooth alternating forward/backward stride swings for the left and right legs.
+
+## 21. Ratatui Dark Fantasy HUD & UI Presentation Layer
+
+### 21.1 Architecture & Layout (`client/src/ui.rs`)
+To elevate the visual aesthetic of the client from basic plain-text footer rows into an authentic, dark fantasy MMORPG experience, `client/src/ui.rs` integrates `ratatui` widgets and layout constraints:
+1. **Top Navigation & Vitality Header (`render_top_bar`)**:
+   - Framed with rounded borders (`BorderType::Rounded`) in weathered bronze (`Color::Rgb(90, 80, 70)`).
+   - Displays real-time location title (`🌲 Whispering Forest`), player coordinate pin (`📍 (X, Y)`), active weather badge (`🌧 Rain`, `❄ Snow`, `⚡ Storm`), tick index, and active renderer engine badge.
+   - **Fractional Unicode Health Gauge (`Gauge`)**: TrueColor gradient meter (`█`, `▉`, `▊`, `▌`, `▍`, `▎`, `▏`) transitioning dynamically from vibrant emerald green (>50% HP) to amber gold (25–50% HP) to flashing crimson (<25% HP), displaying formatted `HP: {curr}/{max}` and percentage.
+   - **Player Combat Attributes**: Styled class insignia (`[⚔ WARRIOR]`) and color-coded stat badges: `ATK` (crimson), `DEF` (steel blue), and `LUCK` (gilded amber).
+2. **Action & Combat Event Log (`render_combat_log`)**:
+   - Scrollable action log framed with rounded borders.
+   - Context-sensitive event colorizer:
+     - Combat strikes (`⚔ You strike Skeleton Warrior for 15 damage!`) in radiant flame orange (`Color::Rgb(255, 130, 80)`).
+     - Defeats and kills (`💀 Skeleton Warrior was slain!`) in royal amethyst/magenta (`Color::Rgb(240, 80, 120)`).
+     - Physical collision halts (`⚠ Blocked by Towering Pine Tree.`) in cautionary gold (`Color::Rgb(240, 190, 70)`).
+     - Server connects and zone transfers in crisp celestial cyan (`Color::Rgb(100, 210, 255)`).
+3. **Nearby Threat Radar & Target Lock**:
+   - Real-time scanner identifying living hostiles within sensor radius, calculating Manhattan distance in meters (`💀 Skeleton Warrior (3m)`).
+   - Mini target health meter displaying the target's remaining vitality.
+   - Peaceful indicator (`✨ Area peaceful.`) when no hostile threats are in proximity.
+4. **Hotkey Legend Footer (`render_controls_legend`)**:
+   - Clean centralized hotkey cheatsheet: `[WASD/Arrows] Move`, `[F] Attack`, `[R] Rest`, `[V/T] Cycle Weather`, `[Q/Esc] Quit`.
+5. **High-Performance Buffer Serializer (`buffer_to_ansi`)**:
+   - Traverses Ratatui `Buffer` cells and emits delta ANSI attribute sequences (`\x1b[38;2;...m`, `\x1b[1m`, `\x1b[0m`) only on style transitions, fully compatible with Windows ConPTY, Notcurses, and differential dirty-line terminal blitters.
+

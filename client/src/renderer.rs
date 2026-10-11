@@ -261,13 +261,16 @@ impl Renderer {
     pub fn render_frame(&self, world: &WorldSnapshot, frame: u64) -> String {
         let canvas = self.render_canvas(world, frame);
         let mut output = canvas.rows();
-        output.push_str(&format!(
-            "\n\n\x1b[38;5;252mTick {}  HP {}/{}\x1b[0m\x1b[K",
-            world.tick, world.player.stats.hp, world.player.stats.max_hp
-        ));
-        for message in &world.messages {
-            output.push_str(&format!("\n\x1b[38;5;245m{message}\x1b[0m\x1b[K"));
-        }
+        let mut hud = crate::ui::RatatuiHud::new();
+        let hud_overlay = hud.render_hud_overlay(
+            world,
+            self.width.max(40) as u16,
+            7,
+            self.weather,
+            "CPU PROCEDURAL",
+        );
+        output.push('\n');
+        output.push_str(&hud_overlay);
         output
     }
 
