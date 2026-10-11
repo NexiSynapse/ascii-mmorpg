@@ -1,5 +1,6 @@
 //! 3D Meshes, procedural geometry primitives, and volumetric scene generators.
 
+use glam::{Mat4, Vec3};
 use std::f32::consts::PI;
 
 #[repr(C)]
@@ -26,6 +27,149 @@ impl Vertex {
             color,
             material_id,
             roughness,
+        }
+    }
+}
+
+/// GPU-side hardware instance raw descriptor for batched rendering.
+/// Aligned to 96 bytes (16 bytes matrix, 16 bytes color, 16 bytes material parameters).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct InstanceRaw {
+    pub model_matrix: [[f32; 4]; 4],
+    pub color_tint: [f32; 4],
+    pub material_params: [f32; 4], // x=material_override, y=roughness_override
+}
+
+impl InstanceRaw {
+    pub const IDENTITY: Self = Self {
+        model_matrix: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        color_tint: [1.0, 1.0, 1.0, 1.0],
+        material_params: [-1.0, -1.0, 0.0, 0.0],
+    };
+
+    pub fn new(
+        translation: [f32; 3],
+        scale: [f32; 3],
+        rotation_y: f32,
+        color_tint: [f32; 4],
+        material_override: f32,
+        roughness_override: f32,
+    ) -> Self {
+        let mat = Mat4::from_translation(Vec3::from(translation))
+            * Mat4::from_rotation_y(rotation_y)
+            * Mat4::from_scale(Vec3::from(scale));
+        Self {
+            model_matrix: mat.to_cols_array_2d(),
+            color_tint,
+            material_params: [material_override, roughness_override, 0.0, 0.0],
+        }
+    }
+}
+
+/// Batched prop and particle instances for high-throughput GPU instanced drawing.
+#[derive(Default, Clone, Debug)]
+pub struct SceneBatches {
+    pub tree_instances: Vec<InstanceRaw>,
+    pub particle_instances: Vec<InstanceRaw>,
+    pub pillar_instances: Vec<InstanceRaw>,
+    pub custom_instances: Vec<InstanceRaw>,
+}
+
+impl SceneBatches {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&mut self) {
+        self.tree_instances.clear();
+        self.particle_instances.clear();
+        self.pillar_instances.clear();
+        self.custom_instances.clear();
+    }
+
+    pub fn total_instance_count(&self) -> usize {
+        self.tree_instances.len()
+            + self.particle_instances.len()
+            + self.pillar_instances.len()
+            + self.custom_instances.len()
+    }
+
+    pub fn add_pine_tree(&mut self, pos: [f32; 3], scale: f32, wind_sway: f32) {
+        let rot_y = wind_sway * 0.05;
+        self.tree_instances.push(InstanceRaw::new(
+            pos,
+            [scale, scale, scale],
+            rot_y,
+            [1.0, 1.0, 1.0, 1.0],
+            -1.0,
+            -1.0,
+        ));
+    }
+
+    pub fn add_pillar(&mut self, pos: [f32; 3], height_scale: f32) {
+        self.pillar_instances.push(InstanceRaw::new(
+            pos,
+            [1.0, height_scale, 1.0],
+            0.0,
+            [1.0, 1.0, 1.0, 1.0],
+            -1.0,
+            -1.0,
+        ));
+    }
+
+    pub fn add_weather_particles(
+        &mut self,
+        center_x: f32,
+        center_z: f32,
+        time: f32,
+        weather_mode: u32,
+    ) {
+        let rain_color = [0.65, 0.82, 1.0, 0.85];
+        let snow_color = [0.95, 0.98, 1.0, 0.9];
+        let num_particles = 180;
+
+        for i in 0..num_particles {
+            let fi = i as f32;
+            let seed_x = (fi * 17.31 + time * 1.5).sin() * 22.0;
+            let seed_z = (fi * 29.43 + time * 0.8).cos() * 22.0;
+
+            let px = center_x + seed_x;
+            let pz = center_z + seed_z;
+
+            match weather_mode {
+                0 | 2 => {
+                    let speed = 14.0;
+                    let py = 12.0 - ((time * speed + fi * 0.8) % 12.0);
+                    self.particle_instances.push(InstanceRaw::new(
+                        [px, py, pz],
+                        [0.04, 0.65, 0.04],
+                        0.0,
+                        rain_color,
+                        5.0,
+                        0.1,
+                    ));
+                }
+                1 => {
+                    let speed = 2.5;
+                    let py = 10.0 - ((time * speed + fi * 0.4) % 10.0);
+                    let drift_x = px + (time * 2.0 + fi).sin() * 0.4;
+                    self.particle_instances.push(InstanceRaw::new(
+                        [drift_x, py, pz],
+                        [0.12, 0.12, 0.12],
+                        0.0,
+                        snow_color,
+                        5.0,
+                        0.2,
+                    ));
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -670,5 +814,60 @@ impl MeshBuffer {
                 _ => {}
             }
         }
+    }
+
+    /// Overgrown ancient altar without pillars (pillars are instanced separately)
+    pub fn add_ruin_altar(&mut self, pos: [f32; 3]) {
+        let (x, y, z) = (pos[0], pos[1], pos[2]);
+        let stone = [0.52, 0.54, 0.58, 1.0];
+        let moss_stone = [0.38, 0.48, 0.38, 1.0];
+
+        // Fallen / broken architrave
+        self.add_box([x - 0.2, y + 2.45, z], [2.20, 0.45, 0.75], stone, 0.0, 0.6);
+        // Overgrown altar pedestal
+        self.add_box(
+            [x, y + 0.35, z + 0.8],
+            [1.10, 0.70, 0.90],
+            moss_stone,
+            0.0,
+            0.8,
+        );
+    }
+
+    /// Pre-bakes a high-resolution pine tree prototype mesh centered at origin for GPU hardware instancing.
+    pub fn create_pine_tree_prototype() -> Self {
+        let mut mb = Self::new();
+        let trunk_color = [0.38, 0.24, 0.14, 1.0];
+        let pine_green = [0.14, 0.34, 0.18, 1.0];
+
+        // Trunk
+        mb.add_box([0.0, 1.25, 0.0], [0.38, 2.50, 0.38], trunk_color, 3.0, 0.7);
+
+        // 3 Tiers of conical foliage
+        mb.add_cone([0.0, 1.6, 0.0], 1.65, 1.6, 8, pine_green, 3.0, 0.6);
+        mb.add_cone([0.0, 2.7, 0.0], 1.30, 1.5, 8, pine_green, 3.0, 0.6);
+        mb.add_cone([0.0, 3.8, 0.0], 0.90, 1.4, 8, pine_green, 3.0, 0.6);
+        mb
+    }
+
+    /// Pre-bakes a unit particle prototype mesh for GPU hardware instanced rain and snow.
+    pub fn create_weather_particle_prototype() -> Self {
+        let mut mb = Self::new();
+        mb.add_box(
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+            5.0,
+            0.1,
+        );
+        mb
+    }
+
+    /// Pre-bakes a ruin pillar prototype mesh centered at origin for GPU hardware instancing.
+    pub fn create_ruin_pillar_prototype() -> Self {
+        let mut mb = Self::new();
+        let stone = [0.52, 0.54, 0.58, 1.0];
+        mb.add_box([0.0, 1.25, 0.0], [0.65, 2.50, 0.65], stone, 0.0, 0.6);
+        mb
     }
 }

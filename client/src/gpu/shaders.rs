@@ -39,6 +39,15 @@ struct VertexInput {
     @location(4) roughness: f32,
 };
 
+struct InstanceInput {
+    @location(5) model_col0: vec4<f32>,
+    @location(6) model_col1: vec4<f32>,
+    @location(7) model_col2: vec4<f32>,
+    @location(8) model_col3: vec4<f32>,
+    @location(9) instance_color: vec4<f32>,
+    @location(10) instance_material: vec4<f32>,
+};
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_pos: vec3<f32>,
@@ -49,14 +58,21 @@ struct VertexOutput {
 };
 
 @vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
+fn vs_main(in: VertexInput, inst: InstanceInput) -> VertexOutput {
     var out: VertexOutput;
-    out.world_pos = in.position;
-    out.world_normal = normalize(in.normal);
-    out.color = in.color;
-    out.material_id = in.material_id;
-    out.roughness = in.roughness;
-    out.clip_position = camera.view_proj * vec4<f32>(in.position, 1.0);
+    let model = mat4x4<f32>(
+        inst.model_col0,
+        inst.model_col1,
+        inst.model_col2,
+        inst.model_col3,
+    );
+    let world_pos4 = model * vec4<f32>(in.position, 1.0);
+    out.world_pos = world_pos4.xyz;
+    out.world_normal = normalize((model * vec4<f32>(in.normal, 0.0)).xyz);
+    out.color = in.color * inst.instance_color;
+    out.material_id = select(in.material_id, inst.instance_material.x, inst.instance_material.x >= 0.0);
+    out.roughness = select(in.roughness, inst.instance_material.y, inst.instance_material.y >= 0.0);
+    out.clip_position = camera.view_proj * world_pos4;
     return out;
 }
 
