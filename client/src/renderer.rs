@@ -652,7 +652,7 @@ impl Renderer {
             EntityKind::Item => Ink::Item,
         };
 
-        let artwork = assets.for_entity(&actor.kind, &actor.name, frame / 8);
+        let artwork = assets.for_entity(&actor.kind, &actor.name, frame);
         let artwork_width = artwork
             .lines()
             .map(|line| line.trim_end_matches('\r').chars().count())
