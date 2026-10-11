@@ -511,3 +511,13 @@ The current project has repeatedly passed formatting, workspace tests, clippy wi
      $$x_{\text{offset}} = \sin\left(y \cdot \omega + \frac{\text{frame}}{T}\right) \cdot A$$
 3. **Sub-glyph phase shifting**:
    - Rather than displacing whole character coordinates (which can look jarring on a discrete terminal grid), motion can be conveyed by cycling glyph shapes in place: alternating between directional strokes (`/` → `|` → `\` → `|`), creating the visual impression of continuous rotation or waving without jitter.
+
+## 17. Forensic video research & humanoid character architecture
+- **Reference video analysis (`data/videos/`)**:
+  - Detailed forensic breakdown of reference footage by indie developer `@Ansenjeo` (`Video-31774.mp4`, `Video-47489.mp4`, `Video-90418.mp4`, and WhatsApp clips).
+  - Reverse-engineered pipeline: Unity 3D skeletal humanoid meshes + point lights + particle systems rendered to texture, processed through a full-screen luminance/normal ASCII post-processing shader with Sobel edge detection onto an $\approx 110 \times 128$ cell grid.
+  - Complete research findings and 3-path architectural implementation analysis documented in `docs/RESEARCH_ASCII_GRAPHICS_FIDELITY.md`.
+- **Articulated humanoid player model (`assets/ascii/player_warrior.txt`)**:
+  - Upgraded player model to a 14-row articulated Humanoid with defined head/visor dome, facial slits, neck, broad shoulders, articulated arms, tapered waist, belt with emblem, pelvic hip structure, and two separated walking legs with armored boots and ground drop shadow.
+  - 4 animation frames: idle breathing, left-leg forward stride with counter-swinging arms, neutral recoil, and right-leg forward stride.
+  - Per-glyph TrueColor depth shading via `draw_player_knight` in `client/src/renderer.rs`.

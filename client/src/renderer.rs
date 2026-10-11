@@ -706,11 +706,12 @@ impl Renderer {
                 let py = y + row as isize;
                 let ink = match glyph {
                     '▲' | '^' => Ink::KnightGold,              // Golden crest / horns
-                    ':' => Ink::KnightVisor,                   // Visor eye slit
+                    ':' | '=' if row <= 2 => Ink::KnightVisor, // Visor eye slit / chin guard
+                    'o' if row == 1 => Ink::NpcSkin,           // Humanoid face feature / eyes
                     '▓' | '8' | '[' | ']' => Ink::KnightSteel, // Gleaming plate armor
-                    '|' | '<' | '>' | '(' | ')' if row <= 4 => Ink::KnightSteel,
-                    '/' | '\\' if column <= 1 || column >= 5 => Ink::KnightCape, // Crimson cape edges
-                    '/' | '\\' => Ink::KnightSteel, // Steel greaves / arms
+                    '|' | '<' | '>' | '(' | ')' if row <= 6 => Ink::KnightSteel,
+                    '/' | '\\' if (column <= 2 || column >= 11) && row <= 6 => Ink::KnightCape, // Crimson cape edges
+                    '/' | '\\' => Ink::KnightSteel, // Steel greaves / arms / legs
                     '_' => Ink::DropShadow,         // Ground shadow
                     _ => Ink::Player,
                 };
@@ -729,7 +730,7 @@ impl Renderer {
                 let py = y + row as isize;
                 let ink = match glyph {
                     '^' | 'v' | '.' if row == 2 || row == 3 => Ink::MossEye, // Glowing amber eyes
-                    '@' | 'o' | 'O' => Ink::MossBody, // Organic moss body mass
+                    '8' | 'o' | 'O' => Ink::MossBody, // Organic moss body mass
                     '#' | '%' => Ink::MossHide,       // Shadowed hide core
                     '{' | '}' | '/' | '\\' | '|' => Ink::Moss, // Living moss tendrils
                     '_' => Ink::DropShadow,           // Ground drop shadow
