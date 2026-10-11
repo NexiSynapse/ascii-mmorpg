@@ -315,7 +315,14 @@ impl GpuRenderer {
             let ez = entity.position.y as f32 * 0.8;
             match entity.kind {
                 EntityKind::Monster => {
-                    mesh.add_mossling([ex, 0.0, ez], time);
+                    let label = entity.name.to_ascii_lowercase();
+                    if label.contains("warrior") {
+                        mesh.add_skeleton_warrior([ex, 0.0, ez], time, 0.0);
+                    } else if label.contains("skeleton") {
+                        mesh.add_skeleton([ex, 0.0, ez], time, 0.0);
+                    } else {
+                        mesh.add_mossling([ex, 0.0, ez], time);
+                    }
                 }
                 EntityKind::Npc => {
                     mesh.add_herbalist([ex, 0.0, ez], time);
@@ -686,5 +693,90 @@ f 2 5 4 3
         let mut mesh = MeshBuffer::new();
         mesh.add_humanoid([0.0, 0.0, 0.0], 0.0, 0.0, 0.0);
         assert!(!mesh.vertices.is_empty());
+    }
+
+    #[test]
+    fn test_character_models_and_monster_dispatch() {
+        let mut mesh_player = MeshBuffer::new();
+        mesh_player.add_humanoid([0.0, 0.0, 0.0], 0.0, 0.0, 0.0);
+        assert!(
+            !mesh_player.vertices.is_empty(),
+            "Humanoid knight model should produce vertices"
+        );
+
+        let mut mesh_skel = MeshBuffer::new();
+        mesh_skel.add_skeleton([0.0, 0.0, 0.0], 0.0, 0.0);
+        assert!(
+            !mesh_skel.vertices.is_empty(),
+            "Skeleton model should produce vertices"
+        );
+
+        let mut mesh_warrior = MeshBuffer::new();
+        mesh_warrior.add_skeleton_warrior([0.0, 0.0, 0.0], 0.0, 0.0);
+        assert!(
+            mesh_warrior.vertices.len() > mesh_skel.vertices.len(),
+            "Skeleton warrior should have more geometry than unarmored skeleton"
+        );
+
+        let mut mesh_mossling = MeshBuffer::new();
+        mesh_mossling.add_mossling([0.0, 0.0, 0.0], 0.0);
+        assert!(
+            !mesh_mossling.vertices.is_empty(),
+            "Mossling model should produce vertices"
+        );
+
+        let mut mesh_herbalist = MeshBuffer::new();
+        mesh_herbalist.add_herbalist([0.0, 0.0, 0.0], 0.0);
+        assert!(
+            !mesh_herbalist.vertices.is_empty(),
+            "Herbalist model should produce vertices"
+        );
+    }
+
+    #[test]
+    fn test_populate_scene_with_all_entity_kinds() {
+        let mut world = sample_world();
+        world.entities.push(ascii_mmorpg_shared::ActorSnapshot {
+            id: 4,
+            name: "Skeleton Warrior".into(),
+            kind: EntityKind::Monster,
+            position: ascii_mmorpg_shared::Point { x: 5, y: 5 },
+            stats: ascii_mmorpg_shared::Stats::healthy(15, 5, 2),
+            glyph: 'W',
+        });
+        world.entities.push(ascii_mmorpg_shared::ActorSnapshot {
+            id: 5,
+            name: "Herbalist".into(),
+            kind: EntityKind::Npc,
+            position: ascii_mmorpg_shared::Point { x: 1, y: 1 },
+            stats: ascii_mmorpg_shared::Stats::healthy(20, 1, 1),
+            glyph: 'H',
+        });
+
+        let mut mesh = MeshBuffer::new();
+        let mut batches = SceneBatches::default();
+        let (_uniforms, lighting) = GpuRenderer::populate_scene(
+            40,
+            20,
+            WeatherMode::Rain,
+            &world,
+            20,
+            0.5,
+            &mut mesh,
+            &mut batches,
+        );
+
+        assert!(
+            !mesh.vertices.is_empty(),
+            "MeshBuffer must contain vertices for scene"
+        );
+        assert!(
+            !mesh.indices.is_empty(),
+            "MeshBuffer must contain indices for scene"
+        );
+        assert!(
+            lighting.num_point_lights >= 2,
+            "Scene should include player and NPC lights"
+        );
     }
 }

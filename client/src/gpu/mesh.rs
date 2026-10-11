@@ -432,140 +432,584 @@ impl MeshBuffer {
         attack_phase: f32,
     ) {
         let (x, y, z) = (pos[0], pos[1], pos[2]);
-        let armor_color = [0.82, 0.86, 0.94, 1.0]; // Bright gleaming steel
-        let gold_trim = [0.95, 0.78, 0.28, 1.0]; // Polished gilded inlay
-        let visor_glow = [0.30, 0.85, 1.0, 1.0]; // Cyan enchanted visor
-        let cape_red = [0.65, 0.16, 0.22, 1.0]; // Deep crimson cloak
-        let leather = [0.35, 0.24, 0.18, 1.0];
+        let armor_color = [0.84, 0.88, 0.96, 1.0]; // Bright gleaming steel
+        let steel_dark = [0.55, 0.60, 0.68, 1.0]; // Shaded joint steel
+        let gold_trim = [0.96, 0.80, 0.28, 1.0]; // Polished gilded inlay
+        let visor_glow = [0.35, 0.90, 1.0, 1.0]; // Cyan enchanted visor
+        let cape_red = [0.72, 0.16, 0.22, 1.0]; // Deep royal crimson cloak
+        let leather = [0.36, 0.22, 0.14, 1.0]; // Dark oiled leather
 
-        // Head & Greathelm
-        self.add_box([x, y + 1.75, z], [0.45, 0.45, 0.45], armor_color, 1.0, 0.2);
-        // Visor slit
+        // --- 1. Head & Greathelm ---
+        // Greathelm crown
+        self.add_box([x, y + 1.76, z], [0.46, 0.44, 0.44], armor_color, 1.0, 0.15);
+        // Golden brow band
+        self.add_box(
+            [x, y + 1.86, z + 0.02],
+            [0.48, 0.07, 0.46],
+            gold_trim,
+            1.0,
+            0.2,
+        );
+        // Cheek guards & visor bevel
+        self.add_box(
+            [x - 0.21, y + 1.66, z + 0.08],
+            [0.08, 0.24, 0.32],
+            steel_dark,
+            1.0,
+            0.25,
+        );
+        self.add_box(
+            [x + 0.21, y + 1.66, z + 0.08],
+            [0.08, 0.24, 0.32],
+            steel_dark,
+            1.0,
+            0.25,
+        );
+        // Enchanted visor slit
         self.add_box(
             [x, y + 1.76, z + 0.23],
-            [0.32, 0.08, 0.05],
+            [0.34, 0.07, 0.04],
             visor_glow,
             4.0,
             0.1,
         );
-        // Plume / Helm Crest
+        // Winged Knight Plume / Crest (sweeps backward)
         self.add_box(
-            [x, y + 2.05, z - 0.05],
-            [0.12, 0.22, 0.35],
+            [x, y + 2.06, z - 0.06],
+            [0.10, 0.24, 0.38],
+            cape_red,
+            2.0,
+            0.5,
+        );
+        self.add_box(
+            [x, y + 2.14, z - 0.20],
+            [0.08, 0.16, 0.28],
             gold_trim,
             1.0,
             0.3,
         );
+        // Gorget / Neck collar
+        self.add_box([x, y + 1.54, z], [0.38, 0.10, 0.36], steel_dark, 1.0, 0.3);
 
-        // Cuirass (Chestplate)
-        self.add_box([x, y + 1.25, z], [0.65, 0.65, 0.40], armor_color, 1.0, 0.2);
+        // --- 2. Cuirass & Faulds (Chestplate & Waist) ---
+        // Main pectoral breastplate
+        self.add_box([x, y + 1.28, z], [0.66, 0.54, 0.42], armor_color, 1.0, 0.15);
+        // Medial ridge & gold eagle/cross heraldry
         self.add_box(
-            [x, y + 1.25, z + 0.21],
-            [0.40, 0.50, 0.04],
+            [x, y + 1.28, z + 0.22],
+            [0.12, 0.46, 0.04],
+            gold_trim,
+            1.0,
+            0.2,
+        );
+        self.add_box(
+            [x, y + 1.36, z + 0.22],
+            [0.38, 0.10, 0.04],
+            gold_trim,
+            1.0,
+            0.2,
+        );
+        // Oiled leather belt & gold buckle
+        self.add_box([x, y + 0.98, z], [0.60, 0.10, 0.38], leather, 2.0, 0.6);
+        self.add_box(
+            [x, y + 0.98, z + 0.20],
+            [0.16, 0.12, 0.05],
+            gold_trim,
+            1.0,
+            0.2,
+        );
+        // Segmented Fauld & Tassets (Hip/thigh guards)
+        self.add_box(
+            [x - 0.18, y + 0.86, z + 0.05],
+            [0.26, 0.20, 0.32],
+            steel_dark,
+            1.0,
+            0.3,
+        );
+        self.add_box(
+            [x + 0.18, y + 0.86, z + 0.05],
+            [0.26, 0.20, 0.32],
+            steel_dark,
+            1.0,
+            0.3,
+        );
+
+        // --- 3. Layered Spiked Pauldrons (Shoulders) ---
+        self.add_box(
+            [x - 0.46, y + 1.48, z],
+            [0.34, 0.26, 0.36],
+            armor_color,
+            1.0,
+            0.2,
+        );
+        self.add_box(
+            [x - 0.52, y + 1.56, z],
+            [0.16, 0.14, 0.26],
+            gold_trim,
+            1.0,
+            0.2,
+        );
+        self.add_box(
+            [x + 0.46, y + 1.48, z],
+            [0.34, 0.26, 0.36],
+            armor_color,
+            1.0,
+            0.2,
+        );
+        self.add_box(
+            [x + 0.52, y + 1.56, z],
+            [0.16, 0.14, 0.26],
             gold_trim,
             1.0,
             0.2,
         );
 
-        // Pauldrons (Spike Shoulder Guards)
-        self.add_box(
-            [x - 0.45, y + 1.45, z],
-            [0.32, 0.25, 0.35],
-            armor_color,
-            1.0,
-            0.2,
-        );
-        self.add_box(
-            [x + 0.45, y + 1.45, z],
-            [0.32, 0.25, 0.35],
-            armor_color,
-            1.0,
-            0.2,
-        );
-
-        // Flowing Cape (Back of Armor, gently swaying)
+        // --- 4. Flowing Cape ---
         let cape_sway = (walk_phase * 1.5).sin() * 0.15;
         self.add_box(
-            [x, y + 0.95, z - 0.25 + cape_sway],
-            [0.55, 0.85, 0.08],
+            [x, y + 0.96, z - 0.25 + cape_sway],
+            [0.58, 0.90, 0.08],
             cape_red,
             2.0,
             0.6,
         );
+        self.add_box(
+            [x, y + 0.48, z - 0.28 + cape_sway * 1.3],
+            [0.52, 0.30, 0.06],
+            cape_red,
+            2.0,
+            0.65,
+        );
 
-        // Leg articulation with walking cycle
+        // --- 5. Articulated Legs & Sabatons ---
         let leg_swing = (walk_phase).sin() * 0.3;
+        // Upper Cuisses & Knee Poleyns
         self.add_box(
-            [x - 0.18, y + 0.55, z + leg_swing],
-            [0.22, 0.65, 0.24],
-            armor_color,
+            [x - 0.18, y + 0.68, z + leg_swing],
+            [0.22, 0.36, 0.24],
+            steel_dark,
             1.0,
             0.3,
         );
         self.add_box(
-            [x + 0.18, y + 0.55, z - leg_swing],
-            [0.22, 0.65, 0.24],
-            armor_color,
+            [x - 0.18, y + 0.52, z + leg_swing + 0.10],
+            [0.16, 0.14, 0.10],
+            gold_trim,
+            1.0,
+            0.2,
+        );
+        self.add_box(
+            [x + 0.18, y + 0.68, z - leg_swing],
+            [0.22, 0.36, 0.24],
+            steel_dark,
             1.0,
             0.3,
         );
-        // Sabatons (Boots)
+        self.add_box(
+            [x + 0.18, y + 0.52, z - leg_swing + 0.10],
+            [0.16, 0.14, 0.10],
+            gold_trim,
+            1.0,
+            0.2,
+        );
+        // Shin Greaves
+        self.add_box(
+            [x - 0.18, y + 0.32, z + leg_swing],
+            [0.20, 0.36, 0.22],
+            armor_color,
+            1.0,
+            0.2,
+        );
+        self.add_box(
+            [x + 0.18, y + 0.32, z - leg_swing],
+            [0.20, 0.36, 0.22],
+            armor_color,
+            1.0,
+            0.2,
+        );
+        // Fluted Sabatons (Boots)
         self.add_box(
             [x - 0.18, y + 0.12, z + leg_swing + 0.06],
-            [0.24, 0.24, 0.36],
+            [0.24, 0.22, 0.36],
             leather,
             2.0,
             0.4,
         );
         self.add_box(
             [x + 0.18, y + 0.12, z - leg_swing + 0.06],
-            [0.24, 0.24, 0.36],
+            [0.24, 0.22, 0.36],
             leather,
             2.0,
             0.4,
         );
 
-        // Left Arm & Kite Shield
+        // --- 6. Left Arm & Knight Heater Shield ---
         self.add_box(
-            [x - 0.48, y + 1.05, z],
-            [0.20, 0.55, 0.20],
-            armor_color,
+            [x - 0.48, y + 1.10, z],
+            [0.18, 0.52, 0.18],
+            steel_dark,
             1.0,
             0.3,
         );
+        // Heater Shield with gilded trim and heraldic cross
         self.add_box(
-            [x - 0.55, y + 1.05, z + 0.25],
-            [0.12, 0.70, 0.45],
+            [x - 0.56, y + 1.08, z + 0.25],
+            [0.12, 0.76, 0.48],
+            gold_trim,
+            1.0,
+            0.2,
+        );
+        self.add_box(
+            [x - 0.58, y + 1.08, z + 0.25],
+            [0.10, 0.68, 0.40],
+            cape_red,
+            2.0,
+            0.4,
+        );
+        self.add_box(
+            [x - 0.59, y + 1.08, z + 0.25],
+            [0.06, 0.14, 0.28],
+            gold_trim,
+            1.0,
+            0.2,
+        );
+        self.add_box(
+            [x - 0.59, y + 1.08, z + 0.25],
+            [0.06, 0.48, 0.10],
             gold_trim,
             1.0,
             0.2,
         );
 
-        // Right Arm & Broadsword (swings during attack)
+        // --- 7. Right Arm & Crusader Broadsword ---
         let arm_swing = if attack_phase > 0.0 {
-            (attack_phase * PI).sin() * 0.8
+            (attack_phase * PI).sin() * 0.9
         } else {
             -(walk_phase).sin() * 0.25
         };
         self.add_box(
-            [x + 0.48, y + 1.05, z + arm_swing],
-            [0.20, 0.55, 0.20],
-            armor_color,
+            [x + 0.48, y + 1.10, z + arm_swing],
+            [0.18, 0.52, 0.18],
+            steel_dark,
             1.0,
             0.3,
         );
-        // Sword Blade & Crossguard
         self.add_box(
-            [x + 0.50, y + 1.35, z + arm_swing + 0.40],
-            [0.06, 1.10, 0.16],
-            [0.95, 0.98, 1.0, 1.0],
+            [x + 0.48, y + 0.80, z + arm_swing + 0.12],
+            [0.16, 0.16, 0.16],
+            leather,
+            2.0,
+            0.4,
+        );
+        // Broadsword Blade with fuller groove and high metallic luster
+        self.add_box(
+            [x + 0.50, y + 1.45, z + arm_swing + 0.42],
+            [0.05, 1.25, 0.16],
+            [0.96, 0.98, 1.0, 1.0],
             1.0,
-            0.05,
+            0.04,
+        );
+        // Swept Crossguard & Quillons
+        self.add_box(
+            [x + 0.50, y + 0.84, z + arm_swing + 0.22],
+            [0.38, 0.08, 0.10],
+            gold_trim,
+            1.0,
+            0.2,
+        );
+        // Wire-wrapped hilt & octagonal pommel stone
+        self.add_box(
+            [x + 0.50, y + 0.72, z + arm_swing + 0.15],
+            [0.08, 0.18, 0.08],
+            leather,
+            2.0,
+            0.5,
         );
         self.add_box(
-            [x + 0.50, y + 0.82, z + arm_swing + 0.20],
-            [0.35, 0.08, 0.10],
+            [x + 0.50, y + 0.61, z + arm_swing + 0.10],
+            [0.12, 0.10, 0.12],
             gold_trim,
+            1.0,
+            0.2,
+        );
+    }
+
+    /// Procedural 3D Skeletal Undead (Path C).
+    pub fn add_skeleton(&mut self, pos: [f32; 3], anim_phase: f32, attack_phase: f32) {
+        let (x, y, z) = (pos[0], pos[1], pos[2]);
+        let bone_white = [0.84, 0.82, 0.76, 1.0];
+        let bone_shadow = [0.52, 0.48, 0.42, 1.0];
+        let eye_glow = [1.0, 0.35, 0.15, 1.0]; // Eerie ember soul glint
+        let rust_steel = [0.42, 0.38, 0.34, 1.0];
+
+        let shamble = (anim_phase * 3.0).sin() * 0.22;
+        let head_tilt = (anim_phase * 2.5).cos() * 0.06;
+
+        // --- Cranium & Skull ---
+        self.add_box(
+            [x + head_tilt, y + 1.70, z],
+            [0.38, 0.36, 0.36],
+            bone_white,
+            3.0,
+            0.6,
+        );
+        // Hollow eye sockets with burning embers
+        self.add_box(
+            [x + head_tilt - 0.10, y + 1.70, z + 0.19],
+            [0.08, 0.08, 0.04],
+            eye_glow,
+            4.0,
+            0.1,
+        );
+        self.add_box(
+            [x + head_tilt + 0.10, y + 1.70, z + 0.19],
+            [0.08, 0.08, 0.04],
+            eye_glow,
+            4.0,
+            0.1,
+        );
+        // Maxilla & teeth / jaw
+        self.add_box(
+            [x + head_tilt, y + 1.54, z + 0.10],
+            [0.24, 0.12, 0.22],
+            bone_shadow,
+            3.0,
+            0.7,
+        );
+
+        // --- Spine & Cervical Vertebrae ---
+        self.add_box([x, y + 1.44, z], [0.12, 0.18, 0.12], bone_white, 3.0, 0.6);
+
+        // --- Thoracic Ribcage ---
+        self.add_box([x, y + 1.20, z], [0.48, 0.38, 0.30], bone_white, 3.0, 0.6);
+        self.add_box([x, y + 1.20, z], [0.32, 0.30, 0.34], bone_shadow, 3.0, 0.8);
+        self.add_box([x, y + 0.94, z], [0.14, 0.22, 0.14], bone_shadow, 3.0, 0.7);
+
+        // --- Pelvis ---
+        self.add_box([x, y + 0.80, z], [0.40, 0.16, 0.26], bone_white, 3.0, 0.6);
+
+        // --- Skeletal Legs (Shambling Stride) ---
+        self.add_box(
+            [x - 0.16, y + 0.50, z + shamble],
+            [0.10, 0.50, 0.10],
+            bone_white,
+            3.0,
+            0.6,
+        );
+        self.add_box(
+            [x - 0.16, y + 0.18, z + shamble],
+            [0.10, 0.44, 0.10],
+            bone_shadow,
+            3.0,
+            0.6,
+        );
+        self.add_box(
+            [x - 0.16, y + 0.06, z + shamble + 0.06],
+            [0.12, 0.10, 0.22],
+            bone_white,
+            3.0,
+            0.6,
+        );
+
+        self.add_box(
+            [x + 0.16, y + 0.50, z - shamble],
+            [0.10, 0.50, 0.10],
+            bone_white,
+            3.0,
+            0.6,
+        );
+        self.add_box(
+            [x + 0.16, y + 0.18, z - shamble],
+            [0.10, 0.44, 0.10],
+            bone_shadow,
+            3.0,
+            0.6,
+        );
+        self.add_box(
+            [x + 0.16, y + 0.06, z - shamble + 0.06],
+            [0.12, 0.10, 0.22],
+            bone_white,
+            3.0,
+            0.6,
+        );
+
+        // --- Left Arm ---
+        self.add_box(
+            [x - 0.34, y + 1.10, z],
+            [0.09, 0.46, 0.09],
+            bone_white,
+            3.0,
+            0.6,
+        );
+        self.add_box(
+            [x - 0.34, y + 0.76, z + 0.10],
+            [0.08, 0.38, 0.08],
+            bone_shadow,
+            3.0,
+            0.6,
+        );
+
+        // --- Right Arm & Rusted Blade ---
+        let strike = if attack_phase > 0.0 {
+            (attack_phase * PI).sin() * 0.9
+        } else {
+            -shamble * 0.5
+        };
+        self.add_box(
+            [x + 0.34, y + 1.10, z + strike],
+            [0.09, 0.46, 0.09],
+            bone_white,
+            3.0,
+            0.6,
+        );
+        self.add_box(
+            [x + 0.36, y + 0.78, z + strike + 0.16],
+            [0.08, 0.38, 0.08],
+            bone_shadow,
+            3.0,
+            0.6,
+        );
+        // Notched Rusted Scimitar
+        self.add_box(
+            [x + 0.38, y + 1.18, z + strike + 0.38],
+            [0.05, 0.92, 0.14],
+            rust_steel,
+            2.0,
+            0.4,
+        );
+        self.add_box(
+            [x + 0.38, y + 0.76, z + strike + 0.22],
+            [0.24, 0.06, 0.08],
+            rust_steel,
+            2.0,
+            0.5,
+        );
+    }
+
+    /// Procedural 3D Skeletal Champion Warrior with armor, tower shield, and broadsword (Path C).
+    pub fn add_skeleton_warrior(&mut self, pos: [f32; 3], anim_phase: f32, attack_phase: f32) {
+        let (x, y, z) = (pos[0], pos[1], pos[2]);
+        let iron_plate = [0.38, 0.40, 0.44, 1.0];
+        let brass_trim = [0.78, 0.62, 0.24, 1.0];
+        let chainmail = [0.30, 0.32, 0.36, 1.0];
+
+        let shamble = (anim_phase * 3.0).sin() * 0.25;
+
+        // Base skeleton geometry
+        self.add_skeleton(pos, anim_phase, attack_phase);
+
+        // --- Horned Iron Spangenhelm ---
+        self.add_box([x, y + 1.84, z], [0.42, 0.20, 0.42], iron_plate, 1.0, 0.3);
+        self.add_box(
+            [x, y + 1.88, z + 0.04],
+            [0.44, 0.06, 0.44],
+            brass_trim,
+            1.0,
+            0.2,
+        );
+        // Iron Horns protruding from helm
+        self.add_box(
+            [x - 0.26, y + 1.95, z],
+            [0.08, 0.24, 0.08],
+            iron_plate,
+            1.0,
+            0.4,
+        );
+        self.add_box(
+            [x + 0.26, y + 1.95, z],
+            [0.08, 0.24, 0.08],
+            iron_plate,
+            1.0,
+            0.4,
+        );
+
+        // --- Spiked Iron Pauldrons ---
+        self.add_box(
+            [x - 0.42, y + 1.40, z],
+            [0.28, 0.22, 0.30],
+            iron_plate,
+            1.0,
+            0.3,
+        );
+        self.add_box(
+            [x - 0.48, y + 1.48, z],
+            [0.12, 0.12, 0.12],
+            brass_trim,
+            1.0,
+            0.2,
+        );
+        self.add_box(
+            [x + 0.42, y + 1.40, z],
+            [0.28, 0.22, 0.30],
+            iron_plate,
+            1.0,
+            0.3,
+        );
+        self.add_box(
+            [x + 0.48, y + 1.48, z],
+            [0.12, 0.12, 0.12],
+            brass_trim,
+            1.0,
+            0.2,
+        );
+
+        // --- Tattered Chainmail Hauberk & Breastplate Fragment ---
+        self.add_box(
+            [x, y + 1.25, z + 0.04],
+            [0.52, 0.36, 0.32],
+            chainmail,
+            2.0,
+            0.5,
+        );
+        self.add_box(
+            [x, y + 1.30, z + 0.18],
+            [0.38, 0.24, 0.06],
+            iron_plate,
+            1.0,
+            0.3,
+        );
+
+        // --- Reinforced Tower Shield on Left Arm ---
+        self.add_box(
+            [x - 0.50, y + 0.98, z + 0.26],
+            [0.12, 0.88, 0.54],
+            iron_plate,
+            1.0,
+            0.3,
+        );
+        self.add_box(
+            [x - 0.52, y + 0.98, z + 0.26],
+            [0.10, 0.82, 0.48],
+            brass_trim,
+            1.0,
+            0.2,
+        );
+        // Central iron boss & skull emblem
+        self.add_box(
+            [x - 0.56, y + 0.98, z + 0.26],
+            [0.08, 0.18, 0.18],
+            iron_plate,
+            1.0,
+            0.2,
+        );
+
+        // --- Heavy Two-Handed Executioner's Broadsword ---
+        let strike = if attack_phase > 0.0 {
+            (attack_phase * PI).sin() * 0.9
+        } else {
+            -shamble * 0.5
+        };
+        self.add_box(
+            [x + 0.48, y + 1.42, z + strike + 0.44],
+            [0.06, 1.35, 0.20],
+            iron_plate,
+            1.0,
+            0.15,
+        );
+        self.add_box(
+            [x + 0.48, y + 0.78, z + strike + 0.24],
+            [0.36, 0.08, 0.10],
+            brass_trim,
             1.0,
             0.2,
         );
@@ -574,112 +1018,256 @@ impl MeshBuffer {
     /// Procedural 3D Mossling Forest Lurker
     pub fn add_mossling(&mut self, pos: [f32; 3], anim_phase: f32) {
         let (x, y, z) = (pos[0], pos[1], pos[2]);
-        let breathe = (anim_phase * 2.0).sin() * 0.05;
-        let moss_green = [0.25, 0.55, 0.22, 1.0];
-        let moss_dark = [0.15, 0.38, 0.14, 1.0];
-        let eye_glow = [1.0, 0.25, 0.15, 1.0];
+        let breathe = (anim_phase * 2.0).sin() * 0.06;
+        let moss_green = [0.26, 0.58, 0.24, 1.0];
+        let moss_dark = [0.14, 0.36, 0.12, 1.0];
+        let bark_brown = [0.38, 0.26, 0.16, 1.0];
+        let eye_glow = [1.0, 0.82, 0.20, 1.0]; // Predatory luminescent amber
+        let spore_glow = [0.45, 0.95, 0.55, 1.0]; // Pulsing bioluminescent fungal spores
 
-        // Bulky mossy body
+        // --- Bulky Moss-Covered Carapace ---
         self.add_box(
-            [x, y + 0.65 + breathe, z],
-            [0.95, 0.85, 0.75],
+            [x, y + 0.68 + breathe, z],
+            [1.02, 0.88, 0.82],
             moss_green,
             3.0,
             0.7,
         );
-        // Lower legs / quadruped base
+        // Underbelly & bark plating
         self.add_box(
-            [x - 0.35, y + 0.20, z - 0.20],
-            [0.28, 0.40, 0.28],
-            moss_dark,
+            [x, y + 0.42 + breathe * 0.5, z],
+            [0.85, 0.36, 0.70],
+            bark_brown,
             3.0,
             0.8,
         );
+        // Dorsal spine ridge
         self.add_box(
-            [x + 0.35, y + 0.20, z - 0.20],
-            [0.28, 0.40, 0.28],
+            [x, y + 1.10 + breathe, z],
+            [0.22, 0.24, 0.65],
             moss_dark,
             3.0,
-            0.8,
-        );
-        self.add_box(
-            [x - 0.35, y + 0.20, z + 0.20],
-            [0.28, 0.40, 0.28],
-            moss_dark,
-            3.0,
-            0.8,
-        );
-        self.add_box(
-            [x + 0.35, y + 0.20, z + 0.20],
-            [0.28, 0.40, 0.28],
-            moss_dark,
-            3.0,
-            0.8,
+            0.6,
         );
 
-        // Glowing predatory eyes
+        // --- Quadruped Muscular Stalker Limbs with Claws ---
+        let stride = (anim_phase * 3.0).sin() * 0.12;
         self.add_box(
-            [x - 0.22, y + 0.85 + breathe, z + 0.38],
-            [0.10, 0.08, 0.08],
+            [x - 0.38, y + 0.24, z - 0.22 + stride],
+            [0.30, 0.46, 0.30],
+            moss_dark,
+            3.0,
+            0.8,
+        );
+        self.add_box(
+            [x + 0.38, y + 0.24, z - 0.22 - stride],
+            [0.30, 0.46, 0.30],
+            moss_dark,
+            3.0,
+            0.8,
+        );
+        self.add_box(
+            [x - 0.38, y + 0.24, z + 0.22 - stride],
+            [0.30, 0.46, 0.30],
+            moss_dark,
+            3.0,
+            0.8,
+        );
+        self.add_box(
+            [x + 0.38, y + 0.24, z + 0.22 + stride],
+            [0.30, 0.46, 0.30],
+            moss_dark,
+            3.0,
+            0.8,
+        );
+        // Root talons / claws
+        self.add_box(
+            [x - 0.38, y + 0.06, z - 0.14 + stride],
+            [0.24, 0.10, 0.16],
+            bark_brown,
+            3.0,
+            0.9,
+        );
+        self.add_box(
+            [x + 0.38, y + 0.06, z - 0.14 - stride],
+            [0.24, 0.10, 0.16],
+            bark_brown,
+            3.0,
+            0.9,
+        );
+        self.add_box(
+            [x - 0.38, y + 0.06, z + 0.30 - stride],
+            [0.24, 0.10, 0.16],
+            bark_brown,
+            3.0,
+            0.9,
+        );
+        self.add_box(
+            [x + 0.38, y + 0.06, z + 0.30 + stride],
+            [0.24, 0.10, 0.16],
+            bark_brown,
+            3.0,
+            0.9,
+        );
+
+        // --- Fanged Maw & Mandibles ---
+        self.add_box(
+            [x, y + 0.58 + breathe, z + 0.42],
+            [0.55, 0.28, 0.22],
+            moss_dark,
+            3.0,
+            0.7,
+        );
+        self.add_box(
+            [x - 0.18, y + 0.50 + breathe, z + 0.48],
+            [0.08, 0.16, 0.12],
+            [0.95, 0.95, 0.90, 1.0],
+            2.0,
+            0.3,
+        );
+        self.add_box(
+            [x + 0.18, y + 0.50 + breathe, z + 0.48],
+            [0.08, 0.16, 0.12],
+            [0.95, 0.95, 0.90, 1.0],
+            2.0,
+            0.3,
+        );
+
+        // --- Multi-Faceted Luminescent Eyes ---
+        self.add_box(
+            [x - 0.24, y + 0.88 + breathe, z + 0.42],
+            [0.11, 0.09, 0.08],
             eye_glow,
             4.0,
             0.1,
         );
         self.add_box(
-            [x + 0.22, y + 0.85 + breathe, z + 0.38],
-            [0.10, 0.08, 0.08],
+            [x + 0.24, y + 0.88 + breathe, z + 0.42],
+            [0.11, 0.09, 0.08],
+            eye_glow,
+            4.0,
+            0.1,
+        );
+        self.add_box(
+            [x - 0.12, y + 0.96 + breathe, z + 0.40],
+            [0.08, 0.07, 0.06],
+            eye_glow,
+            4.0,
+            0.1,
+        );
+        self.add_box(
+            [x + 0.12, y + 0.96 + breathe, z + 0.40],
+            [0.08, 0.07, 0.06],
             eye_glow,
             4.0,
             0.1,
         );
 
-        // Spikes / fungal horns
+        // --- Bioluminescent Fungal Horns & Spore Pods ---
         self.add_cone(
-            [x - 0.28, y + 1.05 + breathe, z],
-            0.14,
-            0.45,
+            [x - 0.30, y + 1.12 + breathe, z],
+            0.16,
+            0.52,
             6,
             moss_dark,
             3.0,
             0.6,
         );
         self.add_cone(
-            [x + 0.28, y + 1.05 + breathe, z],
-            0.14,
-            0.45,
+            [x + 0.30, y + 1.12 + breathe, z],
+            0.16,
+            0.52,
             6,
             moss_dark,
             3.0,
             0.6,
+        );
+        let spore_pulse = (anim_phase * 4.0).sin() * 0.04;
+        self.add_box(
+            [x - 0.30, y + 1.42 + breathe, z],
+            [0.12 + spore_pulse, 0.12 + spore_pulse, 0.12],
+            spore_glow,
+            4.0,
+            0.1,
+        );
+        self.add_box(
+            [x + 0.30, y + 1.42 + breathe, z],
+            [0.12 + spore_pulse, 0.12 + spore_pulse, 0.12],
+            spore_glow,
+            4.0,
+            0.1,
         );
     }
 
     /// Procedural 3D Herbalist NPC
     pub fn add_herbalist(&mut self, pos: [f32; 3], anim_phase: f32) {
         let (x, y, z) = (pos[0], pos[1], pos[2]);
-        let robe_color = [0.22, 0.38, 0.58, 1.0]; // Scholar blue
-        let cowl_color = [0.16, 0.26, 0.42, 1.0];
+        let robe_color = [0.20, 0.36, 0.56, 1.0]; // Scholar twilight blue
+        let cowl_color = [0.15, 0.24, 0.40, 1.0];
         let wood_color = [0.42, 0.28, 0.16, 1.0];
-        let lantern_amber = [1.0, 0.78, 0.32, 1.0];
+        let gold_trim = [0.90, 0.74, 0.26, 1.0];
+        let leather_bag = [0.38, 0.22, 0.14, 1.0];
+        let potion_red = [0.92, 0.18, 0.22, 1.0]; // Healing draught
+        let potion_blue = [0.24, 0.72, 1.0, 1.0]; // Mana potion
+        let lantern_amber = [1.0, 0.82, 0.36, 1.0];
 
-        // Robe body
-        self.add_box([x, y + 0.85, z], [0.55, 1.30, 0.45], robe_color, 2.0, 0.6);
-        // Hood / Cowl
-        self.add_box([x, y + 1.65, z], [0.48, 0.42, 0.48], cowl_color, 2.0, 0.6);
-
-        // Staff
+        // --- Layered Scholar Robe with Embroidered Hem ---
+        self.add_box([x, y + 0.88, z], [0.58, 1.34, 0.48], robe_color, 2.0, 0.6);
+        self.add_box([x, y + 0.26, z], [0.62, 0.14, 0.52], gold_trim, 1.0, 0.3);
+        // Hood & Cowl with shadow veil
+        self.add_box([x, y + 1.68, z], [0.50, 0.46, 0.50], cowl_color, 2.0, 0.6);
         self.add_box(
-            [x + 0.42, y + 0.95, z + 0.15],
-            [0.08, 1.90, 0.08],
+            [x, y + 1.64, z + 0.20],
+            [0.32, 0.28, 0.10],
+            [0.10, 0.12, 0.16, 1.0],
+            2.0,
+            0.8,
+        );
+
+        // --- Potion Satchel & Alchemical Flasks on Belt ---
+        self.add_box(
+            [x - 0.28, y + 0.85, z + 0.10],
+            [0.20, 0.26, 0.18],
+            leather_bag,
+            2.0,
+            0.5,
+        );
+        self.add_box(
+            [x - 0.28, y + 0.90, z + 0.20],
+            [0.08, 0.12, 0.08],
+            potion_red,
+            4.0,
+            0.1,
+        );
+        self.add_box(
+            [x - 0.18, y + 0.90, z + 0.20],
+            [0.08, 0.12, 0.08],
+            potion_blue,
+            4.0,
+            0.1,
+        );
+
+        // --- Gnarled Elderwood Staff with Brass Lantern ---
+        self.add_box(
+            [x + 0.44, y + 0.95, z + 0.15],
+            [0.08, 1.94, 0.08],
             wood_color,
             3.0,
             0.5,
         );
-        // Staff Lantern (Emissive Glow)
+        // Brass Filigree Lantern Cage
+        self.add_box(
+            [x + 0.44, y + 1.88, z + 0.15],
+            [0.24, 0.30, 0.24],
+            gold_trim,
+            1.0,
+            0.2,
+        );
+        // Flickering Inner Flame (Emissive Glow)
         let flicker = (anim_phase * 6.0).sin() * 0.08;
         self.add_box(
-            [x + 0.42, y + 1.85, z + 0.15],
-            [0.22 + flicker, 0.28 + flicker, 0.22 + flicker],
+            [x + 0.44, y + 1.88, z + 0.15],
+            [0.16 + flicker, 0.22 + flicker, 0.16 + flicker],
             lantern_amber,
             4.0,
             0.1,
