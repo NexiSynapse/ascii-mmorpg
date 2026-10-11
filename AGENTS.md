@@ -55,7 +55,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## GPU rendering (Path C, `gpu` default, `wgpu-scene` alias)
 - Flags: `--wgpu` (explicit realtime 3D hardware offscreen pipeline, combines with `--connect`/`--fps`/`--notcurses`), `--cpu` (forces CPU rasterizer fallback), `--wgpu-demo [N]` (headless benchmark reporting adapter info, frametimes, and FPS).
-- Pipeline: Offscreen 3D scene + real-time compute ASCII shader (`client/src/gpu/`). Default feature: `gpu` (`wgpu`, `bytemuck`, `pollster`, `glam`). Hardware instancing, 8 dynamic point lights, 2x SSAA quadrant sampling G-buffer, Gribb-Hartmann frustum culling, O(1) depth unprojection, and asynchronous staging rings (`RING_SIZE = 2`) for high-throughput batch rendering.
+- Pipeline: Offscreen 3D scene + real-time compute ASCII shader (`client/src/gpu/`). Default feature: `gpu` (`wgpu`, `bytemuck`, `pollster`, `glam`). Hardware instancing, 8 dynamic point lights, 4x SSAA (4x4 / 16 samples per cell) over `Rgba8UnormSrgb` color, `Rgba32Float` normal/depth, and `Rgba8Unorm` entity-metadata targets, Gribb-Hartmann frustum culling, O(1) depth unprojection, and asynchronous staging rings (`RING_SIZE = 2`) for high-throughput batch rendering.
 - Graceful fallback: Automatically falls back to CPU procedural renderer if GPU initialization fails, or can be forced with `--cpu`: `cargo run -p ascii-mmorpg-client -- --cpu`.
 - Verification: keep code warning-free under `cargo clippy --workspace --all-targets -- -D warnings`.
 

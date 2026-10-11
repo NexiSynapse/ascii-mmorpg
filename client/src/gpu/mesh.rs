@@ -11,6 +11,10 @@ pub struct Vertex {
     pub color: [f32; 4],
     pub material_id: f32, // 0=Terrain, 1=Metal, 2=Cloth, 3=Foliage, 4=Glow/Fire, 5=Weather
     pub roughness: f32,
+    /// Low-byte entity identity written to the metadata G-buffer. Zero means world geometry.
+    pub entity_id: f32,
+    /// Stable visual faction/class used by the ASCII outline pass.
+    pub entity_class: f32,
 }
 
 impl Vertex {
@@ -27,7 +31,15 @@ impl Vertex {
             color,
             material_id,
             roughness,
+            entity_id: 0.0,
+            entity_class: 0.0,
         }
+    }
+
+    fn with_entity_context(mut self, entity_id: u32, entity_class: u32) -> Self {
+        self.entity_id = entity_id as f32;
+        self.entity_class = entity_class as f32;
+        self
     }
 }
 
@@ -50,7 +62,7 @@ impl InstanceRaw {
             [0.0, 0.0, 0.0, 1.0],
         ],
         color_tint: [1.0, 1.0, 1.0, 1.0],
-        material_params: [-1.0, -1.0, 0.0, 0.0],
+        material_params: [-1.0, -1.0, -1.0, 0.0],
     };
 
     pub fn new(
@@ -67,7 +79,7 @@ impl InstanceRaw {
         Self {
             model_matrix: mat.to_cols_array_2d(),
             color_tint,
-            material_params: [material_override, roughness_override, 0.0, 0.0],
+            material_params: [material_override, roughness_override, -1.0, 0.0],
         }
     }
 }
@@ -256,6 +268,8 @@ impl SceneBatches {
 pub struct MeshBuffer {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    entity_id: u32,
+    entity_class: u32,
 }
 
 impl MeshBuffer {
@@ -266,6 +280,16 @@ impl MeshBuffer {
     pub fn clear(&mut self) {
         self.vertices.clear();
         self.indices.clear();
+        self.entity_id = 0;
+        self.entity_class = 0;
+    }
+
+    /// Sets the metadata stamped onto subsequently generated geometry.
+    ///
+    /// The renderer uses this for entity silhouettes while keeping terrain and props at zero.
+    pub fn set_entity_context(&mut self, entity_id: u64, entity_class: u8) {
+        self.entity_id = (entity_id & 0xff) as u32;
+        self.entity_class = u32::from(entity_class);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -281,14 +305,22 @@ impl MeshBuffer {
         roughness: f32,
     ) {
         let base_idx = self.vertices.len() as u32;
-        self.vertices
-            .push(Vertex::new(p0, normal, color, material_id, roughness));
-        self.vertices
-            .push(Vertex::new(p1, normal, color, material_id, roughness));
-        self.vertices
-            .push(Vertex::new(p2, normal, color, material_id, roughness));
-        self.vertices
-            .push(Vertex::new(p3, normal, color, material_id, roughness));
+        self.vertices.push(
+            Vertex::new(p0, normal, color, material_id, roughness)
+                .with_entity_context(self.entity_id, self.entity_class),
+        );
+        self.vertices.push(
+            Vertex::new(p1, normal, color, material_id, roughness)
+                .with_entity_context(self.entity_id, self.entity_class),
+        );
+        self.vertices.push(
+            Vertex::new(p2, normal, color, material_id, roughness)
+                .with_entity_context(self.entity_id, self.entity_class),
+        );
+        self.vertices.push(
+            Vertex::new(p3, normal, color, material_id, roughness)
+                .with_entity_context(self.entity_id, self.entity_class),
+        );
 
         self.indices.extend_from_slice(&[
             base_idx,
@@ -411,12 +443,18 @@ impl MeshBuffer {
             let normal = [mid_theta.cos() * 0.707, 0.707, mid_theta.sin() * 0.707];
 
             let base_idx = self.vertices.len() as u32;
-            self.vertices
-                .push(Vertex::new(p1, normal, color, material_id, roughness));
-            self.vertices
-                .push(Vertex::new(p2, normal, color, material_id, roughness));
-            self.vertices
-                .push(Vertex::new(apex, normal, color, material_id, roughness));
+            self.vertices.push(
+                Vertex::new(p1, normal, color, material_id, roughness)
+                    .with_entity_context(self.entity_id, self.entity_class),
+            );
+            self.vertices.push(
+                Vertex::new(p2, normal, color, material_id, roughness)
+                    .with_entity_context(self.entity_id, self.entity_class),
+            );
+            self.vertices.push(
+                Vertex::new(apex, normal, color, material_id, roughness)
+                    .with_entity_context(self.entity_id, self.entity_class),
+            );
 
             self.indices
                 .extend_from_slice(&[base_idx, base_idx + 1, base_idx + 2]);
@@ -1685,27 +1723,36 @@ impl MeshBuffer {
                         let tn2 = (transform * n2.extend(0.0)).truncate().normalize_or_zero();
 
                         let base = self.vertices.len() as u32;
-                        self.vertices.push(Vertex::new(
-                            tp0.into(),
-                            tn0.into(),
-                            default_color,
-                            material_id,
-                            roughness,
-                        ));
-                        self.vertices.push(Vertex::new(
-                            tp1.into(),
-                            tn1.into(),
-                            default_color,
-                            material_id,
-                            roughness,
-                        ));
-                        self.vertices.push(Vertex::new(
-                            tp2.into(),
-                            tn2.into(),
-                            default_color,
-                            material_id,
-                            roughness,
-                        ));
+                        self.vertices.push(
+                            Vertex::new(
+                                tp0.into(),
+                                tn0.into(),
+                                default_color,
+                                material_id,
+                                roughness,
+                            )
+                            .with_entity_context(self.entity_id, self.entity_class),
+                        );
+                        self.vertices.push(
+                            Vertex::new(
+                                tp1.into(),
+                                tn1.into(),
+                                default_color,
+                                material_id,
+                                roughness,
+                            )
+                            .with_entity_context(self.entity_id, self.entity_class),
+                        );
+                        self.vertices.push(
+                            Vertex::new(
+                                tp2.into(),
+                                tn2.into(),
+                                default_color,
+                                material_id,
+                                roughness,
+                            )
+                            .with_entity_context(self.entity_id, self.entity_class),
+                        );
 
                         self.indices.extend_from_slice(&[base, base + 1, base + 2]);
                         triangles_added += 1;

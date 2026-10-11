@@ -38,15 +38,17 @@ struct VertexInput {
     @location(2) color: vec4<f32>,
     @location(3) material_id: f32,
     @location(4) roughness: f32,
+    @location(5) entity_id: f32,
+    @location(6) entity_class: f32,
 };
 
 struct InstanceInput {
-    @location(5) model_col0: vec4<f32>,
-    @location(6) model_col1: vec4<f32>,
-    @location(7) model_col2: vec4<f32>,
-    @location(8) model_col3: vec4<f32>,
-    @location(9) instance_color: vec4<f32>,
-    @location(10) instance_material: vec4<f32>,
+    @location(7) model_col0: vec4<f32>,
+    @location(8) model_col1: vec4<f32>,
+    @location(9) model_col2: vec4<f32>,
+    @location(10) model_col3: vec4<f32>,
+    @location(11) instance_color: vec4<f32>,
+    @location(12) instance_material: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -56,6 +58,8 @@ struct VertexOutput {
     @location(2) color: vec4<f32>,
     @location(3) material_id: f32,
     @location(4) roughness: f32,
+    @location(5) @interpolate(flat) entity_id: f32,
+    @location(6) @interpolate(flat) entity_class: f32,
 };
 
 @vertex
@@ -69,6 +73,8 @@ fn vs_main(in: VertexInput, inst: InstanceInput) -> VertexOutput {
     );
     var world_pos4 = model * vec4<f32>(in.position, 1.0);
     let mat_id = select(in.material_id, inst.instance_material.x, inst.instance_material.x >= 0.0);
+    let entity_id = select(in.entity_id, inst.instance_material.z, inst.instance_material.z >= 0.0);
+    let entity_class = select(in.entity_class, inst.instance_material.w, inst.instance_material.z >= 0.0);
 
     // Procedural wind sway for foliage (material_id == 3.0: pine needles, leaves, canopies)
     // Anchors tree base/ground while allowing elevated canopy cones and boughs to oscillate
@@ -90,6 +96,11 @@ fn vs_main(in: VertexInput, inst: InstanceInput) -> VertexOutput {
     out.color = in.color * inst.instance_color;
     out.material_id = mat_id;
     out.roughness = select(in.roughness, inst.instance_material.y, inst.instance_material.y >= 0.0);
+    // Preserve the entity channel through the scene pass. Without these
+    // assignments the metadata G-buffer is always zero, so the compute pass
+    // cannot distinguish player/monster silhouettes from world geometry.
+    out.entity_id = entity_id;
+    out.entity_class = entity_class;
     out.clip_position = camera.view_proj * world_pos4;
     return out;
 }
@@ -97,7 +108,17 @@ fn vs_main(in: VertexInput, inst: InstanceInput) -> VertexOutput {
 struct FragmentOutput {
     @location(0) color: vec4<f32>,
     @location(1) normal_depth: vec4<f32>,
+    @location(2) metadata: vec4<f32>,
 };
+
+fn pack_metadata(material_id: f32, entity_id: f32, entity_class: f32) -> vec4<f32> {
+    return vec4<f32>(
+        clamp(material_id, 0.0, 255.0) / 255.0,
+        clamp(entity_id, 0.0, 255.0) / 255.0,
+        clamp(entity_class, 0.0, 255.0) / 255.0,
+        0.0,
+    );
+}
 
 @fragment
 fn fs_main(in: VertexOutput) -> FragmentOutput {
@@ -107,6 +128,7 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
     if (in.material_id >= 3.9 && in.material_id <= 4.1) {
         out.color = in.color * 1.5;
         out.normal_depth = vec4<f32>(in.world_normal * 0.5 + 0.5, in.clip_position.z);
+        out.metadata = pack_metadata(in.material_id, in.entity_id, in.entity_class);
         return out;
     }
 
@@ -114,6 +136,7 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
     if (in.material_id >= 4.9 && in.material_id <= 5.1) {
         out.color = in.color;
         out.normal_depth = vec4<f32>(vec3<f32>(0.5, 1.0, 0.5), in.clip_position.z);
+        out.metadata = pack_metadata(in.material_id, in.entity_id, in.entity_class);
         return out;
     }
 
@@ -134,6 +157,7 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
         let water_color = water_base * (lighting.ambient_color.rgb + lighting.sun_color.rgb * water_NdotL) + vec3<f32>(water_spec);
         out.color = vec4<f32>(water_color, 0.85);
         out.normal_depth = vec4<f32>(wave_norm * 0.5 + 0.5, in.clip_position.z);
+        out.metadata = pack_metadata(in.material_id, in.entity_id, in.entity_class);
         return out;
     }
 
@@ -184,7 +208,9 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
     lit_color = mix(lit_color, fog_color, fog_factor);
 
     out.color = vec4<f32>(lit_color, in.color.a);
+    // Fragment @builtin(position).z is already device depth (0..1).
     out.normal_depth = vec4<f32>(N * 0.5 + 0.5, in.clip_position.z);
+    out.metadata = pack_metadata(in.material_id, in.entity_id, in.entity_class);
     return out;
 }
 "#;
@@ -211,7 +237,8 @@ struct CellBuffer {
 
 @group(0) @binding(0) var color_tex: texture_2d<f32>;
 @group(0) @binding(1) var normal_depth_tex: texture_2d<f32>;
-@group(0) @binding(2) var<storage, read_write> cell_output: CellBuffer;
+@group(0) @binding(2) var metadata_tex: texture_2d<f32>;
+@group(0) @binding(3) var<storage, read_write> cell_output: CellBuffer;
 
 struct ConfigUniform {
     width: u32,
@@ -220,7 +247,125 @@ struct ConfigUniform {
     contrast_boost: f32,
 };
 
-@group(0) @binding(3) var<uniform> config: ConfigUniform;
+@group(0) @binding(4) var<uniform> config: ConfigUniform;
+
+fn material_glyph(material: u32, band: u32) -> u32 {
+    if (material == 0u) { // terrain: keep the ground readable without a solid block of '@'
+        if (band == 0u) { return 32u; }
+        if (band == 1u) { return 46u; }
+        if (band == 2u) { return 58u; }
+        if (band == 3u) { return 95u; }
+        if (band == 4u) { return 45u; }
+        return 61u;
+    }
+    if (material == 3u) { // foliage: organic strokes and clustered leaves
+        if (band == 0u) { return 32u; }
+        if (band == 1u) { return 44u; }
+        if (band == 2u) { return 59u; }
+        if (band == 3u) { return 42u; }
+        if (band == 4u) { return 38u; }
+        return 38u;
+    }
+    if (material == 5u) { // weather: sparse points and directional streaks
+        if (band == 0u) { return 32u; }
+        if (band == 1u) { return 46u; }
+        if (band == 2u) { return 183u; }
+        if (band == 3u) { return 47u; }
+        if (band == 4u) { return 124u; }
+        return 47u;
+    }
+    if (material == 6u) { // water: horizontal ripple language
+        if (band == 0u) { return 32u; }
+        if (band == 1u) { return 183u; }
+        if (band == 2u) { return 126u; }
+        if (band == 3u) { return 45u; }
+        if (band == 4u) { return 61u; }
+        return 126u;
+    }
+    if (material == 1u) { // metal: hard creases
+        if (band == 0u) { return 32u; }
+        if (band == 1u) { return 45u; }
+        if (band == 2u) { return 61u; }
+        if (band == 3u) { return 43u; }
+        if (band == 4u) { return 35u; }
+        return 64u;
+    }
+    if (band == 0u) { return 32u; }
+    if (band == 1u) { return 46u; }
+    if (band == 2u) { return 58u; }
+    if (band == 3u) { return 42u; }
+    if (band == 4u) { return 35u; }
+    return 64u;
+}
+
+fn luma_at(x: i32, y: i32) -> f32 {
+    let color = textureLoad(color_tex, vec2<i32>(x, y), 0).rgb;
+    return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+fn shape_region(base_x: i32, base_y: i32, region: u32) -> f32 {
+    if (region == 0u) {
+        return (luma_at(base_x, base_y) + luma_at(base_x + 1, base_y)) * 0.5;
+    }
+    if (region == 1u) {
+        return (luma_at(base_x + 2, base_y) + luma_at(base_x + 3, base_y)) * 0.5;
+    }
+    if (region == 2u) {
+        return (luma_at(base_x, base_y + 1) + luma_at(base_x + 1, base_y + 1)
+            + luma_at(base_x, base_y + 2) + luma_at(base_x + 1, base_y + 2)) * 0.25;
+    }
+    if (region == 3u) {
+        return (luma_at(base_x + 2, base_y + 1) + luma_at(base_x + 3, base_y + 1)
+            + luma_at(base_x + 2, base_y + 2) + luma_at(base_x + 3, base_y + 2)) * 0.25;
+    }
+    if (region == 4u) {
+        return (luma_at(base_x, base_y + 3) + luma_at(base_x + 1, base_y + 3)) * 0.5;
+    }
+    return (luma_at(base_x + 2, base_y + 3) + luma_at(base_x + 3, base_y + 3)) * 0.5;
+}
+
+fn shape_distance(
+    s0: f32, s1: f32, s2: f32, s3: f32, s4: f32, s5: f32,
+    v0: f32, v1: f32, v2: f32, v3: f32, v4: f32, v5: f32,
+) -> f32 {
+    let d0 = s0 - v0;
+    let d1 = s1 - v1;
+    let d2 = s2 - v2;
+    let d3 = s3 - v3;
+    let d4 = s4 - v4;
+    let d5 = s5 - v5;
+    return d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3 + d4 * d4 + d5 * d5;
+}
+
+fn shape_glyph(material: u32, base_x: i32, base_y: i32) -> u32 {
+    let s0 = shape_region(base_x, base_y, 0u);
+    let s1 = shape_region(base_x, base_y, 1u);
+    let s2 = shape_region(base_x, base_y, 2u);
+    let s3 = shape_region(base_x, base_y, 3u);
+    let s4 = shape_region(base_x, base_y, 4u);
+    let s5 = shape_region(base_x, base_y, 5u);
+    let peak = max(max(max(s0, s1), max(s2, s3)), max(s4, s5));
+    let n0 = pow(s0 / max(peak, 0.001), 0.72);
+    let n1 = pow(s1 / max(peak, 0.001), 0.72);
+    let n2 = pow(s2 / max(peak, 0.001), 0.72);
+    let n3 = pow(s3 / max(peak, 0.001), 0.72);
+    let n4 = pow(s4 / max(peak, 0.001), 0.72);
+    let n5 = pow(s5 / max(peak, 0.001), 0.72);
+
+    var best = 0u;
+    var best_distance = shape_distance(n0, n1, n2, n3, n4, n5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    let dot_distance = shape_distance(n0, n1, n2, n3, n4, n5, 0.12, 0.12, 0.12, 0.12, 0.12, 0.12);
+    if (dot_distance < best_distance) { best = 1u; best_distance = dot_distance; }
+    let horizontal_distance = shape_distance(n0, n1, n2, n3, n4, n5, 0.15, 0.15, 0.25, 0.25, 0.80, 0.80);
+    if (horizontal_distance < best_distance) { best = 2u; best_distance = horizontal_distance; }
+    let cross_distance = shape_distance(n0, n1, n2, n3, n4, n5, 0.55, 0.55, 0.75, 0.75, 0.55, 0.55);
+    if (cross_distance < best_distance) { best = 3u; best_distance = cross_distance; }
+    let diagonal_distance = shape_distance(n0, n1, n2, n3, n4, n5, 0.80, 0.15, 0.15, 0.80, 0.15, 0.80);
+    if (diagonal_distance < best_distance) { best = 4u; best_distance = diagonal_distance; }
+    let dense_distance = shape_distance(n0, n1, n2, n3, n4, n5, 0.88, 0.88, 0.88, 0.88, 0.88, 0.88);
+    if (dense_distance < best_distance) { best = 5u; }
+    return material_glyph(material, best);
+}
 
 // 4x4 Bayer Dither Matrix for velvety smooth luminance gradations
 fn bayer4(x: u32, y: u32) -> f32 {
@@ -242,30 +387,32 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
 
-    // 2x Super-Sampling Quadrant Texel Coordinates (Asciicker 2x sub-sample resolution logic)
-    let base_x = i32(x * 2u);
-    let base_y = i32(y * 2u);
-    let tex_w = i32(config.width * 2u);
-    let tex_h = i32(config.height * 2u);
+    let base_x = i32(x * 4u);
+    let base_y = i32(y * 4u);
+    let tex_w = i32(config.width * 4u);
+    let tex_h = i32(config.height * 4u);
 
     let p00 = vec2<i32>(base_x, base_y);
-    let p10 = vec2<i32>(min(base_x + 1, tex_w - 1), base_y);
-    let p01 = vec2<i32>(base_x, min(base_y + 1, tex_h - 1));
-    let p11 = vec2<i32>(min(base_x + 1, tex_w - 1), min(base_y + 1, tex_h - 1));
+    let p10 = vec2<i32>(min(base_x + 3, tex_w - 1), base_y);
+    let p01 = vec2<i32>(base_x, min(base_y + 3, tex_h - 1));
+    let p11 = vec2<i32>(min(base_x + 3, tex_w - 1), min(base_y + 3, tex_h - 1));
 
-    let c00 = textureLoad(color_tex, p00, 0);
-    let c10 = textureLoad(color_tex, p10, 0);
-    let c01 = textureLoad(color_tex, p01, 0);
-    let c11 = textureLoad(color_tex, p11, 0);
+    var avg_color = vec4<f32>(0.0);
+    var avg_nd = vec4<f32>(0.0);
+    for (var sx = 0; sx < 4; sx = sx + 1) {
+        for (var sy = 0; sy < 4; sy = sy + 1) {
+            let sample_pos = vec2<i32>(base_x + sx, base_y + sy);
+            avg_color = avg_color + textureLoad(color_tex, sample_pos, 0);
+            avg_nd = avg_nd + textureLoad(normal_depth_tex, sample_pos, 0);
+        }
+    }
+    avg_color = avg_color * 0.0625;
+    avg_nd = avg_nd * 0.0625;
 
     let nd00 = textureLoad(normal_depth_tex, p00, 0);
     let nd10 = textureLoad(normal_depth_tex, p10, 0);
     let nd01 = textureLoad(normal_depth_tex, p01, 0);
     let nd11 = textureLoad(normal_depth_tex, p11, 0);
-
-    // 1. Integrated Sub-Pixel Color & Normal/Depth (SSAA Anti-Aliasing)
-    let avg_color = (c00 + c10 + c01 + c11) * 0.25;
-    let avg_nd = (nd00 + nd10 + nd01 + nd11) * 0.25;
 
     // 2. Sub-Pixel Horizontal & Vertical Gradient Evaluation (Discontinuity detection)
     // Horizontal difference (Left vs Right)
@@ -276,16 +423,29 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let depth_diff_y = abs((nd01.w + nd11.w) - (nd00.w + nd10.w)) * 0.5;
     let normal_diff_y = length((nd01.xyz + nd11.xyz) - (nd00.xyz + nd10.xyz)) * 0.5;
 
-    // Expanded 1-cell neighborhood context
-    let p_left = vec2<i32>(max(base_x - 1, 0), base_y);
-    let p_right = vec2<i32>(min(base_x + 2, tex_w - 1), base_y);
-    let p_top = vec2<i32>(base_x, max(base_y - 1, 0));
-    let p_bot = vec2<i32>(base_x, min(base_y + 2, tex_h - 1));
+    // Expanded one-cell neighborhood context.
+    let p_left = vec2<i32>(max(base_x - 2, 0), base_y + 2);
+    let p_right = vec2<i32>(min(base_x + 6, tex_w - 1), base_y + 2);
+    let p_top = vec2<i32>(base_x + 2, max(base_y - 2, 0));
+    let p_bot = vec2<i32>(base_x + 2, min(base_y + 6, tex_h - 1));
 
     let nd_l = textureLoad(normal_depth_tex, p_left, 0);
     let nd_r = textureLoad(normal_depth_tex, p_right, 0);
     let nd_t = textureLoad(normal_depth_tex, p_top, 0);
     let nd_b = textureLoad(normal_depth_tex, p_bot, 0);
+
+    let center_meta = textureLoad(metadata_tex, vec2<i32>(base_x + 2, base_y + 2), 0) * 255.0;
+    let left_meta = textureLoad(metadata_tex, p_left, 0) * 255.0;
+    let right_meta = textureLoad(metadata_tex, p_right, 0) * 255.0;
+    let top_meta = textureLoad(metadata_tex, p_top, 0) * 255.0;
+    let bottom_meta = textureLoad(metadata_tex, p_bot, 0) * 255.0;
+    let material_id = u32(center_meta.r + 0.5);
+    let entity_id = u32(center_meta.g + 0.5);
+    let entity_class = u32(center_meta.b + 0.5);
+    let entity_edge_x = entity_id != 0u
+        && (u32(left_meta.g + 0.5) != entity_id || u32(right_meta.g + 0.5) != entity_id);
+    let entity_edge_y = entity_id != 0u
+        && (u32(top_meta.g + 0.5) != entity_id || u32(bottom_meta.g + 0.5) != entity_id);
 
     let neigh_depth_x = abs(nd_r.w - nd_l.w);
     let neigh_depth_y = abs(nd_b.w - nd_t.w);
@@ -319,40 +479,76 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
 
-    // Integrated perceived luminance with SSAA smoothing
-    let luma = dot(avg_color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let dither = bayer4(x, y) * 0.05;
-    let dithered_luma = clamp(luma + dither, 0.0, 1.0);
-
     if (!is_edge) {
-        // High-fidelity Ansenjeo volumetric glyph ramp
+        let luma = dot(avg_color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let dither = bayer4(x, y) * 0.05;
+        // The reference keeps most of the distant world as negative space.
+        // Device depth is concentrated near 1.0 under perspective, so use a
+        // calibrated aerial-void gate for world geometry while never fading
+        // entity metadata (actors remain legible in the distance).
+        let far_void = entity_id == 0u && avg_nd.w > 0.9965;
+        var depth_luma = luma;
+        if (far_void) {
+            depth_luma = luma * clamp((0.9995 - avg_nd.w) * 20.0, 0.0, 1.0);
+        }
+        let dithered_luma = clamp(depth_luma + dither, 0.0, 1.0);
+        var band = 0u;
         if (dithered_luma < 0.04) {
-            glyph = 32u; // ' '
+            band = 0u;
         } else if (dithered_luma < 0.10) {
-            glyph = 46u; // '.'
+            band = 1u;
         } else if (dithered_luma < 0.18) {
-            glyph = 58u; // ':'
+            band = 2u;
         } else if (dithered_luma < 0.28) {
-            glyph = 42u; // '*'
+            band = 3u;
         } else if (dithered_luma < 0.40) {
-            glyph = 61u; // '='
+            band = 3u;
         } else if (dithered_luma < 0.54) {
-            glyph = 111u; // 'o'
+            band = 4u;
         } else if (dithered_luma < 0.68) {
-            glyph = 79u; // 'O'
+            band = 4u;
         } else if (dithered_luma < 0.82) {
-            glyph = 37u; // '%'
+            band = 5u;
         } else if (dithered_luma < 0.92) {
-            glyph = 35u; // '#'
+            band = 5u;
         } else {
-            glyph = 64u; // '@'
+            band = 5u;
+        }
+        glyph = material_glyph(material_id, band);
+        if (far_void && dithered_luma < 0.12) {
+            glyph = 32u;
+        } else if (dithered_luma >= 0.04) {
+            glyph = shape_glyph(material_id, base_x, base_y);
         }
     }
 
-    // Boosted vibrant foreground color
-    let fg_rgb = clamp(avg_color.rgb * config.contrast_boost, vec3<f32>(0.0), vec3<f32>(1.0));
-    // Atmospheric dark background tint for deep contrast
-    let bg_rgb = clamp(avg_color.rgb * 0.12, vec3<f32>(0.0), vec3<f32>(1.0));
+    // Entity-ID outlines win over physical edges at actor silhouettes.
+    if (entity_edge_x || entity_edge_y) {
+        if (entity_edge_x && entity_edge_y) {
+            glyph = 43u;
+        } else if (entity_edge_x) {
+            glyph = 124u;
+        } else {
+            glyph = 95u;
+        }
+        is_edge = true;
+    }
+
+    // textureLoad from the sRGB target is averaged in linear space. Apply a
+    // filmic shoulder, convert to display space, then pull the result toward a
+    // compact dark-fantasy palette to reduce ANSI color churn.
+    let mapped_color = avg_color.rgb / (vec3<f32>(1.0) + avg_color.rgb);
+    let display_color = pow(max(mapped_color, vec3<f32>(0.0)), vec3<f32>(0.4545));
+    let palette_color = floor(display_color * 7.0 + vec3<f32>(0.5)) / 7.0;
+    var fg_rgb = clamp(mix(display_color, palette_color, 0.35) * config.contrast_boost, vec3<f32>(0.0), vec3<f32>(1.0));
+    var bg_rgb = clamp(palette_color * 0.12, vec3<f32>(0.0), vec3<f32>(1.0));
+    if (entity_edge_x || entity_edge_y) {
+        if (entity_class == 1u) { fg_rgb = vec3<f32>(0.60, 1.00, 0.35); }
+        if (entity_class == 2u) { fg_rgb = vec3<f32>(1.00, 0.28, 0.16); }
+        if (entity_class == 3u) { fg_rgb = vec3<f32>(1.00, 0.78, 0.25); }
+        if (entity_class == 4u) { fg_rgb = vec3<f32>(0.35, 0.85, 1.00); }
+        bg_rgb = fg_rgb * 0.08;
+    }
 
     let out_idx = y * config.width + x;
     var cell: GpuCell;
@@ -368,3 +564,21 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     cell_output.cells[out_idx] = cell;
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::{ASCII_POST_WGSL, SCENE_3D_WGSL};
+
+    #[test]
+    fn scene_shader_preserves_entity_metadata_for_post_processing() {
+        assert!(SCENE_3D_WGSL.contains("out.entity_id = entity_id;"));
+        assert!(SCENE_3D_WGSL.contains("out.entity_class = entity_class;"));
+        assert!(
+            SCENE_3D_WGSL.contains("pack_metadata(in.material_id, in.entity_id, in.entity_class)")
+        );
+        assert!(ASCII_POST_WGSL.contains("entity_edge_x"));
+        assert!(ASCII_POST_WGSL.contains("entity_class == 1u"));
+        assert!(ASCII_POST_WGSL.contains("material == 0u"));
+        assert!(ASCII_POST_WGSL.contains("solid block of '@'"));
+    }
+}

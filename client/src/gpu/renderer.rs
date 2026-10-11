@@ -308,6 +308,7 @@ impl GpuRenderer {
         }
 
         // 3. Dynamic Scene Geometry (Cobblestone Highway, Altar, Gate, Entities)
+        mesh.set_entity_context(0, 0);
         mesh.add_terrain(px, pz, 24.0);
         mesh.add_gate([0.0, 0.0, -9.6]);
         mesh.add_ruin_altar([-6.4, 0.0, -4.0]);
@@ -315,6 +316,13 @@ impl GpuRenderer {
         for entity in &world.entities {
             let ex = entity.position.x as f32 * 0.8;
             let ez = entity.position.y as f32 * 0.8;
+            let entity_class = match entity.kind {
+                EntityKind::Player => 1,
+                EntityKind::Monster => 2,
+                EntityKind::Npc => 3,
+                EntityKind::Item => 4,
+            };
+            mesh.set_entity_context(entity.id, entity_class);
             match entity.kind {
                 EntityKind::Monster => {
                     let label = entity.name.to_ascii_lowercase();
@@ -345,6 +353,7 @@ impl GpuRenderer {
             }
         }
 
+        mesh.set_entity_context(world.player.id, 1);
         mesh.add_humanoid([px, 0.0, pz], 0.0, walk_phase, 0.0);
 
         // 4. Instanced Props with View-Frustum Culling (Asciicker plane culling optimization)
@@ -739,6 +748,25 @@ f 2 5 4 3
             !mesh_herbalist.vertices.is_empty(),
             "Herbalist model should produce vertices"
         );
+    }
+
+    #[test]
+    fn test_entity_metadata_is_stamped_on_dynamic_geometry() {
+        let mut mesh = MeshBuffer::new();
+        mesh.set_entity_context(42, 2);
+        mesh.add_box(
+            [0.0, 0.5, 0.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 0.2, 0.1, 1.0],
+            1.0,
+            0.2,
+        );
+
+        assert!(!mesh.vertices.is_empty());
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|vertex| vertex.entity_id == 42.0 && vertex.entity_class == 2.0));
     }
 
     #[test]

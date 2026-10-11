@@ -15,7 +15,7 @@ The game presents an atmospheric, high-fidelity world—featuring ancient mossy 
 ### Key Architectural Highlights
 * **Authoritative Client-Server Separation**: Deterministic server simulation running over length-prefixed Postcard binary streams. The server owns positions, ticks, stats, and combat resolution; clients strictly handle prediction, rendering, animation, and presentation.
 * **Dual Rendering Pipeline**:
-  1. **Hardware-Accelerated WGPU 3D Engine (`client/src/gpu`)**: Full 3D polygon rasterization, GPU-instanced props/particles, 8 dynamic point lights, frustum culling, 2x Super-Sampled Anti-Aliasing (SSAA), and WGSL compute shader discontinuity edge detection ($>170\text{ FPS}$).
+  1. **Hardware-Accelerated WGPU 3D Engine (`client/src/gpu`)**: Full 3D polygon rasterization, GPU-instanced props/particles, 8 dynamic point lights, frustum culling, 4x Super-Sampled Anti-Aliasing (SSAA; 4x4 / 16 samples per output cell), color/normal-depth/entity-metadata G-buffers, and WGSL compute shader discontinuity edge detection ($>170\text{ FPS}$).
   2. **Procedural ANSI CPU Engine (`client/src/renderer.rs`)**: 2.5D oblique isometric rasterizer with ray/depth veils, procedural surface seed texturing, multi-line authored ASCII assets, and post-processing weather passes.
 * **Movement-Aware Articulation**: Eliminates the "marching in place" artifact common in retro games; characters feature stationary stance postures with firmly planted boots when idle, and articulate smooth leg swings only during active displacement.
 * **Differential Terminal Streaming**: Custom dirty row-level scanner with continuous CRLF burst streaming, preventing Windows ConPTY tearing and achieving smooth, flicker-free 60+ FPS in terminal hosts.
@@ -229,7 +229,7 @@ graph TD
         GPU --> SceneGen[Mesh & Instanced Batches]
         SceneGen --> Frustum[6-Plane Frustum Culling]
         Frustum --> RasterPass[3D Offscreen Rasterization Pass]
-        RasterPass --> GBuffer[2x SSAA Color + Normal/Depth G-Buffer]
+        RasterPass --> GBuffer[4x SSAA Color + Normal/Depth + Entity Metadata G-Buffers]
         GBuffer --> ComputePass[WGSL cs_main Compute Shader]
         ComputePass --> EdgeDetect[Discontinuity Normal/Depth Gradient Edges]
         ComputePass --> BayerDither[Bayer 4x4 Dithered Luminance Ramp]
@@ -254,9 +254,11 @@ graph TD
 
 ### 4.1 The WGPU 3D Hardware Pipeline (`client/src/gpu`)
 
-* **2x Super-Sampled Rasterization**: The 3D scene renders offscreen at $2\times$ the character cell resolution ($(\text{width} \times 2, \text{height} \times 2)$).
-  * `color_tex` (`Rgba8Unorm`): Base color, Blinn-Phong lighting, and specular highlights.
-  * `normal_depth_tex` (`Rgba32Float`): World-space normals $(N_x, N_y, N_z)$ and linear clip depth $(W)$.
+* **4x Super-Sampled Rasterization**: The 3D scene renders offscreen at $4\times$ the character cell resolution ($(\text{width} \times 4, \text{height} \times 4)$).
+  * `color_tex` (`Rgba8UnormSrgb`): Base color, Blinn-Phong lighting, and specular highlights.
+  * `normal_depth_tex` (`Rgba32Float`): Encoded world-space normals $(N_x, N_y, N_z)$ and device depth (`clip_position.z`).
+  * `metadata_tex` (`Rgba8Unorm`): Normalized material ID, low-byte entity ID, and entity class used for entity-aware outlines.
+  * `depth_texture` (`Depth32Float`): Depth attachment used for scene rasterization and depth testing.
 * **Vertex Wind Swaying**: Implemented in WGSL `vs_main`. Elevated foliage vertices oscillate laterally with time:
 
 ```wgsl
@@ -269,6 +271,8 @@ fn vs_main(in: VertexInput, inst: InstanceInput) -> VertexOutput {
     );
     var world_pos4 = model * vec4<f32>(in.position, 1.0);
     let mat_id = select(in.material_id, inst.instance_material.x, inst.instance_material.x >= 0.0);
+    let entity_id = select(in.entity_id, inst.instance_material.z, inst.instance_material.z >= 0.0);
+    let entity_class = select(in.entity_class, inst.instance_material.w, inst.instance_material.z >= 0.0);
 
     // Procedural wind sway for foliage (material_id == 3.0: pine needles, leaves, canopies)
     // Anchors tree base/ground while allowing elevated canopy cones and boughs to oscillate
@@ -284,13 +288,15 @@ fn vs_main(in: VertexInput, inst: InstanceInput) -> VertexOutput {
     out.color = in.color * inst.instance_color;
     out.material_id = mat_id;
     out.roughness = select(in.roughness, inst.instance_material.y, inst.instance_material.y >= 0.0);
+    out.entity_id = entity_id;
+    out.entity_class = entity_class;
     out.clip_position = camera.view_proj * world_pos4;
     return out;
 }
 ```
 
 * **WGSL Compute Post-Processing (`cs_main`)**:
-  Evaluates 4 sub-pixel quadrant texels per character cell to detect geometry edges and map luminance:
+  Averages a 4x4 (16-sample) sub-pixel footprint per character cell, evaluates normal/depth discontinuities and entity metadata, then maps luminance to material-aware glyphs:
 
 ```wgsl
 // 4x4 Bayer Dither Matrix for velvety smooth luminance gradations
@@ -311,30 +317,51 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let y = id.y;
     if (x >= config.width || y >= config.height) { return; }
 
-    // 2x Super-Sampling Quadrant Texel Coordinates
-    let base_x = i32(x * 2u);
-    let base_y = i32(y * 2u);
-    let tex_w = i32(config.width * 2u);
-    let tex_h = i32(config.height * 2u);
+    // 4x Super-Sampling: each output cell covers a 4x4 (16-sample) footprint
+    let base_x = i32(x * 4u);
+    let base_y = i32(y * 4u);
+    let tex_w = i32(config.width * 4u);
+    let tex_h = i32(config.height * 4u);
 
     let p00 = vec2<i32>(base_x, base_y);
-    let p10 = vec2<i32>(min(base_x + 1, tex_w - 1), base_y);
-    let p01 = vec2<i32>(base_x, min(base_y + 1, tex_h - 1));
-    let p11 = vec2<i32>(min(base_x + 1, tex_w - 1), min(base_y + 1, tex_h - 1));
+    let p10 = vec2<i32>(min(base_x + 3, tex_w - 1), base_y);
+    let p01 = vec2<i32>(base_x, min(base_y + 3, tex_h - 1));
+    let p11 = vec2<i32>(min(base_x + 3, tex_w - 1), min(base_y + 3, tex_h - 1));
 
-    let c00 = textureLoad(color_tex, p00, 0);
-    let c10 = textureLoad(color_tex, p10, 0);
-    let c01 = textureLoad(color_tex, p01, 0);
-    let c11 = textureLoad(color_tex, p11, 0);
+    var avg_color = vec4<f32>(0.0);
+    var avg_nd = vec4<f32>(0.0);
+    for (var sx = 0; sx < 4; sx = sx + 1) {
+        for (var sy = 0; sy < 4; sy = sy + 1) {
+            let sample_pos = vec2<i32>(base_x + sx, base_y + sy);
+            avg_color = avg_color + textureLoad(color_tex, sample_pos, 0);
+            avg_nd = avg_nd + textureLoad(normal_depth_tex, sample_pos, 0);
+        }
+    }
+    avg_color = avg_color * 0.0625;
+    avg_nd = avg_nd * 0.0625;
 
     let nd00 = textureLoad(normal_depth_tex, p00, 0);
     let nd10 = textureLoad(normal_depth_tex, p10, 0);
     let nd01 = textureLoad(normal_depth_tex, p01, 0);
     let nd11 = textureLoad(normal_depth_tex, p11, 0);
 
-    // 1. Integrated Sub-Pixel Color & Normal/Depth (SSAA)
-    let avg_color = (c00 + c10 + c01 + c11) * 0.25;
-    let avg_nd = (nd00 + nd10 + nd01 + nd11) * 0.25;
+    // Material/entity metadata comes from the dedicated Rgba8Unorm target.
+    let p_left = vec2<i32>(max(base_x - 2, 0), base_y + 2);
+    let p_right = vec2<i32>(min(base_x + 6, tex_w - 1), base_y + 2);
+    let p_top = vec2<i32>(base_x + 2, max(base_y - 2, 0));
+    let p_bot = vec2<i32>(base_x + 2, min(base_y + 6, tex_h - 1));
+    let center_meta = textureLoad(metadata_tex, vec2<i32>(base_x + 2, base_y + 2), 0) * 255.0;
+    let left_meta = textureLoad(metadata_tex, p_left, 0) * 255.0;
+    let right_meta = textureLoad(metadata_tex, p_right, 0) * 255.0;
+    let top_meta = textureLoad(metadata_tex, p_top, 0) * 255.0;
+    let bottom_meta = textureLoad(metadata_tex, p_bot, 0) * 255.0;
+    let material_id = u32(center_meta.r + 0.5);
+    let entity_id = u32(center_meta.g + 0.5);
+    let entity_class = u32(center_meta.b + 0.5);
+    let entity_edge_x = entity_id != 0u
+        && (u32(left_meta.g + 0.5) != entity_id || u32(right_meta.g + 0.5) != entity_id);
+    let entity_edge_y = entity_id != 0u
+        && (u32(top_meta.g + 0.5) != entity_id || u32(bottom_meta.g + 0.5) != entity_id);
 
     // 2. Sub-Pixel Horizontal & Vertical Gradient Evaluation (Discontinuity detection)
     let depth_diff_x = abs((nd10.w + nd11.w) - (nd00.w + nd01.w)) * 0.5;
@@ -342,8 +369,17 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let depth_diff_y = abs((nd01.w + nd11.w) - (nd00.w + nd10.w)) * 0.5;
     let normal_diff_y = length((nd01.xyz + nd11.xyz) - (nd00.xyz + nd10.xyz)) * 0.5;
 
-    let edge_x = depth_diff_x * 10.0 + normal_diff_x;
-    let edge_y = depth_diff_y * 10.0 + normal_diff_y;
+    let nd_l = textureLoad(normal_depth_tex, p_left, 0);
+    let nd_r = textureLoad(normal_depth_tex, p_right, 0);
+    let nd_t = textureLoad(normal_depth_tex, p_top, 0);
+    let nd_b = textureLoad(normal_depth_tex, p_bot, 0);
+    let neigh_depth_x = abs(nd_r.w - nd_l.w);
+    let neigh_depth_y = abs(nd_b.w - nd_t.w);
+    let neigh_norm_x = length(nd_r.xyz - nd_l.xyz);
+    let neigh_norm_y = length(nd_b.xyz - nd_t.xyz);
+
+    let edge_x = max(depth_diff_x * 10.0 + normal_diff_x, neigh_depth_x * 6.0 + neigh_norm_x);
+    let edge_y = max(depth_diff_y * 10.0 + normal_diff_y, neigh_depth_y * 6.0 + neigh_norm_y);
     let edge_mag = edge_x + edge_y;
 
     var glyph: u32 = 32u; // ' ' default
@@ -365,26 +401,71 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
 
-    // Integrated perceived luminance with SSAA smoothing & Bayer dithering
-    let luma = dot(avg_color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let dither = bayer4(x, y) * 0.05;
-    let dithered_luma = clamp(luma + dither, 0.0, 1.0);
-
     if (!is_edge) {
-        if (dithered_luma < 0.04)      { glyph = 32u; }  // ' '
-        else if (dithered_luma < 0.10) { glyph = 46u; }  // '.'
-        else if (dithered_luma < 0.18) { glyph = 58u; }  // ':'
-        else if (dithered_luma < 0.28) { glyph = 42u; }  // '*'
-        else if (dithered_luma < 0.40) { glyph = 61u; }  // '='
-        else if (dithered_luma < 0.54) { glyph = 111u; } // 'o'
-        else if (dithered_luma < 0.68) { glyph = 79u; }  // 'O'
-        else if (dithered_luma < 0.82) { glyph = 37u; }  // '%'
-        else if (dithered_luma < 0.92) { glyph = 35u; }  // '#'
-        else                           { glyph = 64u; }  // '@'
+        let luma = dot(avg_color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let dither = bayer4(x, y) * 0.05;
+        // Keep distant world geometry in negative space without fading actors.
+        let far_void = entity_id == 0u && avg_nd.w > 0.9965;
+        var depth_luma = luma;
+        if (far_void) {
+            depth_luma = luma * clamp((0.9995 - avg_nd.w) * 20.0, 0.0, 1.0);
+        }
+        let dithered_luma = clamp(depth_luma + dither, 0.0, 1.0);
+        var band = 0u;
+        if (dithered_luma < 0.04) {
+            band = 0u;
+        } else if (dithered_luma < 0.10) {
+            band = 1u;
+        } else if (dithered_luma < 0.18) {
+            band = 2u;
+        } else if (dithered_luma < 0.28) {
+            band = 3u;
+        } else if (dithered_luma < 0.40) {
+            band = 3u;
+        } else if (dithered_luma < 0.54) {
+            band = 4u;
+        } else if (dithered_luma < 0.68) {
+            band = 4u;
+        } else if (dithered_luma < 0.82) {
+            band = 5u;
+        } else if (dithered_luma < 0.92) {
+            band = 5u;
+        } else {
+            band = 5u;
+        }
+        glyph = material_glyph(material_id, band);
+        if (far_void && dithered_luma < 0.12) {
+            glyph = 32u; // ' '
+        } else if (dithered_luma >= 0.04) {
+            glyph = shape_glyph(material_id, base_x, base_y);
+        }
     }
 
-    let fg_rgb = clamp(avg_color.rgb * config.contrast_boost, vec3<f32>(0.0), vec3<f32>(1.0));
-    let bg_rgb = clamp(avg_color.rgb * 0.12, vec3<f32>(0.0), vec3<f32>(1.0));
+    // Entity-ID outlines win over physical edges at actor silhouettes.
+    if (entity_edge_x || entity_edge_y) {
+        if (entity_edge_x && entity_edge_y) {
+            glyph = 43u; // '+'
+        } else if (entity_edge_x) {
+            glyph = 124u; // '|'
+        } else {
+            glyph = 95u; // '_'
+        }
+        is_edge = true;
+    }
+
+    // Tone-map and quantize the color before writing the packed cell.
+    let mapped_color = avg_color.rgb / (vec3<f32>(1.0) + avg_color.rgb);
+    let display_color = pow(max(mapped_color, vec3<f32>(0.0)), vec3<f32>(0.4545));
+    let palette_color = floor(display_color * 7.0 + vec3<f32>(0.5)) / 7.0;
+    var fg_rgb = clamp(mix(display_color, palette_color, 0.35) * config.contrast_boost, vec3<f32>(0.0), vec3<f32>(1.0));
+    var bg_rgb = clamp(palette_color * 0.12, vec3<f32>(0.0), vec3<f32>(1.0));
+    if (entity_edge_x || entity_edge_y) {
+        if (entity_class == 1u) { fg_rgb = vec3<f32>(0.60, 1.00, 0.35); }
+        if (entity_class == 2u) { fg_rgb = vec3<f32>(1.00, 0.28, 0.16); }
+        if (entity_class == 3u) { fg_rgb = vec3<f32>(1.00, 0.78, 0.25); }
+        if (entity_class == 4u) { fg_rgb = vec3<f32>(0.35, 0.85, 1.00); }
+        bg_rgb = fg_rgb * 0.08;
+    }
 
     let out_idx = y * config.width + x;
     var cell: GpuCell;
@@ -532,6 +613,7 @@ In the 3D hardware pipeline, water surfaces are assigned `material_id = 6.0`.
        let water_color = water_base * (lighting.ambient_color.rgb + lighting.sun_color.rgb * water_NdotL) + vec3<f32>(water_spec);
        out.color = vec4<f32>(water_color, 0.85);
        out.normal_depth = vec4<f32>(wave_norm * 0.5 + 0.5, in.clip_position.z);
+       out.metadata = pack_metadata(in.material_id, in.entity_id, in.entity_class);
        return out;
    }
    ```

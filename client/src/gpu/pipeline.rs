@@ -7,7 +7,7 @@ use super::shaders::{ASCII_POST_WGSL, SCENE_3D_WGSL};
 use super::uniforms::{CameraUniforms, LightingUniforms};
 
 pub const RING_SIZE: usize = 2;
-pub const SSAA_FACTOR: u32 = 2;
+pub const SSAA_FACTOR: u32 = 4;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -96,6 +96,7 @@ impl FrameSlot {
         ascii_bind_group_layout: &wgpu::BindGroupLayout,
         color_view: &wgpu::TextureView,
         normal_depth_view: &wgpu::TextureView,
+        metadata_view: &wgpu::TextureView,
         width: u32,
         height: u32,
         slot_idx: usize,
@@ -167,10 +168,14 @@ impl FrameSlot {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: cell_output_buffer.as_entire_binding(),
+                    resource: wgpu::BindingResource::TextureView(metadata_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
+                    resource: cell_output_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
                     resource: config_buffer.as_entire_binding(),
                 },
             ],
@@ -197,6 +202,7 @@ impl FrameSlot {
         ascii_bind_group_layout: &wgpu::BindGroupLayout,
         color_view: &wgpu::TextureView,
         normal_depth_view: &wgpu::TextureView,
+        metadata_view: &wgpu::TextureView,
         width: u32,
         height: u32,
         slot_idx: usize,
@@ -234,10 +240,14 @@ impl FrameSlot {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: self.cell_output_buffer.as_entire_binding(),
+                    resource: wgpu::BindingResource::TextureView(metadata_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
+                    resource: self.cell_output_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
                     resource: self.config_buffer.as_entire_binding(),
                 },
             ],
@@ -262,6 +272,8 @@ pub struct GpuPipeline {
     pub color_view: wgpu::TextureView,
     pub normal_depth_texture: wgpu::Texture,
     pub normal_depth_view: wgpu::TextureView,
+    pub metadata_texture: wgpu::Texture,
+    pub metadata_view: wgpu::TextureView,
     pub depth_texture: wgpu::Texture,
     pub depth_view: wgpu::TextureView,
 
@@ -358,6 +370,16 @@ impl GpuPipeline {
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
                         visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: false },
                             has_dynamic_offset: false,
@@ -366,7 +388,7 @@ impl GpuPipeline {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 3,
+                        binding: 4,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
@@ -415,6 +437,16 @@ impl GpuPipeline {
                     offset: 44,
                     shader_location: 4,
                 },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: 48,
+                    shader_location: 5,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: 52,
+                    shader_location: 6,
+                },
             ],
         };
 
@@ -425,32 +457,32 @@ impl GpuPipeline {
                 wgpu::VertexAttribute {
                     format: wgpu::VertexFormat::Float32x4,
                     offset: 0,
-                    shader_location: 5,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 16,
-                    shader_location: 6,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 32,
                     shader_location: 7,
                 },
                 wgpu::VertexAttribute {
                     format: wgpu::VertexFormat::Float32x4,
-                    offset: 48,
+                    offset: 16,
                     shader_location: 8,
                 },
                 wgpu::VertexAttribute {
                     format: wgpu::VertexFormat::Float32x4,
-                    offset: 64,
+                    offset: 32,
                     shader_location: 9,
                 },
                 wgpu::VertexAttribute {
                     format: wgpu::VertexFormat::Float32x4,
-                    offset: 80,
+                    offset: 48,
                     shader_location: 10,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 64,
+                    shader_location: 11,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 80,
+                    shader_location: 12,
                 },
             ],
         };
@@ -471,6 +503,13 @@ impl GpuPipeline {
                     Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba8UnormSrgb,
                         blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        // Device depth clusters near 1 under perspective;
+                        // an 8-bit channel collapses separate surfaces.
+                        format: wgpu::TextureFormat::Rgba32Float,
+                        blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
                     Some(wgpu::ColorTargetState {
@@ -518,7 +557,7 @@ impl GpuPipeline {
             cache: None,
         });
 
-        // 4. Create Textures at 2x Super-Sampled Resolution (Asciicker 2x G-buffer logic)
+        // 4. Create Textures at 4x Super-Sampled Resolution for shape-aware cells.
         let render_width = width * SSAA_FACTOR;
         let render_height = height * SSAA_FACTOR;
         let (color_texture, color_view) = create_target_texture(
@@ -532,8 +571,15 @@ impl GpuPipeline {
             device,
             render_width,
             render_height,
-            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba32Float,
             "NormalDepth",
+        );
+        let (metadata_texture, metadata_view) = create_target_texture(
+            device,
+            render_width,
+            render_height,
+            wgpu::TextureFormat::Rgba8Unorm,
+            "Metadata",
         );
         let (depth_texture, depth_view) = create_depth_texture(device, render_width, render_height);
 
@@ -544,6 +590,7 @@ impl GpuPipeline {
             &ascii_bind_group_layout,
             &color_view,
             &normal_depth_view,
+            &metadata_view,
             width,
             height,
             0,
@@ -554,6 +601,7 @@ impl GpuPipeline {
             &ascii_bind_group_layout,
             &color_view,
             &normal_depth_view,
+            &metadata_view,
             width,
             height,
             1,
@@ -626,6 +674,8 @@ impl GpuPipeline {
             color_view,
             normal_depth_texture,
             normal_depth_view,
+            metadata_texture,
+            metadata_view,
             depth_texture,
             depth_view,
             slots,
@@ -683,8 +733,15 @@ impl GpuPipeline {
             device,
             render_width,
             render_height,
-            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba32Float,
             "NormalDepth",
+        );
+        let (meta_tex, meta_view) = create_target_texture(
+            device,
+            render_width,
+            render_height,
+            wgpu::TextureFormat::Rgba8Unorm,
+            "Metadata",
         );
         let (d_tex, d_view) = create_depth_texture(device, render_width, render_height);
 
@@ -692,6 +749,8 @@ impl GpuPipeline {
         self.color_view = c_view;
         self.normal_depth_texture = nd_tex;
         self.normal_depth_view = nd_view;
+        self.metadata_texture = meta_tex;
+        self.metadata_view = meta_view;
         self.depth_texture = d_tex;
         self.depth_view = d_view;
 
@@ -701,6 +760,7 @@ impl GpuPipeline {
                 &self.ascii_bind_group_layout,
                 &self.color_view,
                 &self.normal_depth_view,
+                &self.metadata_view,
                 width,
                 height,
                 i,
@@ -840,6 +900,19 @@ impl GpuPipeline {
                                 g: 1.0,
                                 b: 0.0,
                                 a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.metadata_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 0.0,
                             }),
                             store: wgpu::StoreOp::Store,
                         },

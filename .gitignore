@@ -3,6 +3,7 @@
 
 # Local-only planner notes; never commit personal planning docs.
 /graphics.md
+/explanations.md
 
 # Local agent/runtime state and dependencies; never publish private workspace data.
 /.opencode/
