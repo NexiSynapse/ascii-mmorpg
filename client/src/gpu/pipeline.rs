@@ -609,8 +609,8 @@ impl GpuPipeline {
         let slots = [slot0, slot1];
 
         // 6. Geometry & Instancing Buffers
-        let vertex_capacity = 32_000;
-        let index_capacity = 64_000;
+        let vertex_capacity = 64_000;
+        let index_capacity = 128_000;
         let instance_capacity = 2_048;
 
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {

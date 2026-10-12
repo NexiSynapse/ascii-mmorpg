@@ -356,7 +356,13 @@ impl Renderer {
         let height = self.height.max(1) as usize;
         let mut canvas = Canvas::new(width, height);
         let assets = AssetLibrary::new();
-        self.draw_backdrop(&mut canvas, &assets, world.player.position, frame);
+        self.draw_backdrop(
+            &mut canvas,
+            &assets,
+            world.player.position,
+            &world.entities,
+            frame,
+        );
 
         let actors = world
             .entities
@@ -423,10 +429,13 @@ impl Renderer {
         canvas
     }
 
-    /// All light sources in world space: the player-carried light follows the
-    /// camera, lanterns are fixed world fixtures.
-    fn lights(camera: ascii_mmorpg_shared::Point) -> [Light; 3] {
-        [
+    /// All light sources in world space: player-carried lantern follows camera,
+    /// fixed lanterns, and dynamic ground lighting pools around living actors and loot.
+    fn lights(
+        camera: ascii_mmorpg_shared::Point,
+        entities: &[ascii_mmorpg_shared::ActorSnapshot],
+    ) -> Vec<Light> {
+        let mut lights = vec![
             Light {
                 x: camera.x,
                 y: camera.y,
@@ -442,16 +451,51 @@ impl Renderer {
                 y: -4,
                 radius: 6,
             },
-        ]
+        ];
+        for entity in entities {
+            match entity.kind {
+                EntityKind::Npc => lights.push(Light {
+                    x: entity.position.x,
+                    y: entity.position.y,
+                    radius: 6,
+                }),
+                EntityKind::Monster if entity.stats.is_alive() => lights.push(Light {
+                    x: entity.position.x,
+                    y: entity.position.y,
+                    radius: 5,
+                }),
+                EntityKind::Item => lights.push(Light {
+                    x: entity.position.x,
+                    y: entity.position.y,
+                    radius: 4,
+                }),
+                EntityKind::Player if entity.position != camera => lights.push(Light {
+                    x: entity.position.x,
+                    y: entity.position.y,
+                    radius: 7,
+                }),
+                _ => {}
+            }
+        }
+        lights
     }
 
     /// 0.0 (void) .. 1.0 (torch core): ambient moonlight plus radial falloff
     /// with a slight eastward directional bias so lit faces read brighter.
     /// Quantized to 0.05 steps so camera-relative wobble can never flip a
     /// ground band between adjacent camera positions (anti-shimmer).
-    fn light_level(wx: i16, wy: i16, camera: ascii_mmorpg_shared::Point) -> f32 {
+    pub fn light_level(wx: i16, wy: i16, camera: ascii_mmorpg_shared::Point) -> f32 {
+        Self::light_level_with_lights(wx, wy, camera, &Self::lights(camera, &[]))
+    }
+
+    fn light_level_with_lights(
+        wx: i16,
+        wy: i16,
+        camera: ascii_mmorpg_shared::Point,
+        lights: &[Light],
+    ) -> f32 {
         let mut level = 0.10;
-        for light in Self::lights(camera) {
+        for light in lights {
             let dist = (wx - light.x).abs() as f32 + (wy - light.y).abs() as f32;
             level += (1.0 - dist / light.radius as f32).max(0.0) * 0.9;
         }
@@ -464,15 +508,17 @@ impl Renderer {
         canvas: &mut Canvas,
         assets: &AssetLibrary,
         camera: ascii_mmorpg_shared::Point,
+        entities: &[ascii_mmorpg_shared::ActorSnapshot],
         frame: u64,
     ) {
+        let lights = Self::lights(camera, entities);
         for y in 0..canvas.height {
             for x in 0..canvas.width {
                 let wx = camera.x + x as i16 - canvas.width as i16 / 2;
                 let wy = camera.y + y as i16 - canvas.height as i16 / 2;
                 let patch = (wx * 17 + wy * 31).rem_euclid(23);
                 let path = (wx - wy / 3).rem_euclid(13) <= 2;
-                let level = Self::light_level(wx, wy, camera);
+                let level = Self::light_level_with_lights(wx, wy, camera, &lights);
                 let river_center = 8 + (wx / 5);
                 let river_dist = (wy - river_center).abs();
                 let is_river = river_dist <= 1;
@@ -1477,9 +1523,9 @@ mod tests {
         // Backdrop only: no actors, weather, or veil, so every remaining
         // prop-ink cell must be perfectly world-locked.
         let mut first = Canvas::new(40, 20);
-        renderer.draw_backdrop(&mut first, &assets, Point { x: 8, y: 7 }, 4);
+        renderer.draw_backdrop(&mut first, &assets, Point { x: 8, y: 7 }, &[], 4);
         let mut second = Canvas::new(40, 20);
-        renderer.draw_backdrop(&mut second, &assets, Point { x: 9, y: 7 }, 4);
+        renderer.draw_backdrop(&mut second, &assets, Point { x: 9, y: 7 }, &[], 4);
         fn is_prop_ink(ink: Ink) -> bool {
             matches!(
                 ink,

@@ -53,7 +53,7 @@ impl Simulation {
             tick: 0,
             players: HashMap::from([(player.id, player)]),
             mobs: vec![Actor {
-                id: 2,
+                id: 1_000,
                 name: "Mossling".into(),
                 kind: EntityKind::Monster,
                 position: Point { x: 3, y: 2 },
@@ -69,18 +69,26 @@ impl Simulation {
         self.fixed_tick_for(1, command)
     }
 
+    pub fn advance_tick(&mut self) {
+        self.tick = self.tick.saturating_add(1);
+        self.messages.clear();
+    }
+
     pub fn fixed_tick_for(
         &mut self,
         player_id: EntityId,
         command: Option<ClientCommand>,
     ) -> Vec<ServerEvent> {
         self.ensure_player(player_id);
+        if command
+            .as_ref()
+            .is_some_and(|command| command.protocol_version != PROTOCOL_VERSION)
+        {
+            return vec![ServerEvent::Error("protocol version mismatch".into())];
+        }
         self.tick = self.tick.saturating_add(1);
         self.messages.clear();
         if let Some(command) = command {
-            if command.protocol_version != PROTOCOL_VERSION {
-                return vec![ServerEvent::Error("protocol version mismatch".into())];
-            }
             self.apply(player_id, command.command);
         }
         let snapshot = self.snapshot_for(player_id);
@@ -95,8 +103,7 @@ impl Simulation {
         let player = self
             .players
             .get(&player_id)
-            .or_else(|| self.players.get(&1))
-            .expect("demo simulation always has a player");
+            .expect("player must be connected");
         WorldSnapshot {
             tick: self.tick,
             player: player.snapshot(),
@@ -122,6 +129,11 @@ impl Simulation {
             stats: Stats::healthy(20, 6, 2),
             glyph: '@',
         });
+    }
+
+    pub fn connect_player(&mut self, player_id: EntityId) -> WorldSnapshot {
+        self.ensure_player(player_id);
+        self.snapshot_for(player_id)
     }
 
     fn apply(&mut self, player_id: EntityId, command: Command) {
@@ -277,6 +289,7 @@ mod tests {
     #[test]
     fn each_connected_player_gets_a_local_view_and_remote_player_entity() {
         let mut simulation = Simulation::demo();
+        simulation.connect_player(2);
         simulation.fixed_tick_for(
             2,
             Some(ClientCommand::new(0, Command::Move(Direction::East))),
@@ -296,6 +309,18 @@ mod tests {
             .entities
             .iter()
             .any(|entity| entity.kind == EntityKind::Monster));
+    }
+
+    #[test]
+    fn rejected_protocol_command_does_not_advance_tick() {
+        let mut simulation = Simulation::demo();
+        let event = simulation.fixed_tick(Some(ClientCommand {
+            protocol_version: PROTOCOL_VERSION + 1,
+            client_tick: 1,
+            command: Command::Rest,
+        }));
+        assert!(matches!(event.as_slice(), [ServerEvent::Error(_)]));
+        assert_eq!(simulation.tick, 0);
     }
 
     #[test]

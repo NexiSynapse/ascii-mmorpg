@@ -234,7 +234,7 @@ pub fn overworld_obstacles() -> Vec<Obstacle> {
 }
 
 /// Checks whether a given world tile collides with any static obstacle,
-/// procedural pine tree, procedural ruin, or breaches the world boundary.
+/// procedural pine tree, or breaches the world boundary.
 ///
 /// Respects depth-aware ground footprints: only the physical base/trunk touching
 /// the ground blocks the actor's feet.
@@ -260,13 +260,8 @@ pub fn is_point_obstructed(point: Point, obstacles: &[Obstacle]) -> Option<&'sta
     let seed = terrain_seed(gx, gy);
     let tree_wx = gx * 11 + (seed % 5) as i16;
     let tree_wy = gy * 9 + ((seed / 7) % 5) as i16;
-    if seed % 9 == 0 && point.x == tree_wx && point.y == tree_wy {
+    if tree_wx.abs() > 4 && seed % 9 == 0 && point.x == tree_wx && point.y == tree_wy {
         return Some("Pine Tree Trunk");
-    }
-
-    // 4. Procedural Background Ancient Ruins (seed % 23 == 1)
-    if seed % 23 == 1 && point.x == tree_wx && point.y == tree_wy {
-        return Some("Weathered Stone Ruins Base");
     }
 
     None
@@ -471,14 +466,16 @@ mod tests {
         let obstacles = overworld_obstacles();
         // Find first procedural tree in region
         let mut found_tree = None;
-        for gx in 0..10 {
+        for gx in 1..10 {
             for gy in 0..10 {
                 let seed = terrain_seed(gx, gy);
                 if seed % 9 == 0 {
                     let wx = gx * 11 + (seed % 5) as i16;
-                    let wy = gy * 9 + ((seed / 7) % 5) as i16;
-                    found_tree = Some(Point { x: wx, y: wy });
-                    break;
+                    if wx.abs() > 4 {
+                        let wy = gy * 9 + ((seed / 7) % 5) as i16;
+                        found_tree = Some(Point { x: wx, y: wy });
+                        break;
+                    }
                 }
             }
             if found_tree.is_some() {

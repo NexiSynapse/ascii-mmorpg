@@ -357,7 +357,7 @@ The current alpha includes:
 - Warrior spell definitions
 - Starter equipment definitions
 - Deterministic combat and weighted loot rules
-- 20 Hz fixed-timestep clock
+- 20 Hz simulation target: idle TCP timeouts advance at 50 ms, while input currently advances a tick immediately; this is not yet a rigorously fixed-rate scheduler
 - TCP framing and loopback smoke path
 
 The following full MMORPG systems are not yet implemented:

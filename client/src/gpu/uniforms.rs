@@ -57,7 +57,7 @@ pub struct LightingUniforms {
     pub sun_dir: [f32; 4],
     pub sun_color: [f32; 4],
     pub ambient_color: [f32; 4],
-    pub point_lights: [GpuPointLight; 8],
+    pub point_lights: [GpuPointLight; 16],
     pub num_point_lights: u32,
     pub pad0: u32,
     pub pad1: u32,
@@ -70,7 +70,7 @@ impl Default for LightingUniforms {
             sun_dir: [0.4, 0.8, 0.45, 0.0],
             sun_color: [0.55, 0.65, 0.85, 1.0], // Calm twilight blue-amber
             ambient_color: [0.12, 0.16, 0.22, 1.0], // Deep atmospheric moonlight
-            point_lights: [GpuPointLight::default(); 8],
+            point_lights: [GpuPointLight::default(); 16],
             num_point_lights: 0,
             pad0: 0,
             pad1: 0,

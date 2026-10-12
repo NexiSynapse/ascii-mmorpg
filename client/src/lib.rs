@@ -9,10 +9,14 @@ pub mod assets;
 pub mod gpu;
 pub mod network;
 pub mod renderer;
+pub mod term;
 #[cfg(any(feature = "notcurses", test))]
 mod terminal_colors;
 pub mod ui;
 pub use renderer::{Renderer, WeatherMode};
+pub use term::{
+    Cell, CellMatrix, EncoderStrategy, FrameStats, SpanDiffEncoder, WinTimerPrecisionGuard,
+};
 pub use ui::{ActiveModal, RatatuiHud};
 
 pub trait SceneRenderer {
@@ -145,6 +149,8 @@ pub struct PlainTerminal {
     height: u16,
     buffer: Vec<u8>,
     prev_lines: Vec<String>,
+    pub encoder: term::SpanDiffEncoder,
+    _timer_guard: term::WinTimerPrecisionGuard,
 }
 
 impl PlainTerminal {
@@ -155,6 +161,8 @@ impl PlainTerminal {
             height,
             buffer: Vec::with_capacity((width as usize) * (height as usize) * 4),
             prev_lines: Vec::new(),
+            encoder: term::SpanDiffEncoder::new(width, height),
+            _timer_guard: term::WinTimerPrecisionGuard::new(),
         }
     }
 
@@ -164,9 +172,23 @@ impl PlainTerminal {
                 self.width = width;
                 self.height = height;
                 self.prev_lines.clear();
+                self.encoder.resize(width, height);
             }
         }
         self.size()
+    }
+
+    /// Draws a structured CellMatrix into writer using the requested encoding strategy.
+    pub fn draw_matrix_into<W: Write>(
+        &mut self,
+        matrix: &term::CellMatrix,
+        strategy: term::EncoderStrategy,
+        writer: &mut W,
+    ) -> io::Result<term::FrameStats> {
+        let mut buf = Vec::new();
+        let stats = self.encoder.encode(matrix, strategy, &mut buf);
+        writer.write_all(&buf)?;
+        Ok(stats)
     }
 
     pub fn draw_into<W: Write>(&mut self, frame: &str, writer: &mut W) -> io::Result<()> {
