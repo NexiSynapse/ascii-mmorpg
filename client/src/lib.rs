@@ -9,8 +9,14 @@ pub mod assets;
 pub mod gpu;
 pub mod network;
 pub mod renderer;
+pub mod term;
+#[cfg(any(feature = "notcurses", test))]
+mod terminal_colors;
 pub mod ui;
 pub use renderer::{Renderer, WeatherMode};
+pub use term::{
+    Cell, CellMatrix, EncoderStrategy, FrameStats, SpanDiffEncoder, WinTimerPrecisionGuard,
+};
 pub use ui::{ActiveModal, RatatuiHud};
 
 pub trait SceneRenderer {
@@ -143,6 +149,8 @@ pub struct PlainTerminal {
     height: u16,
     buffer: Vec<u8>,
     prev_lines: Vec<String>,
+    pub encoder: term::SpanDiffEncoder,
+    _timer_guard: term::WinTimerPrecisionGuard,
 }
 
 impl PlainTerminal {
@@ -153,6 +161,8 @@ impl PlainTerminal {
             height,
             buffer: Vec::with_capacity((width as usize) * (height as usize) * 4),
             prev_lines: Vec::new(),
+            encoder: term::SpanDiffEncoder::new(width, height),
+            _timer_guard: term::WinTimerPrecisionGuard::new(),
         }
     }
 
@@ -162,9 +172,23 @@ impl PlainTerminal {
                 self.width = width;
                 self.height = height;
                 self.prev_lines.clear();
+                self.encoder.resize(width, height);
             }
         }
         self.size()
+    }
+
+    /// Draws a structured CellMatrix into writer using the requested encoding strategy.
+    pub fn draw_matrix_into<W: Write>(
+        &mut self,
+        matrix: &term::CellMatrix,
+        strategy: term::EncoderStrategy,
+        writer: &mut W,
+    ) -> io::Result<term::FrameStats> {
+        let mut buf = Vec::new();
+        let stats = self.encoder.encode(matrix, strategy, &mut buf);
+        writer.write_all(&buf)?;
+        Ok(stats)
     }
 
     pub fn draw_into<W: Write>(&mut self, frame: &str, writer: &mut W) -> io::Result<()> {
@@ -292,10 +316,12 @@ impl Terminal for NotcursesTerminal {
     }
 
     fn draw(&mut self, frame: &str) -> io::Result<()> {
+        use terminal_colors::{consume_escape, TerminalColors};
+
         let raw_plane = self.plane.into_ref_mut();
-        let bg = (16u8, 16u8, 24u8);
-        let default_fg = (208u8, 208u8, 208u8);
-        set_plane_channels(raw_plane, default_fg, bg);
+        let defaults = TerminalColors::default();
+        let mut colors = defaults;
+        set_plane_channels(raw_plane, colors.fg, colors.bg);
 
         let max_w = self.width as usize;
         let max_h = self.height as usize;
@@ -306,9 +332,11 @@ impl Terminal for NotcursesTerminal {
                 break;
             }
             let mut col = 0usize;
-            let mut chars = line.chars().peekable();
+            let mut remaining = line;
             let mut run = String::with_capacity(max_w);
             let mut run_start_col = 0usize;
+            // Padding uses default channels; ANSI colors still carry across rows.
+            set_plane_channels(raw_plane, colors.fg, colors.bg);
 
             let flush_run = |plane: &mut notcurses::sys::NcPlane,
                              row: usize,
@@ -325,37 +353,18 @@ impl Terminal for NotcursesTerminal {
                 }
             };
 
-            while let Some(ch) = chars.next() {
-                if ch == '\x1b' && chars.peek() == Some(&'[') {
-                    chars.next(); // consume '['
-                    let mut seq = [0u8; 16];
-                    let mut seq_len = 0;
-                    while let Some(&c) = chars.peek() {
-                        chars.next();
-                        if c.is_ascii_alphabetic() {
-                            if seq_len < seq.len() {
-                                seq[seq_len] = c as u8;
-                                seq_len += 1;
-                            }
-                            break;
-                        }
-                        if seq_len < seq.len() {
-                            seq[seq_len] = c as u8;
-                            seq_len += 1;
-                        }
-                    }
-
-                    if seq_len == 2 && &seq[..2] == b"0m" {
-                        flush_run(raw_plane, row, run_start_col, &mut run);
-                        set_plane_channels(raw_plane, default_fg, bg);
-                        run_start_col = col;
-                    } else if seq_len >= 6 && &seq[..5] == b"38;5;" && seq[seq_len - 1] == b'm' {
-                        if let Ok(code_str) = std::str::from_utf8(&seq[5..seq_len - 1]) {
-                            if let Ok(code) = code_str.parse::<u8>() {
-                                flush_run(raw_plane, row, run_start_col, &mut run);
-                                set_plane_channels(raw_plane, ansi256_to_rgb(code), bg);
-                                run_start_col = col;
-                            }
+            while let Some(ch) = remaining.chars().next() {
+                remaining = &remaining[ch.len_utf8()..];
+                if ch == '\x1b' {
+                    let (rest, parameters) = consume_escape(remaining);
+                    remaining = rest;
+                    if let Some(parameters) = parameters {
+                        let next = colors.apply_sgr(parameters);
+                        if next != colors {
+                            flush_run(raw_plane, row, run_start_col, &mut run);
+                            colors = next;
+                            set_plane_channels(raw_plane, colors.fg, colors.bg);
+                            run_start_col = col;
                         }
                     }
                 } else if col < max_w {
@@ -368,7 +377,7 @@ impl Terminal for NotcursesTerminal {
 
             // Pad remainder of the line with spaces
             if col < max_w {
-                set_plane_channels(raw_plane, default_fg, bg);
+                set_plane_channels(raw_plane, defaults.fg, defaults.bg);
                 let padding = " ".repeat(max_w - col);
                 let _ = notcurses::sys::c_api::ncplane_putstr_yx(
                     raw_plane,
@@ -382,7 +391,7 @@ impl Terminal for NotcursesTerminal {
 
         // Clear any remaining lines up to screen height
         while row < max_h {
-            set_plane_channels(raw_plane, default_fg, bg);
+            set_plane_channels(raw_plane, defaults.fg, defaults.bg);
             let padding = " ".repeat(max_w);
             let _ = notcurses::sys::c_api::ncplane_putstr_yx(
                 raw_plane,
@@ -394,40 +403,6 @@ impl Terminal for NotcursesTerminal {
         }
 
         self.plane.render().map_err(notcurses_error)
-    }
-}
-
-#[cfg(feature = "notcurses")]
-fn ansi256_to_rgb(code: u8) -> (u8, u8, u8) {
-    match code {
-        0 => (0, 0, 0),
-        1 => (128, 0, 0),
-        2 => (0, 128, 0),
-        3 => (128, 128, 0),
-        4 => (0, 0, 128),
-        5 => (128, 0, 128),
-        6 => (0, 128, 128),
-        7 => (192, 192, 192),
-        8 => (128, 128, 128),
-        9 => (255, 0, 0),
-        10 => (0, 255, 0),
-        11 => (255, 255, 0),
-        12 => (0, 0, 255),
-        13 => (255, 0, 255),
-        14 => (0, 255, 255),
-        15 => (255, 255, 255),
-        16..=231 => {
-            let n = code - 16;
-            let r = (n / 36) % 6;
-            let g = (n / 6) % 6;
-            let b = n % 6;
-            let step = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
-            (step(r), step(g), step(b))
-        }
-        232..=255 => {
-            let gray = 8 + (code - 232) * 10;
-            (gray, gray, gray)
-        }
     }
 }
 

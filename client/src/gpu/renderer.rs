@@ -3,8 +3,9 @@
 
 use std::time::Instant;
 
+use ascii_mmorpg_shared::collision::terrain_seed;
 use ascii_mmorpg_shared::{EntityKind, Point, WorldSnapshot};
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec2, Vec3};
 
 use super::context::GpuContext;
 use super::mesh::{Frustum, MeshBuffer, SceneBatches};
@@ -24,6 +25,10 @@ pub struct GpuRenderer {
     pub last_player_pos: Option<Point>,
     pub last_move_instant: Option<Instant>,
     pub player_walk_phase: f32,
+    pub smooth_cam_pos: Option<Vec2>,
+    pub smooth_player_pos: Option<Vec2>,
+    animation_started: Instant,
+    last_render_instant: Option<Instant>,
 }
 
 impl GpuRenderer {
@@ -47,6 +52,10 @@ impl GpuRenderer {
             last_player_pos: None,
             last_move_instant: None,
             player_walk_phase: 0.0,
+            smooth_cam_pos: None,
+            smooth_player_pos: None,
+            animation_started: Instant::now(),
+            last_render_instant: None,
         })
     }
 
@@ -78,7 +87,14 @@ impl GpuRenderer {
         self.mesh.clear();
         self.batches.clear();
 
-        let (camera_uniforms, lighting) = self.build_scene_frame(world, frame);
+        let now = Instant::now();
+        let delta_seconds = self
+            .last_render_instant
+            .replace(now)
+            .map_or(0.0, |previous| now.duration_since(previous).as_secs_f32());
+        let elapsed_seconds = now.duration_since(self.animation_started).as_secs_f32();
+        let (camera_uniforms, lighting) =
+            self.build_scene_frame_realtime(world, frame, delta_seconds, elapsed_seconds);
 
         let cells = match self.pipeline.render_and_readback_batched(
             &self.ctx,
@@ -134,6 +150,29 @@ impl GpuRenderer {
         }
     }
 
+    fn update_walk_phase_delta(&mut self, world: &WorldSnapshot, delta_seconds: f32) -> f32 {
+        if !world.player.stats.is_alive() {
+            self.player_walk_phase = 0.0;
+            return 0.0;
+        }
+        let current_pos = world.player.position;
+        let moved = self.last_player_pos.is_some_and(|last| last != current_pos);
+        self.last_player_pos = Some(current_pos);
+        if moved {
+            self.last_move_instant = Some(Instant::now());
+        }
+        let is_walking = self
+            .last_move_instant
+            .is_some_and(|t| t.elapsed().as_secs_f32() < 0.28);
+        if is_walking {
+            self.player_walk_phase += delta_seconds * 21.0;
+            self.player_walk_phase
+        } else {
+            self.player_walk_phase = 0.0;
+            0.0
+        }
+    }
+
     /// Renders a batch of world snapshots continuously across the double-buffered GPU ring,
     /// keeping the GPU hardware at full utilization and eliminating CPU-GPU idle bubbles.
     pub fn render_batch(&mut self, snapshots: &[WorldSnapshot]) -> Vec<String> {
@@ -144,6 +183,8 @@ impl GpuRenderer {
         let mut batch_data = Vec::with_capacity(snapshots.len());
         let mut last_pos = self.last_player_pos;
         let mut walk_phase = self.player_walk_phase;
+        let mut smooth_cam = self.smooth_cam_pos;
+        let mut smooth_player = self.smooth_player_pos;
         for (i, snapshot) in snapshots.iter().enumerate() {
             let moved = match last_pos {
                 Some(prev) => prev != snapshot.player.position,
@@ -152,19 +193,34 @@ impl GpuRenderer {
             last_pos = Some(snapshot.player.position);
             if moved && snapshot.player.stats.is_alive() {
                 walk_phase += 0.35;
+            } else if walk_phase.abs() > 0.05 {
+                walk_phase *= 0.65;
             } else {
                 walk_phase = 0.0;
             }
 
+            let target_pos = Vec2::new(
+                snapshot.player.position.x as f32 * 0.8,
+                snapshot.player.position.y as f32 * 0.8,
+            );
+            smooth_cam = Some(smooth_cam.map_or(target_pos, |p| {
+                p.lerp(target_pos, damping_factor(19.7, 0.05))
+            }));
+            smooth_player = Some(smooth_player.map_or(target_pos, |p| {
+                p.lerp(target_pos, damping_factor(28.8, 0.05))
+            }));
+
             let mut mesh = MeshBuffer::new();
             let mut batches = SceneBatches::new();
-            let (cam, light) = Self::populate_scene(
+            let (cam, light) = Self::populate_scene_smoothed(
                 self.width,
                 self.height,
                 self.weather,
                 snapshot,
                 snapshot.tick.max(i as u64),
                 walk_phase,
+                smooth_cam.unwrap(),
+                smooth_player.unwrap(),
                 &mut mesh,
                 &mut batches,
             );
@@ -172,6 +228,8 @@ impl GpuRenderer {
         }
         self.last_player_pos = last_pos;
         self.player_walk_phase = walk_phase;
+        self.smooth_cam_pos = smooth_cam;
+        self.smooth_player_pos = smooth_player;
 
         let frame_refs: Vec<(
             &MeshBuffer,
@@ -198,14 +256,77 @@ impl GpuRenderer {
         world: &WorldSnapshot,
         frame: u64,
     ) -> (CameraUniforms, LightingUniforms) {
-        let walk_phase = self.update_walk_phase(world);
-        Self::populate_scene(
+        self.build_scene_frame_with_timing(world, frame, 0.05, frame as f32 * 0.05, true)
+    }
+
+    fn build_scene_frame_realtime(
+        &mut self,
+        world: &WorldSnapshot,
+        frame: u64,
+        delta_seconds: f32,
+        elapsed_seconds: f32,
+    ) -> (CameraUniforms, LightingUniforms) {
+        self.build_scene_frame_with_timing(
+            world,
+            frame,
+            delta_seconds.clamp(0.0, 0.1),
+            elapsed_seconds,
+            false,
+        )
+    }
+
+    fn build_scene_frame_with_timing(
+        &mut self,
+        world: &WorldSnapshot,
+        _frame: u64,
+        delta_seconds: f32,
+        animation_time: f32,
+        deterministic: bool,
+    ) -> (CameraUniforms, LightingUniforms) {
+        let walk_phase = if deterministic {
+            self.update_walk_phase(world)
+        } else {
+            self.update_walk_phase_delta(world, delta_seconds)
+        };
+        let target_x = world.player.position.x as f32 * 0.8;
+        let target_z = world.player.position.y as f32 * 0.8;
+        let target_pos = Vec2::new(target_x, target_z);
+
+        let cam_pos = match self.smooth_cam_pos {
+            Some(prev) => {
+                let factor = damping_factor(19.7, delta_seconds);
+                let smoothed = prev.lerp(target_pos, factor);
+                self.smooth_cam_pos = Some(smoothed);
+                smoothed
+            }
+            None => {
+                self.smooth_cam_pos = Some(target_pos);
+                target_pos
+            }
+        };
+
+        let player_render_pos = match self.smooth_player_pos {
+            Some(prev) => {
+                let factor = damping_factor(28.8, delta_seconds);
+                let smoothed = prev.lerp(target_pos, factor);
+                self.smooth_player_pos = Some(smoothed);
+                smoothed
+            }
+            None => {
+                self.smooth_player_pos = Some(target_pos);
+                target_pos
+            }
+        };
+
+        Self::populate_scene_smoothed_at_time(
             self.width,
             self.height,
             self.weather,
             world,
-            frame,
+            animation_time,
             walk_phase,
+            cam_pos,
+            player_render_pos,
             &mut self.mesh,
             &mut self.batches,
         )
@@ -223,14 +344,63 @@ impl GpuRenderer {
         mesh: &mut MeshBuffer,
         batches: &mut SceneBatches,
     ) -> (CameraUniforms, LightingUniforms) {
-        let time = frame as f32 * 0.05;
         let p_pos = world.player.position;
         let px = p_pos.x as f32 * 0.8;
         let pz = p_pos.y as f32 * 0.8;
+        let pos = Vec2::new(px, pz);
+        Self::populate_scene_smoothed(
+            width, height, weather, world, frame, walk_phase, pos, pos, mesh, batches,
+        )
+    }
+
+    /// Populates scene geometry with smoothed camera and player positions,
+    /// dynamic lighting, and view-frustum culled instanced props.
+    #[allow(clippy::too_many_arguments)]
+    pub fn populate_scene_smoothed(
+        width: i16,
+        height: i16,
+        weather: WeatherMode,
+        world: &WorldSnapshot,
+        frame: u64,
+        walk_phase: f32,
+        cam_pos: Vec2,
+        player_render_pos: Vec2,
+        mesh: &mut MeshBuffer,
+        batches: &mut SceneBatches,
+    ) -> (CameraUniforms, LightingUniforms) {
+        Self::populate_scene_smoothed_at_time(
+            width,
+            height,
+            weather,
+            world,
+            frame as f32 * 0.05,
+            walk_phase,
+            cam_pos,
+            player_render_pos,
+            mesh,
+            batches,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn populate_scene_smoothed_at_time(
+        width: i16,
+        height: i16,
+        weather: WeatherMode,
+        world: &WorldSnapshot,
+        time: f32,
+        walk_phase: f32,
+        cam_pos: Vec2,
+        player_render_pos: Vec2,
+        mesh: &mut MeshBuffer,
+        batches: &mut SceneBatches,
+    ) -> (CameraUniforms, LightingUniforms) {
+        let px = player_render_pos.x;
+        let pz = player_render_pos.y;
 
         // 1. Setup Camera (Isometric 2.5D perspective looking North towards -Z)
-        let cam_eye = Vec3::new(px, 11.5, pz + 13.5);
-        let cam_target = Vec3::new(px, 0.8, pz);
+        let cam_eye = Vec3::new(cam_pos.x, 11.5, cam_pos.y + 13.5);
+        let cam_target = Vec3::new(cam_pos.x, 0.8, cam_pos.y);
         let cam_up = Vec3::new(0.0, 1.0, 0.0);
 
         let view = Mat4::look_at_rh(cam_eye, cam_target, cam_up);
@@ -269,7 +439,7 @@ impl GpuRenderer {
 
         let mut lights = Vec::new();
 
-        // Player Hip Lantern (Warm flickering light)
+        // Player Hip Lantern (Warm flickering light pool)
         let player_flicker = (time * 8.0).sin() * 0.12;
         lights.push(GpuPointLight {
             position: [px + 0.4, 1.2, pz + 0.2, 9.5],
@@ -288,33 +458,73 @@ impl GpuRenderer {
             color: [1.0, 0.62, 0.20, 1.4 + gate_flicker2],
         });
 
-        // Herbalist Staff Lantern
+        // Dynamic Entity Lighting (Living actors & loot cast atmospheric lighting pools onto the ground)
         for entity in &world.entities {
-            if entity.kind == EntityKind::Npc {
-                let nx = entity.position.x as f32 * 0.8;
-                let nz = entity.position.y as f32 * 0.8;
-                let herb_flicker = (time * 7.0).sin() * 0.1;
-                lights.push(GpuPointLight {
-                    position: [nx + 0.42, 1.85, nz + 0.15, 8.0],
-                    color: [0.95, 0.80, 0.35, 1.3 + herb_flicker],
-                });
+            let ex = entity.position.x as f32 * 0.8;
+            let ez = entity.position.y as f32 * 0.8;
+            match entity.kind {
+                EntityKind::Npc => {
+                    let herb_flicker = (time * 7.0 + ex).sin() * 0.1;
+                    lights.push(GpuPointLight {
+                        position: [ex + 0.35, 1.7, ez + 0.15, 8.0],
+                        color: [0.95, 0.80, 0.35, 1.3 + herb_flicker], // Warm golden amber lantern glow
+                    });
+                }
+                EntityKind::Monster => {
+                    let pulse = (time * 4.5 + ex * 1.7).sin() * 0.15;
+                    lights.push(GpuPointLight {
+                        position: [ex, 0.85, ez, 6.5],
+                        color: [0.88, 0.22, 0.14, 1.05 + pulse], // Sinister crimson-amber ground glow
+                    });
+                }
+                EntityKind::Item => {
+                    let shimmer = (time * 5.2 + ez * 2.1).cos() * 0.18;
+                    lights.push(GpuPointLight {
+                        position: [ex, 0.45, ez, 5.0],
+                        color: [0.25, 0.78, 0.95, 1.15 + shimmer], // Ethereal celestial cyan shimmering glow
+                    });
+                }
+                EntityKind::Player if entity.id != world.player.id => {
+                    let other_flicker = (time * 7.8 + ex).sin() * 0.12;
+                    lights.push(GpuPointLight {
+                        position: [ex + 0.4, 1.2, ez + 0.2, 9.0],
+                        color: [1.0, 0.82, 0.45, 1.2 + other_flicker], // Adventurer's warm lantern glow
+                    });
+                }
+                _ => {}
             }
         }
 
-        let light_count = lights.len().min(8);
+        // Prioritize lights closest to the camera/player
+        lights.sort_by(|a, b| {
+            let da = (a.position[0] - px).hypot(a.position[2] - pz);
+            let db = (b.position[0] - px).hypot(b.position[2] - pz);
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let light_count = lights.len().min(16);
         lighting.num_point_lights = light_count as u32;
-        for (i, l) in lights.iter().take(8).enumerate() {
+        for (i, l) in lights.iter().take(16).enumerate() {
             lighting.point_lights[i] = *l;
         }
 
         // 3. Dynamic Scene Geometry (Cobblestone Highway, Altar, Gate, Entities)
-        mesh.add_terrain(px, pz, 24.0);
+        mesh.set_entity_context(0, 0);
+        let terrain_radius = ((width as f32).max(100.0) * 0.38).clamp(42.0, 68.0);
+        mesh.add_terrain(cam_pos.x, cam_pos.y, terrain_radius);
         mesh.add_gate([0.0, 0.0, -9.6]);
         mesh.add_ruin_altar([-6.4, 0.0, -4.0]);
 
         for entity in &world.entities {
             let ex = entity.position.x as f32 * 0.8;
             let ez = entity.position.y as f32 * 0.8;
+            let entity_class = match entity.kind {
+                EntityKind::Player => 1,
+                EntityKind::Monster => 2,
+                EntityKind::Npc => 3,
+                EntityKind::Item => 4,
+            };
+            mesh.set_entity_context(entity.id, entity_class);
             match entity.kind {
                 EntityKind::Monster => {
                     let label = entity.name.to_ascii_lowercase();
@@ -345,21 +555,56 @@ impl GpuRenderer {
             }
         }
 
+        mesh.set_entity_context(world.player.id, 1);
         mesh.add_humanoid([px, 0.0, pz], 0.0, walk_phase, 0.0);
+        mesh.set_entity_context(0, 0);
 
         // 4. Instanced Props with View-Frustum Culling (Asciicker plane culling optimization)
         // Scaled to exact 0.8 world tile grid:
-        // Tree (-7, -2) -> [-5.6, -1.6], Tree (8, -3) -> [6.4, -2.4],
-        // Tree (9, -10) -> [7.2, -8.0], Tree (-9, -10) -> [-7.2, -8.0]
-        let trees = [
+        // Landmark Trees: (-7, -2) -> [-5.6, -1.6], (8, -3) -> [6.4, -2.4],
+        // (9, -10) -> [7.2, -8.0], (-9, -10) -> [-7.2, -8.0]
+        let landmark_trees = [
             ([-5.6, 0.0, -1.6], 1.0, (time * 2.0).sin()),
             ([6.4, 0.0, -2.4], 1.1, (time * 2.3).sin()),
             ([7.2, 0.0, -8.0], 0.95, (time * 1.8).sin()),
             ([-7.2, 0.0, -8.0], 1.05, (time * 2.1).sin()),
         ];
-        for (pos, scale, sway) in trees {
+        for (pos, scale, sway) in landmark_trees {
             if frustum.test_sphere(Vec3::from(pos) + Vec3::new(0.0, 3.5, 0.0), scale * 5.2) {
                 batches.add_pine_tree(pos, scale, sway);
+            }
+        }
+
+        // Procedural background trees matching collision grid (off-highway |tree_wx| > 4)
+        let cam_tile_x = (cam_pos.x / 0.8).round() as i16;
+        let cam_tile_y = (cam_pos.y / 0.8).round() as i16;
+        let min_gx = (cam_tile_x - 30).div_euclid(11) - 1;
+        let max_gx = (cam_tile_x + 30).div_euclid(11) + 1;
+        let min_gy = (cam_tile_y - 25).div_euclid(9) - 1;
+        let max_gy = (cam_tile_y + 25).div_euclid(9) + 1;
+
+        for gx in min_gx..=max_gx {
+            for gy in min_gy..=max_gy {
+                let seed = terrain_seed(gx, gy);
+                let tree_wx = gx * 11 + (seed % 5) as i16;
+                let tree_wy = gy * 9 + ((seed / 7) % 5) as i16;
+                if tree_wx.abs() > 4
+                    && seed % 9 == 0
+                    && (tree_wx, tree_wy) != (-7, -2)
+                    && (tree_wx, tree_wy) != (8, -3)
+                    && (tree_wx, tree_wy) != (9, -10)
+                    && (tree_wx, tree_wy) != (-9, -10)
+                {
+                    let wx = tree_wx as f32 * 0.8;
+                    let wz = tree_wy as f32 * 0.8;
+                    let scale = 0.92 + ((seed % 7) as f32) * 0.04;
+                    let sway = (time * 1.5 + (seed as f32 * 0.17)).sin();
+                    let pos = [wx, 0.0, wz];
+                    if frustum.test_sphere(Vec3::from(pos) + Vec3::new(0.0, 3.5, 0.0), scale * 5.2)
+                    {
+                        batches.add_pine_tree(pos, scale, sway);
+                    }
+                }
             }
         }
 
@@ -371,7 +616,23 @@ impl GpuRenderer {
             }
         }
 
-        batches.add_weather_particles(px, pz, time, weather_id);
+        for gx in (cam_tile_x - 16)..=(cam_tile_x + 16) {
+            for gy in (cam_tile_y - 12)..=(cam_tile_y + 12) {
+                let seed = terrain_seed(gx, gy);
+                if seed % 3 != 0 {
+                    continue;
+                }
+                let x = gx as f32 * 0.8 + (seed % 7) as f32 * 0.08;
+                let z = gy as f32 * 0.8 + ((seed / 7) % 7) as f32 * 0.08;
+                if (x - cam_pos.x).abs() > 28.0 || (z - cam_pos.y).abs() > 22.0 {
+                    continue;
+                }
+                let phase = time * 2.4 + seed as f32 * 0.013;
+                mesh.add_grass_blade(x, z, 0.28 + (seed % 5) as f32 * 0.06, phase.sin() * 0.14);
+            }
+        }
+
+        batches.add_weather_particles(cam_pos.x, cam_pos.y, time, weather_id);
 
         (camera_uniforms, lighting)
     }
@@ -444,6 +705,10 @@ impl GpuRenderer {
 
         out
     }
+}
+
+fn damping_factor(rate: f32, delta_seconds: f32) -> f32 {
+    1.0 - (-rate * delta_seconds.max(0.0)).exp()
 }
 
 #[inline]
@@ -561,10 +826,9 @@ mod tests {
             batches.total_instance_count() > 100,
             "Should batch weather particles, trees, and pillars"
         );
-        assert_eq!(
-            batches.tree_instances.len(),
-            4,
-            "Should have 4 instanced trees"
+        assert!(
+            batches.tree_instances.len() >= 4,
+            "Should have at least 4 instanced trees"
         );
         assert_eq!(
             batches.pillar_instances.len(),
@@ -742,6 +1006,25 @@ f 2 5 4 3
     }
 
     #[test]
+    fn test_entity_metadata_is_stamped_on_dynamic_geometry() {
+        let mut mesh = MeshBuffer::new();
+        mesh.set_entity_context(42, 2);
+        mesh.add_box(
+            [0.0, 0.5, 0.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 0.2, 0.1, 1.0],
+            1.0,
+            0.2,
+        );
+
+        assert!(!mesh.vertices.is_empty());
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|vertex| vertex.entity_id == 42.0 && vertex.entity_class == 2.0));
+    }
+
+    #[test]
     fn test_populate_scene_with_all_entity_kinds() {
         let mut world = sample_world();
         world.entities.push(ascii_mmorpg_shared::ActorSnapshot {
@@ -837,5 +1120,40 @@ f 2 5 4 3
         let mut mesh = MeshBuffer::new();
         mesh.add_pine_tree([0.0, 0.0, 0.0], 0.0);
         assert!(!mesh.vertices.is_empty());
+    }
+
+    #[test]
+    fn test_smooth_camera_and_player_transitions() {
+        let Ok(mut renderer) = GpuRenderer::new(40, 20, WeatherMode::Rain) else {
+            eprintln!("Skipping test_smooth_camera_and_player_transitions: no GPU adapter on host");
+            return;
+        };
+        let mut world = sample_world();
+        world.player.position = Point { x: 0, y: 0 };
+
+        // Frame 1: Initial position at (0, 0)
+        let (cam1, _) = renderer.build_scene_frame(&world, 0);
+        let cam_pos1 = glam::Vec3::from_slice(&cam1.camera_pos[0..3]);
+        assert_eq!(renderer.smooth_cam_pos, Some(glam::Vec2::new(0.0, 0.0)));
+        assert_eq!(renderer.smooth_player_pos, Some(glam::Vec2::new(0.0, 0.0)));
+
+        // Player takes a step to (10, 0) -> target x = 8.0
+        world.player.position = Point { x: 10, y: 0 };
+        let (cam2, _) = renderer.build_scene_frame(&world, 1);
+        let cam_pos2 = glam::Vec3::from_slice(&cam2.camera_pos[0..3]);
+
+        // Camera must smoothly interpolate rather than instantaneously jumping all 8 units
+        assert!(cam_pos2.x > cam_pos1.x);
+        assert!(cam_pos2.x < 8.0); // Smooth dampening prevents instantaneous 1-frame snap
+        assert!(renderer.smooth_player_pos.unwrap().x < 8.0);
+    }
+
+    #[test]
+    fn damping_is_stable_across_fixed_substeps() {
+        let rate = 19.7;
+        let one_step = damping_factor(rate, 1.0 / 30.0);
+        let two_steps = 1.0 - (1.0 - damping_factor(rate, 1.0 / 60.0)).powi(2);
+        assert!((one_step - two_steps).abs() < 1e-6);
+        assert_eq!(damping_factor(rate, 0.0), 0.0);
     }
 }

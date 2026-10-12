@@ -181,13 +181,9 @@ state transitions and events, not pre-rendered frames.
 
 ### Terminal backend
 
-All terminal-specific code belongs behind a small `term` boundary. The public API
-should cover initialization, shutdown, resize, capability reporting, input polling,
-cell writes and frame presentation.
+| Terminal backend | Own `term` crate (pure Rust) for output, `crossterm` for input and terminal setup |
 
-The ANSI backend remains the fallback for CI, unsupported systems and frame dumps.
-The Notcurses backend is optional and must not leak bindings into gameplay or
-renderer code.
+`term` owns a double-buffered `CellMatrix` of `{glyph, fg, bg}`, a frame encoder that builds the whole frame in one byte buffer and issues a single write, and capability detection. No C library, no MinGW requirement, so plain MSVC builds work on Windows and Linux.
 
 ## 5. Rendering plan
 
@@ -215,10 +211,8 @@ asset representation.
 2. Project world coordinates through a camera.
 3. Rasterize terrain, props, entities and effects into depth/material data.
 4. Shade directional and point lights, fog and ambient darkness.
-5. Convert sample regions into glyph cells.
-6. Apply brightness quantization and anti-shimmer hysteresis.
-7. Compose world, effects and crisp UI planes.
-8. Present through ANSI or Notcurses.
+5. **Layers:** world, effects and UI layers are composited on the CPU into the `CellMatrix`. Glow tints cell backgrounds, UI cells override, and nameplates stay crisp.
+6. **Encoder:** diff against the previous frame, find changed spans per row, merge close spans (gaps $\le 12$ cells), one cursor jump per span, skip redundant color escapes, wrap in synchronized update markers (`\x1b[?2026h` / `\x1b[?2026l`) when supported, one write per frame. Fall back to full-screen streaming when most cells changed (> 60%).
 
 ### Visual requirements
 
@@ -304,19 +298,35 @@ The protocol should evolve toward these message categories:
 The server should send animation state, facing and sequence metadata. The client
 should play animation frames locally rather than receive rendered animation frames.
 
-## 8. Delivery milestones
+## 8. Input & Terminal Setup
 
-### M0 — Backend and capability spike
+`crossterm` events for mouse, keys and resize. Enable keyboard enhancement flags where the terminal supports them. Keep click-to-move as the baseline.
 
-**Goal:** prove terminal access without destabilizing the existing ANSI path.
+## 9. Budgets & Frame Overhead
 
-- Add the terminal backend boundary.
-- Test Notcurses initialization separately.
-- Report colour, mouse, keyboard, resize and synchronized-update capabilities.
-- Keep ANSI and headless paths working.
+Bytes per frame, encode time and write time at full-screen size, measured on WezTerm and Windows Terminal. A ConPTY benchmark is a gate before M2.
 
-**Exit criteria:** Linux and Windows builds can run the capability check; CI stays
-green; no gameplay code imports Notcurses bindings.
+- **80x30 (2,400 cells)**: $< 30\text{ KB}$ rain, $< 0.3\text{ ms}$ encode.
+- **160x45 (7,200 cells)**: $< 90\text{ KB}$ rain, $< 0.8\text{ ms}$ encode.
+- **240x67 (16,080 cells)**: $< 180\text{ KB}$ rain, $< 1.6\text{ ms}$ encode, $\le 67$ cursor jumps max.
+
+## 10. Delivery milestones
+
+### M0 — Setup & `term` Spike
+
+| Milestone | Stage | Scope | Dependencies | Size | Exit Criteria |
+|:---|:---|:---|:---|:---:|:---|
+| **M0** | Setup | `term` spike: `CellMatrix`, full-stream and span-diff encoders, `crossterm` input, capability checks, benchmark table at 80x30, 160x45 and 240x67 for static, rain and full-noise frames | Workspace, CI, shared crate, loopback transport, logging | S | Documented ms and bytes per frame per backend and size, CI green on Windows and Linux |
+
+**Goal:** prove terminal throughput and frame encoder efficiency without native C dependencies.
+
+- Build the `term` module (pure Rust) with double-buffered `CellMatrix`.
+- Implement `crossterm` input (mouse, keys, resize) and capability checks.
+- Add Mode 2026 Synchronized Update markers (`\x1b[?2026h` / `\x1b[?2026l`).
+- Add high-resolution Windows timer precision (`timeBeginPeriod(1)`).
+- Run isolated benchmark matrix at 80x30, 160x45, and 240x67.
+
+**Exit criteria:** Linux and Windows builds run the capability check; CI stays green; clean MSVC builds without MinGW.
 
 ### M1 — Fixed tick and spatial renderer spike
 
@@ -482,7 +492,14 @@ behind. Prefer deterministic tests over timing-sensitive tests.
 - Prefer the smallest implementation that can validate the next visual or gameplay
   hypothesis.
 
-## 12. Decisions to record as ADRs
+## 12. Risks & Mitigations
+
+| Risk | Impact | Mitigation |
+|:---|:---|:---|
+| ConPTY throughput limits frame rate at full-screen size | Terminal stalls, high draw latency | M0 benchmark gate, span diffing, redundant color reduction, lower-resolution grid mode, and a 30 fps world cap |
+| Terminal Unicode width differences across OS | Column misalignment | Restrict glyphs to single-width characters (ASCII, box drawing, block elements) |
+
+## 13. Decisions to record as ADRs
 
 Create or update short ADRs when these choices become real:
 
@@ -490,7 +507,7 @@ Create or update short ADRs when these choices become real:
 2. World units, camera projection and coordinate conventions
 3. Glyph sampling resolution and cell conversion
 4. Renderer layering and UI composition
-5. Notcurses version and platform support
+5. Own `term` crate plus `crossterm`, frame encoder strategy decided by the M0 benchmark
 6. ECS adoption boundary, if profiling justifies it
 7. Persistence schema and account lifecycle
 8. Interest-management and snapshot-delta semantics
@@ -498,24 +515,19 @@ Create or update short ADRs when these choices become real:
 Until then, treat the plan as direction rather than permission to build every listed
 system immediately.
 
-## 13. Immediate next actions
+## 14. Immediate next actions (Dev A Roadmap)
 
-1. Correct the TCP loop so it advances independently of incoming commands.
-2. Update ADR 0002 from the obsolete 10 Hz/single-client description.
-3. Add explicit animation state, facing and sequence IDs to snapshots.
-4. Replace the current horizon/sky composition with a top-down world-space
-   viewport. Terrain, props, actors and effects must use the same player-following
-   camera transform so stationary mobs never appear to move under input.
- 5. Build the first reference-shaped scene: irregular forest ground, open dark
-    space, paths, clustered trees/ruins, larger readable actors, floating labels,
-    target markers and localized blue-white impact effects. Keep debug text out of
-    the playfield; retain it only in a small footer while the prototype is tested.
- 6. Add a minimal depth-aware glyph conversion experiment and frame dump after the
-    layered prototype has a stable visual baseline.
-7. Recreate one forest path, one dungeon corridor and one gate scene.
-8. Add target selection and a clean target-health panel.
-9. Decide whether Notcurses, `hecs`, `glam`, `rayon` or model loading are justified
-   only after measured prototype results.
+### Dev A Roadmap Steps
+
+1. Build the `term` module/crate and the benchmark harness.
+2. Run the per-cell-jump versus row-streaming experiment (isolated ConPTY measurement).
+3. Implement span diffing (intelligent gap merging $\le 12$) and synchronized updates (Mode 2026).
+4. Add `crossterm` input and capability checks.
+5. Confirm clean MSVC builds on Windows and Linux in CI.
+6. Build rasterizer and depth/normal G-buffer pipeline.
+7. Implement glyph conversion, Alex Harri shape-vector matching, and mosaic modes.
+8. Recreate one forest path, one dungeon corridor and one gate scene.
+9. Add target selection and a clean target-health panel.
 
 ### M2A — Reference-shaped viewport (active build slice)
 
@@ -537,14 +549,14 @@ in world space; the scene reads as a top-down forest/ruin viewport; no pink stre
 or side-on horizon remains; renderer tests cover camera consistency and stable
 terrain across presentation frames.
 
-## 14. Asset plan: models through glyph conversion
+## 15. Asset plan: models through glyph conversion
 
 The visual plan assumes that the world is built from low-poly 3D models and then
 rendered through the glyph converter. True hand-authored ASCII is reserved mainly
 for item icons, title screens and UI mockups. This distinction prevents us from
 trying to draw every environment directly as static text.
 
-### 14.1 Candidate sources
+### 15.1 Candidate sources
 
 | Source | Use | License check |
 | --- | --- | --- |
@@ -558,7 +570,7 @@ dragon silhouettes, a Quaternius Low Poly RPG Pack for general characters and
 props, and KayKit or Kenney dungeon/gate pieces. These are candidates, not yet
 imported assets.
 
-### 14.2 Conversion and runtime strategy
+### 15.2 Conversion and runtime strategy
 
 1. Download or receive one legally usable candidate pack.
 2. Record the exact source URL, pack name, license, author and local file hashes
@@ -573,7 +585,7 @@ imported assets.
 6. Compare silhouette, lighting and readability in Windows Terminal and one Linux
    terminal before accepting the asset.
 
-### 14.3 ASCII and terminal tools
+### 15.3 ASCII and terminal tools
 
 - **REXPaint:** author and polish item icons, title screens, inventory panels and
   paper-doll UI; use its `.xp` format where practical.
@@ -581,10 +593,9 @@ imported assets.
   client pipeline.
 - **Chafa:** use only as an offline image-to-cell draft/conversion tool; its
   LGPLv3-or-later license must remain isolated from shipped gameplay code.
-- **Notcurses blitters:** evaluate before adding Chafa or another converter to the
-  runtime, because Notcurses may already cover image-to-cell conversion.
+- **Notcurses blitters:** the earlier mention of Notcurses image blitters no longer applies because output is driven by the pure-Rust `term` engine. Chafa and REXPaint advice stands, since both are offline tools.
 
-### 14.4 First asset import slice
+### 15.4 First asset import slice
 
 1. Quaternius animated monster pack: one skeleton and one dragon silhouette.
 2. KayKit or Quaternius dungeon/RPG pack: gate, wall, torch and ruin pieces.
@@ -599,7 +610,7 @@ Do not copy a whole project. Reuse small, well-understood converter, camera,
 terminal and UI components from compatible open-source projects only after checking
 their licenses and adapting them to this architecture.
 
-## 15. Reference documents
+## 16. Reference documents
 
 Repository architecture and decisions:
 

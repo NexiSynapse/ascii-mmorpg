@@ -214,7 +214,7 @@ The client supports two rendering engines through `ActiveRenderer`:
    - Procedural 3D articulated humanoid warrior, mossling monster, herbalist NPC, pine trees, stone gate, and ancient ruins.
    - Dynamic Blinn-Phong lighting: directional ambient/sunlight + multiple dynamic point lights (flickering player hip lantern, twin gate torches, staff lantern).
    - Volumetric 3D falling weather particles (angled rain streaks, splashes, snow).
-   - Real-time ASCII compute shader: Sobel edge detection on depth/normals (`|`, `_`, `/`, `\`, `+`) + 4x4 Bayer dithered luminance ramp (` `, `.`, `:`, `*`, `=`, `o`, `O`, `%`, `#`, `@`) + boosted truecolor foreground with atmospheric deep contrast background.
+   - Real-time ASCII compute shader: 4x SSAA G-buffer reduction, six-region shape-aware glyph matching, normal/depth edge detection, material-specific glyph families, entity-ID faction outlines, tone mapping, and quantized dark-fantasy palette output.
    - Zero-overhead PCIe staging readback directly to terminal stdout.
 
 2. **Procedural ANSI CPU Fallback**:
@@ -357,7 +357,7 @@ The current alpha includes:
 - Warrior spell definitions
 - Starter equipment definitions
 - Deterministic combat and weighted loot rules
-- 20 Hz fixed-timestep clock
+- 20 Hz simulation target: idle TCP timeouts advance at 50 ms, while input currently advances a tick immediately; this is not yet a rigorously fixed-rate scheduler
 - TCP framing and loopback smoke path
 
 The following full MMORPG systems are not yet implemented:
@@ -575,9 +575,10 @@ The current project has repeatedly passed formatting, workspace tests, clippy wi
 
 ### 18.1 Architecture overview
 Path C implements a pure hardware-accelerated 3D graphics and compute pipeline using `wgpu` (`DirectX 12` / `Vulkan` / `Metal`):
-1. **3D Scene Rasterization Pass (`SCENE_3D_WGSL`)**: Evaluates true 3D Blinn-Phong lighting, multiple dynamic point lights with inverse-square falloff and organic flicker, directional sunlight/moonlight, specular highlights, and atmospheric distance fog directly onto an offscreen multi-target render buffer (`color_texture` in `Rgba8UnormSrgb` and `normal_depth_texture` in `Rgba8Unorm`).
-2. **ASCII Post-Processing Compute Pass (`ASCII_POST_WGSL`)**: Executes a high-performance compute shader across $16 \times 16$ thread workgroups over the G-buffer. Evaluates a Sobel filter over normal and depth gradients to detect silhouettes and geometric edges (`_`, `|`, `+`, `/`), computes perceived luminance with a $4 \times 4$ Bayer dither matrix, and maps lit pixels to volumetric density glyphs (` `, `.`, `:`, `*`, `=`, `o`, `O`, `%`, `#`, `@`), outputting structured `GpuCell` structures.
-3. **Multi-Buffered Asynchronous Staging Ring (`RING_SIZE = 2`)**:
+1. **3D Scene Rasterization Pass (`SCENE_3D_WGSL`)**: Evaluates true 3D Blinn-Phong lighting, multiple dynamic point lights with inverse-square falloff and organic flicker, directional sunlight/moonlight, specular highlights, and atmospheric distance fog directly onto an offscreen multi-target render buffer (`color_texture` in `Rgba8UnormSrgb`, `normal_depth_texture` in `Rgba32Float`, and `metadata_texture` in `Rgba8Unorm`) plus a `Depth32Float` depth attachment.
+2. **ASCII Post-Processing Compute Pass (`ASCII_POST_WGSL`)**: Executes a high-performance compute shader across $16 \times 16$ thread workgroups over the G-buffer. It reduces a $4 \times 4$ linear-space SSAA footprint, compares six staggered region brightness values against fixed shape profiles, detects normal/depth silhouettes, selects material-specific glyph families, and applies a tone-mapped 8-step channel palette before outputting structured `GpuCell` records.
+3. **Material/Entity Metadata G-buffer**: The scene pass writes material ID, low-byte entity ID, and entity class into a dedicated metadata target. The compute pass compares neighboring entity IDs and emits a faction-coloured `|`, `_`, or `+` outline so actors remain legible against similarly lit terrain.
+4. **Multi-Buffered Asynchronous Staging Ring (`RING_SIZE = 2`)**:
    - Maintains a double-buffered ring of in-flight frame slots (`FrameSlot`), each with dedicated uniform buffers, storage buffers, and readback staging buffers.
    - Decoupled `submit_frame()` and `readback_slot()` eliminate synchronous `Maintain::Wait` serialization stalls. Frame $N$ executes on the GPU queue concurrently while the CPU reads back and presents Frame $N - 1$.
    - Non-blocking `Maintain::Poll` check ensures zero-wait frame retrieval.
@@ -593,10 +594,10 @@ Path C implements a pure hardware-accelerated 3D graphics and compute pipeline u
 
 ### 18.2 Sub-Pixel 3D Rendering & Optimization Architecture (Asciicker Innovations Adapted)
 To achieve razor-sharp asset silhouettes and mathematical depth precision while maintaining our distinct **Ansenjeo volumetric ASCII aesthetic**, the pipeline incorporates key optimization and rendering logic adapted from Michał Sokalski's `asciicker`:
-1. **$2\times$ Super-Sampled G-Buffer (SSAA)**:
-   - Offscreen textures (`color_texture`, `normal_depth_texture`, `depth_texture`) are rasterized at $2\times$ terminal resolution ($2W \times 2H$).
-   - In `ASCII_POST_WGSL`, each compute invocation for cell $(x, y)$ samples the $2 \times 2$ sub-pixel quadrant ($p_{00}, p_{10}, p_{01}, p_{11}$).
-   - Integrates 4-sample sub-pixel color and luminance, eliminating polygon edge swimming and pixel shimmering during camera movement.
+1. **$4\times$ Super-Sampled G-Buffer (SSAA)**:
+   - Offscreen textures (`color_texture`, `normal_depth_texture`, `metadata_texture`, `depth_texture`) are rasterized at $4\times$ terminal resolution ($4W \times 4H$).
+   - In `ASCII_POST_WGSL`, each compute invocation for cell $(x, y)$ averages a $4 \times 4$ sub-pixel footprint and compares six shape regions before choosing a glyph.
+   - Integrates 16-sample sub-pixel color and luminance, reducing polygon edge swimming and pixel shimmering during camera movement.
    - Evaluates sub-pixel horizontal and vertical depth/normal differences ($\Delta Z_h, \Delta Z_v$) to orient silhouette edges (`_`, `|`, `/`, `\`) with sub-pixel boundary precision.
 2. **$O(1)$ Depth Unprojection (`CameraUniforms::unproject_screen_to_world`)**:
    - `GpuCell` encodes GPU 32-bit depth (`depth_bits: u32`).
@@ -617,8 +618,8 @@ Incorporated beneficial commits from remote `rendering_gra_update`:
    - Integrated dynamic light field with player-carried torch and fixed world lantern posts with radial distance attenuation.
    - Quantized ground light levels to $0.05$ steps, preventing discrete sub-pixel camera jitter from flipping ground dither specks between consecutive frames.
 3. **Headless GPU Benchmarking & Unified CLI**:
-   - Added `--wgpu-demo [N]` CLI flag for headless automated benchmarking, rendering $N$ frames directly through our hardware-accelerated $2\times$ SSAA compute pipeline without requiring terminal interaction.
-   - Verified benchmark output: **171.7 FPS equivalent** (5.82 ms/frame) on NVIDIA GeForce GTX 1650 under Vulkan with full 3D instanced geometry, dynamic lights, and Sobel edge detection.
+   - Added `--wgpu-demo [N]` CLI flag for headless automated benchmarking, rendering $N$ frames directly through our hardware-accelerated $4\times$ SSAA compute pipeline without requiring terminal interaction.
+   - Verified benchmark output: **171.7 FPS equivalent** (5.82 ms/frame) on NVIDIA GeForce GTX 1650 under Vulkan with full 3D instanced geometry, dynamic lights, normal/depth discontinuity detection, and entity-metadata outlines.
 
 ## 19. Object Collision Mechanics, Spatial Boundaries & Sliding Physics
 

@@ -162,6 +162,7 @@ fn run_realtime(
     force_cpu: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
+    let _raw_mode = RawModeGuard;
     run_realtime_with_terminal(address, PlainTerminal::new(), fps, weather, force_cpu)
 }
 
@@ -173,8 +174,38 @@ fn run_realtime_notcurses(
     force_cpu: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
+    let _raw_mode = RawModeGuard;
     let term = ascii_mmorpg_client::NotcursesTerminal::new()?;
     run_realtime_with_terminal(address, term, fps, weather, force_cpu)
+}
+
+struct RawModeGuard;
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        use std::io::Write;
+        let _ = write!(io::stdout(), "\x1b[?25h\x1b[0m");
+        let _ = io::stdout().flush();
+    }
+}
+
+fn movement_direction(held: [bool; 4]) -> Option<ascii_mmorpg_shared::Direction> {
+    use ascii_mmorpg_shared::Direction::*;
+    match (
+        i8::from(held[3]) - i8::from(held[1]),
+        i8::from(held[2]) - i8::from(held[0]),
+    ) {
+        (0, -1) => Some(North),
+        (0, 1) => Some(South),
+        (-1, 0) => Some(West),
+        (1, 0) => Some(East),
+        (-1, -1) => Some(NorthWest),
+        (1, -1) => Some(NorthEast),
+        (-1, 1) => Some(SouthWest),
+        (1, 1) => Some(SouthEast),
+        _ => None,
+    }
 }
 
 fn run_realtime_with_terminal<T: Terminal>(
@@ -229,14 +260,9 @@ fn run_realtime_with_terminal<T: Terminal>(
         connection.as_mut(),
         fps,
     );
-    let disable_result = disable_raw_mode();
     if let Some(connection) = connection.as_mut() {
         connection.close();
     }
-    use std::io::Write;
-    println!("\x1b[?25h\x1b[0m");
-    let _ = io::stdout().flush();
-    disable_result?;
     result
 }
 
@@ -402,42 +428,8 @@ fn realtime_loop(
         }
 
         if Instant::now() >= next_move {
-            let vertical = if held[0] {
-                Some("w")
-            } else if held[2] {
-                Some("s")
-            } else {
-                None
-            };
-            let horizontal = if held[1] {
-                Some("a")
-            } else if held[3] {
-                Some("d")
-            } else {
-                None
-            };
-            let input = match (vertical, horizontal) {
-                (Some("w"), Some("a")) => "nw",
-                (Some("w"), Some("d")) => "ne",
-                (Some("s"), Some("a")) => "sw",
-                (Some("s"), Some("d")) => "se",
-                (Some(input), None) | (None, Some(input)) => input,
-                (Some(_), Some(_)) => "",
-                (None, None) => "",
-            };
-            if !input.is_empty() {
+            if let Some(direction) = movement_direction(held) {
                 tick += 1;
-                let direction = match input {
-                    "nw" => ascii_mmorpg_shared::Direction::NorthWest,
-                    "ne" => ascii_mmorpg_shared::Direction::NorthEast,
-                    "sw" => ascii_mmorpg_shared::Direction::SouthWest,
-                    "se" => ascii_mmorpg_shared::Direction::SouthEast,
-                    "w" => ascii_mmorpg_shared::Direction::North,
-                    "a" => ascii_mmorpg_shared::Direction::West,
-                    "s" => ascii_mmorpg_shared::Direction::South,
-                    "d" => ascii_mmorpg_shared::Direction::East,
-                    _ => unreachable!("movement shortcut is valid"),
-                };
                 let command = ascii_mmorpg_shared::ClientCommand::new(
                     tick,
                     ascii_mmorpg_shared::Command::Move(direction),
@@ -511,4 +503,36 @@ fn realtime_loop(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn movement_cancels_opposites_and_preserves_each_axis() {
+        for bits in 0..16 {
+            let held = std::array::from_fn(|i| bits & (1 << i) != 0);
+            let origin = ascii_mmorpg_shared::Point { x: 10, y: 10 };
+            let mut world = sample_world();
+            world.player.position = origin;
+            if let Some(direction) = movement_direction(held) {
+                let command = ascii_mmorpg_shared::ClientCommand::new(
+                    1,
+                    ascii_mmorpg_shared::Command::Move(direction),
+                );
+                apply_local_command(&mut world, &command);
+            }
+            assert_eq!(
+                world.player.position.x,
+                origin.x + i16::from(held[3]) - i16::from(held[1]),
+                "keys: {held:?}"
+            );
+            assert_eq!(
+                world.player.position.y,
+                origin.y + i16::from(held[2]) - i16::from(held[0]),
+                "keys: {held:?}"
+            );
+        }
+    }
 }

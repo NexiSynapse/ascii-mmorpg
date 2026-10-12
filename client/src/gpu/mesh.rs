@@ -11,6 +11,10 @@ pub struct Vertex {
     pub color: [f32; 4],
     pub material_id: f32, // 0=Terrain, 1=Metal, 2=Cloth, 3=Foliage, 4=Glow/Fire, 5=Weather
     pub roughness: f32,
+    /// Nonzero frame-local entity identity written to the metadata G-buffer.
+    pub entity_id: f32,
+    /// Stable visual faction/class used by the ASCII outline pass.
+    pub entity_class: f32,
 }
 
 impl Vertex {
@@ -27,7 +31,15 @@ impl Vertex {
             color,
             material_id,
             roughness,
+            entity_id: 0.0,
+            entity_class: 0.0,
         }
+    }
+
+    fn with_entity_context(mut self, entity_id: u32, entity_class: u32) -> Self {
+        self.entity_id = entity_id as f32;
+        self.entity_class = entity_class as f32;
+        self
     }
 }
 
@@ -50,7 +62,7 @@ impl InstanceRaw {
             [0.0, 0.0, 0.0, 1.0],
         ],
         color_tint: [1.0, 1.0, 1.0, 1.0],
-        material_params: [-1.0, -1.0, 0.0, 0.0],
+        material_params: [-1.0, -1.0, -1.0, 0.0],
     };
 
     pub fn new(
@@ -67,7 +79,7 @@ impl InstanceRaw {
         Self {
             model_matrix: mat.to_cols_array_2d(),
             color_tint,
-            material_params: [material_override, roughness_override, 0.0, 0.0],
+            material_params: [material_override, roughness_override, -1.0, 0.0],
         }
     }
 }
@@ -256,6 +268,8 @@ impl SceneBatches {
 pub struct MeshBuffer {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    entity_id: u32,
+    entity_class: u32,
 }
 
 impl MeshBuffer {
@@ -266,6 +280,16 @@ impl MeshBuffer {
     pub fn clear(&mut self) {
         self.vertices.clear();
         self.indices.clear();
+        self.entity_id = 0;
+        self.entity_class = 0;
+    }
+
+    /// Sets the metadata stamped onto subsequently generated geometry.
+    ///
+    /// The renderer uses this for entity silhouettes while keeping terrain and props at zero.
+    pub fn set_entity_context(&mut self, entity_id: u64, entity_class: u8) {
+        self.entity_id = ((entity_id.saturating_sub(1) % 255) + 1) as u32;
+        self.entity_class = u32::from(entity_class);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -281,14 +305,22 @@ impl MeshBuffer {
         roughness: f32,
     ) {
         let base_idx = self.vertices.len() as u32;
-        self.vertices
-            .push(Vertex::new(p0, normal, color, material_id, roughness));
-        self.vertices
-            .push(Vertex::new(p1, normal, color, material_id, roughness));
-        self.vertices
-            .push(Vertex::new(p2, normal, color, material_id, roughness));
-        self.vertices
-            .push(Vertex::new(p3, normal, color, material_id, roughness));
+        self.vertices.push(
+            Vertex::new(p0, normal, color, material_id, roughness)
+                .with_entity_context(self.entity_id, self.entity_class),
+        );
+        self.vertices.push(
+            Vertex::new(p1, normal, color, material_id, roughness)
+                .with_entity_context(self.entity_id, self.entity_class),
+        );
+        self.vertices.push(
+            Vertex::new(p2, normal, color, material_id, roughness)
+                .with_entity_context(self.entity_id, self.entity_class),
+        );
+        self.vertices.push(
+            Vertex::new(p3, normal, color, material_id, roughness)
+                .with_entity_context(self.entity_id, self.entity_class),
+        );
 
         self.indices.extend_from_slice(&[
             base_idx,
@@ -379,6 +411,32 @@ impl MeshBuffer {
         );
     }
 
+    pub fn add_grass_blade(&mut self, x: f32, z: f32, height: f32, sway: f32) {
+        let width = 0.07;
+        let tip_x = x + sway * height;
+        let color = [0.16, 0.42, 0.20, 1.0];
+        self.add_quad(
+            [x - width, 0.02, z],
+            [x + width, 0.02, z],
+            [tip_x + width * 0.35, height, z],
+            [tip_x - width * 0.35, height, z],
+            [0.0, 0.0, 1.0],
+            color,
+            3.0,
+            0.8,
+        );
+        self.add_quad(
+            [x, 0.02, z - width],
+            [x, 0.02, z + width],
+            [tip_x, height, z + width * 0.35],
+            [tip_x, height, z - width * 0.35],
+            [1.0, 0.0, 0.0],
+            color,
+            3.0,
+            0.8,
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn add_cone(
         &mut self,
@@ -411,12 +469,18 @@ impl MeshBuffer {
             let normal = [mid_theta.cos() * 0.707, 0.707, mid_theta.sin() * 0.707];
 
             let base_idx = self.vertices.len() as u32;
-            self.vertices
-                .push(Vertex::new(p1, normal, color, material_id, roughness));
-            self.vertices
-                .push(Vertex::new(p2, normal, color, material_id, roughness));
-            self.vertices
-                .push(Vertex::new(apex, normal, color, material_id, roughness));
+            self.vertices.push(
+                Vertex::new(p1, normal, color, material_id, roughness)
+                    .with_entity_context(self.entity_id, self.entity_class),
+            );
+            self.vertices.push(
+                Vertex::new(p2, normal, color, material_id, roughness)
+                    .with_entity_context(self.entity_id, self.entity_class),
+            );
+            self.vertices.push(
+                Vertex::new(apex, normal, color, material_id, roughness)
+                    .with_entity_context(self.entity_id, self.entity_class),
+            );
 
             self.indices
                 .extend_from_slice(&[base_idx, base_idx + 1, base_idx + 2]);
@@ -1278,30 +1342,36 @@ impl MeshBuffer {
     /// and an elevated multi-tier foliage canopy.
     pub fn add_pine_tree(&mut self, pos: [f32; 3], wind_sway: f32) {
         let (x, y, z) = (pos[0], pos[1], pos[2]);
-        let trunk_color = [0.38, 0.24, 0.14, 1.0];
-        let trunk_dark = [0.26, 0.16, 0.10, 1.0];
+        let trunk_color = [0.46, 0.28, 0.14, 1.0];
+        let trunk_dark = [0.30, 0.18, 0.09, 1.0];
         let pine_green_dark = [0.12, 0.30, 0.16, 1.0];
         let pine_green = [0.15, 0.36, 0.20, 1.0];
         let pine_green_light = [0.18, 0.42, 0.24, 1.0];
 
         // --- Sculpted Timber Trunk & Buttressed Root Flares ---
-        // Main vertical trunk column rising from ground up into the upper canopy
-        self.add_box([x, y + 2.40, z], [0.65, 4.80, 0.65], trunk_color, 3.0, 0.7);
+        // Main vertical trunk column rising from ground up into the upper canopy (material 7.0: Wood/Timber)
+        self.add_box([x, y + 2.70, z], [0.70, 5.40, 0.70], trunk_color, 7.0, 0.7);
         // Vertical bark contour / ridge slabs for depth and striations
-        self.add_box([x, y + 2.20, z], [0.72, 4.20, 0.32], trunk_dark, 3.0, 0.8);
-        self.add_box([x, y + 2.20, z], [0.32, 4.20, 0.72], trunk_dark, 3.0, 0.8);
+        self.add_box([x, y + 2.50, z], [0.78, 5.00, 0.36], trunk_dark, 7.0, 0.8);
+        self.add_box([x, y + 2.50, z], [0.36, 5.00, 0.78], trunk_dark, 7.0, 0.8);
 
         // Buttress root collar at ground level (firmly anchored into terrain)
-        self.add_box([x, y + 0.22, z], [1.10, 0.44, 1.10], trunk_dark, 3.0, 0.8);
-        // Surface roots spreading into the soil
-        self.add_box([x, y + 0.12, z], [0.45, 0.24, 1.50], trunk_color, 3.0, 0.85);
-        self.add_box([x, y + 0.12, z], [1.50, 0.24, 0.45], trunk_color, 3.0, 0.85);
+        self.add_box([x, y + 0.24, z], [1.25, 0.48, 1.25], trunk_dark, 7.0, 0.8);
+        // Surface roots spreading into the soil, extending forward towards camera (+Z)
+        self.add_box(
+            [x, y + 0.14, z + 0.2],
+            [0.50, 0.28, 1.80],
+            trunk_color,
+            7.0,
+            0.85,
+        );
+        self.add_box([x, y + 0.14, z], [1.80, 0.28, 0.50], trunk_color, 7.0, 0.85);
 
         // --- Elevated Multi-Tier Foliage Canopy with Wind Sway ---
-        // Lowest Tier (elevated to y = 2.65 so trunk is prominently visible underneath)
+        // Lowest Tier (elevated to y = 3.60 so trunk is prominently visible underneath)
         let sway = wind_sway * 0.08;
         self.add_cone(
-            [x + sway * 0.4, y + 2.65, z],
+            [x + sway * 0.4, y + 3.60, z],
             1.70,
             1.80,
             8,
@@ -1311,7 +1381,7 @@ impl MeshBuffer {
         );
         // Middle Tier
         self.add_cone(
-            [x + sway * 0.8, y + 3.90, z],
+            [x + sway * 0.8, y + 4.80, z],
             1.35,
             1.70,
             8,
@@ -1321,7 +1391,7 @@ impl MeshBuffer {
         );
         // Upper Tier
         self.add_cone(
-            [x + sway * 1.2, y + 5.10, z],
+            [x + sway * 1.2, y + 6.00, z],
             0.95,
             1.50,
             8,
@@ -1331,7 +1401,7 @@ impl MeshBuffer {
         );
         // Spire / Crown Apex
         self.add_cone(
-            [x + sway * 1.5, y + 6.20, z],
+            [x + sway * 1.5, y + 7.10, z],
             0.55,
             1.30,
             8,
@@ -1404,19 +1474,25 @@ impl MeshBuffer {
         let step = 1.5;
         let road_width = 3.2;
 
-        let x_min = center_x - radius;
-        let x_max = center_x + radius;
-        let z_min = center_z - radius;
-        let z_max = center_z + radius;
+        // Snap generation bounds to the world step grid so all quads are world-stationary.
+        // This eliminates sliding quads, geometry jitter, and border popping when the player moves.
+        let x_min = ((center_x - radius) / step).floor() * step;
+        let x_max = ((center_x + radius) / step).ceil() * step;
+        let z_min = ((center_z - radius) / step).floor() * step;
+        let z_max = ((center_z + radius) / step).ceil() * step;
 
         let mut x = x_min;
         while x < x_max {
             let mut z = z_min;
             while z < z_max {
-                let dist_from_road = x.abs();
+                let quad_center_x = x + step * 0.5;
+                let quad_center_z = z + step * 0.5;
+                let dist_from_road = quad_center_x.abs();
                 let (color, mat, rough, y_offset) = if dist_from_road < road_width {
                     // Cobblestone Highway
-                    let tile_pattern = ((x * 2.0).floor() + (z * 2.0).floor()) % 2.0 == 0.0;
+                    let tile_pattern =
+                        ((quad_center_x * 2.0).floor() + (quad_center_z * 2.0).floor()) % 2.0
+                            == 0.0;
                     let c = if tile_pattern {
                         [0.46, 0.48, 0.52, 1.0]
                     } else {
@@ -1428,7 +1504,7 @@ impl MeshBuffer {
                     ([0.55, 0.53, 0.48, 1.0], 0.0, 0.5, 0.08)
                 } else {
                     // Lush Meadow with natural elevation roll
-                    let hill = (x * 0.25).sin() * (z * 0.25).cos() * 0.15;
+                    let hill = (quad_center_x * 0.25).sin() * (quad_center_z * 0.25).cos() * 0.15;
                     let grass = [0.18, 0.38, 0.19, 1.0];
                     (grass, 3.0, 0.75, hill)
                 };
@@ -1530,34 +1606,34 @@ impl MeshBuffer {
     /// Pre-bakes a high-resolution pine tree prototype mesh centered at origin for GPU hardware instancing.
     pub fn create_pine_tree_prototype() -> Self {
         let mut mb = Self::new();
-        let trunk_color = [0.38, 0.24, 0.14, 1.0];
-        let trunk_dark = [0.26, 0.16, 0.10, 1.0];
+        let trunk_color = [0.46, 0.28, 0.14, 1.0];
+        let trunk_dark = [0.30, 0.18, 0.09, 1.0];
         let pine_green_dark = [0.12, 0.30, 0.16, 1.0];
         let pine_green = [0.15, 0.36, 0.20, 1.0];
         let pine_green_light = [0.18, 0.42, 0.24, 1.0];
 
         // --- Sculpted Timber Trunk & Buttressed Root Flares ---
-        // Main vertical trunk column rising from ground up into the upper canopy
-        mb.add_box([0.0, 2.40, 0.0], [0.65, 4.80, 0.65], trunk_color, 3.0, 0.7);
+        // Main vertical trunk column rising from ground up into the upper canopy (material 7.0: Wood/Timber)
+        mb.add_box([0.0, 2.70, 0.0], [0.70, 5.40, 0.70], trunk_color, 7.0, 0.7);
         // Vertical bark contour / ridge slabs for depth and striations
-        mb.add_box([0.0, 2.20, 0.0], [0.72, 4.20, 0.32], trunk_dark, 3.0, 0.8);
-        mb.add_box([0.0, 2.20, 0.0], [0.32, 4.20, 0.72], trunk_dark, 3.0, 0.8);
+        mb.add_box([0.0, 2.50, 0.0], [0.78, 5.00, 0.36], trunk_dark, 7.0, 0.8);
+        mb.add_box([0.0, 2.50, 0.0], [0.36, 5.00, 0.78], trunk_dark, 7.0, 0.8);
 
         // Buttress root collar at ground level (firmly anchored into terrain)
-        mb.add_box([0.0, 0.22, 0.0], [1.10, 0.44, 1.10], trunk_dark, 3.0, 0.8);
-        // Surface roots spreading into the soil
-        mb.add_box([0.0, 0.12, 0.0], [0.45, 0.24, 1.50], trunk_color, 3.0, 0.85);
-        mb.add_box([0.0, 0.12, 0.0], [1.50, 0.24, 0.45], trunk_color, 3.0, 0.85);
+        mb.add_box([0.0, 0.24, 0.0], [1.25, 0.48, 1.25], trunk_dark, 7.0, 0.8);
+        // Surface roots spreading into the soil, extending forward towards camera (+Z)
+        mb.add_box([0.0, 0.14, 0.2], [0.50, 0.28, 1.80], trunk_color, 7.0, 0.85);
+        mb.add_box([0.0, 0.14, 0.0], [1.80, 0.28, 0.50], trunk_color, 7.0, 0.85);
 
         // --- Elevated Multi-Tier Foliage Canopy ---
-        // Lowest Tier (elevated to y = 2.65 so trunk is prominently visible underneath)
-        mb.add_cone([0.0, 2.65, 0.0], 1.70, 1.80, 8, pine_green_dark, 3.0, 0.6);
+        // Lowest Tier (elevated to y = 3.60 so trunk is prominently visible underneath)
+        mb.add_cone([0.0, 3.60, 0.0], 1.70, 1.80, 8, pine_green_dark, 3.0, 0.6);
         // Middle Tier
-        mb.add_cone([0.0, 3.90, 0.0], 1.35, 1.70, 8, pine_green, 3.0, 0.6);
+        mb.add_cone([0.0, 4.80, 0.0], 1.35, 1.70, 8, pine_green, 3.0, 0.6);
         // Upper Tier
-        mb.add_cone([0.0, 5.10, 0.0], 0.95, 1.50, 8, pine_green, 3.0, 0.6);
+        mb.add_cone([0.0, 6.00, 0.0], 0.95, 1.50, 8, pine_green, 3.0, 0.6);
         // Spire / Crown Apex
-        mb.add_cone([0.0, 6.20, 0.0], 0.55, 1.30, 8, pine_green_light, 3.0, 0.6);
+        mb.add_cone([0.0, 7.10, 0.0], 0.55, 1.30, 8, pine_green_light, 3.0, 0.6);
         mb
     }
 
@@ -1685,27 +1761,36 @@ impl MeshBuffer {
                         let tn2 = (transform * n2.extend(0.0)).truncate().normalize_or_zero();
 
                         let base = self.vertices.len() as u32;
-                        self.vertices.push(Vertex::new(
-                            tp0.into(),
-                            tn0.into(),
-                            default_color,
-                            material_id,
-                            roughness,
-                        ));
-                        self.vertices.push(Vertex::new(
-                            tp1.into(),
-                            tn1.into(),
-                            default_color,
-                            material_id,
-                            roughness,
-                        ));
-                        self.vertices.push(Vertex::new(
-                            tp2.into(),
-                            tn2.into(),
-                            default_color,
-                            material_id,
-                            roughness,
-                        ));
+                        self.vertices.push(
+                            Vertex::new(
+                                tp0.into(),
+                                tn0.into(),
+                                default_color,
+                                material_id,
+                                roughness,
+                            )
+                            .with_entity_context(self.entity_id, self.entity_class),
+                        );
+                        self.vertices.push(
+                            Vertex::new(
+                                tp1.into(),
+                                tn1.into(),
+                                default_color,
+                                material_id,
+                                roughness,
+                            )
+                            .with_entity_context(self.entity_id, self.entity_class),
+                        );
+                        self.vertices.push(
+                            Vertex::new(
+                                tp2.into(),
+                                tn2.into(),
+                                default_color,
+                                material_id,
+                                roughness,
+                            )
+                            .with_entity_context(self.entity_id, self.entity_class),
+                        );
 
                         self.indices.extend_from_slice(&[base, base + 1, base + 2]);
                         triangles_added += 1;

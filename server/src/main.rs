@@ -6,6 +6,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -65,34 +66,63 @@ enum ServerCommand {
 
 fn simulation_loop(command_rx: mpsc::Receiver<ServerCommand>, clients: ClientRegistry) {
     let mut simulation = Simulation::demo();
-    while let Ok(message) = command_rx.recv() {
+    loop {
+        let message = match command_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(message) => message,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                simulation.advance_tick();
+                broadcast_snapshots(&simulation, &clients);
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         match message {
             ServerCommand::Connect { client_id, sender } => {
-                let snapshot = ServerEvent::Snapshot(simulation.snapshot_for(client_id));
+                let snapshot = ServerEvent::Snapshot(simulation.connect_player(client_id));
                 let _ = sender.send(snapshot);
                 clients.lock().unwrap().push((client_id, sender));
             }
             ServerCommand::Input { client_id, command } => {
-                simulation.fixed_tick_for(client_id, Some(command));
-                let mut registry = clients.lock().unwrap();
-                let mut disconnected = Vec::new();
-                for (recipient_id, sender) in registry.iter() {
-                    if sender
-                        .send(ServerEvent::Snapshot(
-                            simulation.snapshot_for(*recipient_id),
-                        ))
-                        .is_err()
+                let events = simulation.fixed_tick_for(client_id, Some(command));
+                if events
+                    .iter()
+                    .any(|event| matches!(event, ServerEvent::Error(_)))
+                {
+                    if let Some((_, sender)) = clients
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|(id, _)| *id == client_id)
                     {
-                        disconnected.push(*recipient_id);
+                        for event in events {
+                            let _ = sender.send(event);
+                        }
                     }
+                    continue;
                 }
-                registry.retain(|(id, _)| !disconnected.contains(id));
+                broadcast_snapshots(&simulation, &clients);
             }
             ServerCommand::Disconnect { client_id } => {
                 clients.lock().unwrap().retain(|(id, _)| *id != client_id);
             }
         }
     }
+}
+
+fn broadcast_snapshots(simulation: &Simulation, clients: &ClientRegistry) {
+    let mut registry = clients.lock().unwrap();
+    let mut disconnected = Vec::new();
+    for (recipient_id, sender) in registry.iter() {
+        if sender
+            .send(ServerEvent::Snapshot(
+                simulation.snapshot_for(*recipient_id),
+            ))
+            .is_err()
+        {
+            disconnected.push(*recipient_id);
+        }
+    }
+    registry.retain(|(id, _)| !disconnected.contains(id));
 }
 
 fn serve_client(
@@ -141,6 +171,52 @@ fn serve_client(
         }
     }
     commands.send(ServerCommand::Disconnect { client_id })?;
+    drop(error_events);
     let _ = writer_thread.join();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ascii_mmorpg_shared::{Command, ServerEvent};
+
+    #[test]
+    fn tcp_loop_advances_idle_and_input_ticks_separately() {
+        let (commands, command_rx) = mpsc::channel();
+        let clients = Arc::new(Mutex::new(Vec::new()));
+        let (events, event_rx) = mpsc::channel();
+        let loop_clients = Arc::clone(&clients);
+        let worker = thread::spawn(move || simulation_loop(command_rx, loop_clients));
+
+        commands
+            .send(ServerCommand::Connect {
+                client_id: 1,
+                sender: events,
+            })
+            .unwrap();
+        let initial = event_rx.recv_timeout(Duration::from_millis(200)).unwrap();
+        assert!(matches!(initial, ServerEvent::Snapshot(snapshot) if snapshot.tick == 0));
+
+        let idle = event_rx.recv_timeout(Duration::from_millis(200)).unwrap();
+        let ServerEvent::Snapshot(idle_snapshot) = idle else {
+            panic!("expected idle snapshot")
+        };
+        assert_eq!(idle_snapshot.tick, 1);
+
+        commands
+            .send(ServerCommand::Input {
+                client_id: 1,
+                command: ClientCommand::new(0, Command::Rest),
+            })
+            .unwrap();
+        let input = event_rx.recv_timeout(Duration::from_millis(200)).unwrap();
+        let ServerEvent::Snapshot(input_snapshot) = input else {
+            panic!("expected input snapshot")
+        };
+        assert_eq!(input_snapshot.tick, 2);
+
+        drop(commands);
+        worker.join().unwrap();
+    }
 }

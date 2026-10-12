@@ -327,6 +327,61 @@ impl RatatuiHud {
                     ),
                 ]));
 
+                // Step 6: Target Portrait in UI for nearby monsters
+                if inner_threat.height >= 5 && !found_monster {
+                    if e.name.contains("Skeleton") {
+                        threat_spans.push(Line::from(vec![
+                            Span::styled(
+                                "   .-'-.   ",
+                                Style::default()
+                                    .fg(Color::Rgb(220, 225, 235))
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                "[Hostile Undead]",
+                                Style::default().fg(Color::Rgb(255, 120, 100)),
+                            ),
+                        ]));
+                        threat_spans.push(Line::from(vec![
+                            Span::styled(
+                                "  |() ()|  ",
+                                Style::default()
+                                    .fg(Color::Rgb(255, 90, 90))
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                "Armor: Bone Mail",
+                                Style::default().fg(Color::Rgb(160, 160, 160)),
+                            ),
+                        ]));
+                    } else if e.name.contains("Moss") {
+                        threat_spans.push(Line::from(vec![
+                            Span::styled(
+                                "   .---.   ",
+                                Style::default()
+                                    .fg(Color::Rgb(120, 220, 130))
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                "[Forest Creature]",
+                                Style::default().fg(Color::Rgb(140, 240, 150)),
+                            ),
+                        ]));
+                        threat_spans.push(Line::from(vec![
+                            Span::styled(
+                                "  (o.o)    ",
+                                Style::default()
+                                    .fg(Color::Rgb(160, 255, 170))
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                "Trait: Spore Burst",
+                                Style::default().fg(Color::Rgb(160, 160, 160)),
+                            ),
+                        ]));
+                    }
+                }
+
                 let enemy_ratio = if e.stats.max_hp > 0 {
                     (e.stats.hp as f64 / e.stats.max_hp as f64).clamp(0.0, 1.0)
                 } else {
@@ -394,17 +449,17 @@ impl RatatuiHud {
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(inner);
 
-        // Column 1: Equipped Gear
+        // Column 1: Equipped Gear with Item Icons
         let equip_lines = vec![
             Line::from(vec![Span::styled(
-                "⚔ Equipped Gear:",
+                "[A] Equipped Gear:",
                 Style::default()
                     .fg(Color::Rgb(220, 190, 120))
                     .add_modifier(Modifier::BOLD),
             )]),
             Line::from(vec![
                 Span::styled(
-                    "  Main Hand: ",
+                    "  [/] Main Hand: ",
                     Style::default().fg(Color::Rgb(160, 160, 160)),
                 ),
                 Span::styled(
@@ -416,7 +471,7 @@ impl RatatuiHud {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "  Off Hand:  ",
+                    "  [O] Off Hand:  ",
                     Style::default().fg(Color::Rgb(160, 160, 160)),
                 ),
                 Span::styled(
@@ -426,7 +481,7 @@ impl RatatuiHud {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "  Armor:     ",
+                    "  [A] Armor:     ",
                     Style::default().fg(Color::Rgb(160, 160, 160)),
                 ),
                 Span::styled(
@@ -436,7 +491,7 @@ impl RatatuiHud {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "  Helm:      ",
+                    "  [H] Helm:      ",
                     Style::default().fg(Color::Rgb(160, 160, 160)),
                 ),
                 Span::styled(
@@ -447,16 +502,16 @@ impl RatatuiHud {
         ];
         Paragraph::new(equip_lines).render(inv_layout[0], buf);
 
-        // Column 2: Backpack & Satchel
+        // Column 2: Backpack & Satchel with Item Icons
         let backpack_lines = vec![
             Line::from(vec![Span::styled(
-                "📦 Satchel Items:",
+                "[B] Satchel Items:",
                 Style::default()
                     .fg(Color::Rgb(220, 190, 120))
                     .add_modifier(Modifier::BOLD),
             )]),
             Line::from(vec![
-                Span::styled("  [1] ", Style::default().fg(Color::Rgb(240, 200, 100))),
+                Span::styled("  [1] [!] ", Style::default().fg(Color::Rgb(240, 200, 100))),
                 Span::styled(
                     "Healing Draught x3",
                     Style::default().fg(Color::Rgb(100, 220, 140)),
@@ -467,14 +522,14 @@ impl RatatuiHud {
                 ),
             ]),
             Line::from(vec![
-                Span::styled("  [2] ", Style::default().fg(Color::Rgb(240, 200, 100))),
+                Span::styled("  [2] [=] ", Style::default().fg(Color::Rgb(240, 200, 100))),
                 Span::styled(
                     "Scroll of Town Portal",
                     Style::default().fg(Color::Rgb(140, 180, 255)),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("  [3] ", Style::default().fg(Color::Rgb(240, 200, 100))),
+                Span::styled("  [3] [K] ", Style::default().fg(Color::Rgb(240, 200, 100))),
                 Span::styled(
                     "Ancient Fortress Key",
                     Style::default().fg(Color::Rgb(255, 215, 115)),
@@ -530,6 +585,37 @@ impl RatatuiHud {
                 Span::styled(
                     " - Paladin Champion (Lvl 3)",
                     Style::default().fg(Color::Rgb(160, 160, 160)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "   /▲\\   ",
+                    Style::default()
+                        .fg(Color::Rgb(140, 230, 160))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Faction: Vanguard (Lime)",
+                    Style::default().fg(Color::Rgb(150, 240, 110)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  (o o)  ",
+                    Style::default()
+                        .fg(Color::Rgb(255, 255, 255))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Origin: Whispering Forest",
+                    Style::default().fg(Color::Rgb(170, 180, 195)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  /|█|\\  ", Style::default().fg(Color::Rgb(180, 200, 240))),
+                Span::styled(
+                    "Armor: Fluted Steel Plate",
+                    Style::default().fg(Color::Rgb(170, 180, 195)),
                 ),
             ]),
             Line::from(vec![

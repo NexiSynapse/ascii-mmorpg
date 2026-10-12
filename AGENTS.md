@@ -28,7 +28,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Server (`server/src/main.rs`, `lib.rs`)
 - `cargo run -p ascii-mmorpg-server` prints loopback demo; `cargo run -p ascii-mmorpg-server -- --tcp 127.0.0.1:4000` serves TCP (multi-client reader/writer threads + one sim thread, per-client `snapshot_for(id)` broadcast).
-- Gotcha: TCP sim is currently **input-driven** (`fixed_tick_for` only on `Input`); there is no continuous 20 Hz background clock despite `TICK_HZ = 20`. Do not assume tick passage without input.
+- Timing semantics: `TICK_HZ` is the 20 Hz simulation target. The TCP simulation thread advances once after each 50 ms receive timeout while idle, but each accepted input also calls `fixed_tick_for()` immediately; sustained input can therefore advance ticks faster than 20 Hz and prevent timeout-driven ticks. This is not a rigorously fixed-rate scheduler. Verify `server/src/main.rs` and `docs/SESSION_HANDOFF.md` before changing tick semantics.
 
 ## Client (`client/src/main.rs`, `lib.rs`, `renderer.rs`, `assets.rs`, `network.rs`)
 - Modes: default realtime (`WASD`/arrows move, `F` attack, `R` rest, `V`/`T` cycle weather, `Q`/`Esc` quit); `--line` legacy stdin mode; `--demo` offline demo; `--connect ADDR` TCP mode.
@@ -55,7 +55,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## GPU rendering (Path C, `gpu` default, `wgpu-scene` alias)
 - Flags: `--wgpu` (explicit realtime 3D hardware offscreen pipeline, combines with `--connect`/`--fps`/`--notcurses`), `--cpu` (forces CPU rasterizer fallback), `--wgpu-demo [N]` (headless benchmark reporting adapter info, frametimes, and FPS).
-- Pipeline: Offscreen 3D scene + real-time compute ASCII shader (`client/src/gpu/`). Default feature: `gpu` (`wgpu`, `bytemuck`, `pollster`, `glam`). Hardware instancing, 8 dynamic point lights, 2x SSAA quadrant sampling G-buffer, Gribb-Hartmann frustum culling, O(1) depth unprojection, and asynchronous staging rings (`RING_SIZE = 2`) for high-throughput batch rendering.
+- Pipeline: Offscreen 3D scene + real-time compute ASCII shader (`client/src/gpu/`). Default feature: `gpu` (`wgpu`, `bytemuck`, `pollster`, `glam`). Hardware instancing, 8 dynamic point lights, 4x SSAA (4x4 / 16 samples per cell) over `Rgba8UnormSrgb` color, `Rgba32Float` normal/depth, and `Rgba8Unorm` entity-metadata targets, Gribb-Hartmann frustum culling, O(1) depth unprojection, and asynchronous staging rings (`RING_SIZE = 2`) for high-throughput batch rendering.
 - Graceful fallback: Automatically falls back to CPU procedural renderer if GPU initialization fails, or can be forced with `--cpu`: `cargo run -p ascii-mmorpg-client -- --cpu`.
 - Verification: keep code warning-free under `cargo clippy --workspace --all-targets -- -D warnings`.
 

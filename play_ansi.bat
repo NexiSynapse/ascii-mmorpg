@@ -3,6 +3,7 @@ setlocal
 cd /d "%~dp0"
 
 title ASCII MMORPG - Interactive Demo (Optimized)
+taskkill /F /IM ascii-mmorpg-client.exe >nul 2>&1
 echo [1/2] Verifying client build and embedded assets...
 cargo build --release -p ascii-mmorpg-client
 if %ERRORLEVEL% NEQ 0 (
