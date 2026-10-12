@@ -4,9 +4,15 @@ Updated: 2026-10-12. This is the resumable engineering record, not a full transc
 
 ## Start here
 
-Workspace: `ASCII-Game/`; application repository: `ascii-mmorpg/`. Read the parent and repository `AGENTS.md` files. Inspect current status/diffs before editing: this workspace contains substantial pre-existing staged and unstaged work. No commit or push was requested for this handoff. Current HEAD and complete worktree inventory were not rechecked during this documentation turn; do not assume historical commit IDs describe current state.
+Workspace: `ASCII-Game/`; application repository: `ascii-mmorpg/`. Read the parent and repository `AGENTS.md` files.
+Repository status: All recent work has been committed and pushed to `origin/main` in commit `5652ab6` per user request. The working tree is clean.
 
-Current slices completed: GPU animation/damping is frame-rate independent and stationary terrain is separated from foliage wind, while deterministic batch/demo rendering remains intact. Server tick documentation now matches the implementation, and the TCP loop has a regression test covering idle timeout and immediate input advancement. The late reviewer did not account for all concurrently added grass code; both slices were verified against the current implementation.
+Current slices completed:
+- Pine tree trunk visibility: elevated lowest canopy cone to Y = 3.60, assigned trunk and root flares dedicated Wood/Timber material (7.0) with vertical bark striations, cleared highway collision corridor (|x| <= 4), and synchronized procedural tree rendering on GPU.
+- Synchronized meadow grass wind sway: low-altitude vertex sway in `vs_main` and wind-leaning ASCII blade characters in `ASCII_POST_WGSL` traveling in sync with wind current phase.
+- Smooth transitions: exponential spring damping for camera and player coordinates, plus ease-out deceleration for humanoid walk phase.
+- GPU animation/damping is frame-rate independent, stationary terrain is separated from foliage wind, while deterministic batch/demo rendering remains intact.
+- Server tick documentation now matches the implementation, and the TCP loop has a regression test covering idle timeout and immediate input advancement.
 
 ## Product goal and reference constraints
 
@@ -34,9 +40,11 @@ These are inherited implementation records, not changes newly made by this docum
 | `client/src/main.rs` | RawModeGuard cleanup on failure; opposite keys cancel; diagonals selected from signed axes; exhaustive 16-state movement test. |
 | `server/src/main.rs` | Drop extra error sender before writer join; send protocol errors to offending client; connect before welcome/snapshots; broadcast helper; 50 ms idle receive timeout advances simulation. |
 | `server/src/lib.rs` | Explicit connected-player snapshot lookup; connect_player; demo mob ID 1000 instead of 2; reject protocol mismatch before tick/message mutation; regression coverage. |
-| `crates/shared/src/collision.rs` | Removed procedural ruin collision not matched by GPU-visible geometry; other obstacle collision remains. |
-| `client/src/gpu/mesh.rs` | Nonzero entity metadata mapping `((id - 1) % 255) + 1`; added crossed-quad grass blades with material 3 and tip sway. |
-| `client/src/gpu/renderer.rs` | Deterministic grass patches with per-patch height/phase; immediate realtime walk settling instead of unstable stop-phase multiplication. |
+| `crates/shared/src/collision.rs` | Filtered highway corridor (`|x| > 4`) so background procedural trees and ruins never obstruct the cobblestone road. |
+| `client/src/gpu/mesh.rs` | Pine tree lowest canopy elevated to Y = 3.60; trunk and root flares assigned material 7.0 (Wood/Timber) with expanded lateral surface roots. |
+| `client/src/gpu/shaders.rs` | Synchronized meadow grass vertex wind current in `vs_main`; dynamic wind-leaning blade glyphs in `ASCII_POST_WGSL`; wood material 7u with vertical bark striations (`|`, `I`, `H`, `T`, `!`, `[`, `]`, `=`, `#`). |
+| `client/src/gpu/renderer.rs` | Exponential spring damping for camera follow (0.28) and player glide (0.38); smooth ease-out walk cycle deceleration (0.65); procedural background tree spawning. |
+| `client/src/term.rs` | Pure-Rust double-buffered terminal engine (`CellMatrix`, TrueColor ANSI parser, span-diffing encoder, Mode 2026 markers). |
 | `client/src/ui.rs` | Fixed-width ASCII inventory/equipment icons instead of wide emoji. |
 
 Tick semantics are now documented consistently: `TICK_HZ = 20` is the target, idle TCP receive timeouts advance one tick per 50 ms, and each input also advances a tick immediately. Sustained input can therefore exceed 20 Hz; this remains a known implementation limitation rather than a claimed fixed-rate scheduler.
@@ -56,12 +64,16 @@ The latest read-only GPU review identified the smallest high-value slice:
 
 - [x] Reconcile `AGENTS.md`, `docs/SOT.md`, ADR 0002, and `server/src/main.rs` about actual tick semantics; add a focused server test for idle and input timing without calling the current loop fixed-rate.
 - [x] Implement frame-rate-independent GPU elapsed time and exponential camera/player damping in `client/src/gpu/renderer.rs`.
+- [x] Fix pine tree trunk visibility: elevated lowest canopy cone to Y = 3.60, assigned Wood/Timber material 7.0 with bark striations, and cleared the highway corridor (|x| <= 4) with synchronized procedural tree rendering on GPU.
+- [x] Animate meadow grass wind sway: low-altitude vertex sway in `vs_main` and dynamic wind-leaning ASCII blade characters in `ASCII_POST_WGSL` traveling in sync with wind current phase.
+- [x] Smooth engine transitions: exponential spring damping for camera and player coordinates, plus ease-out deceleration for humanoid walk phase.
 - [x] Remove low-height meadow displacement from `client/src/gpu/shaders.rs`; preserve elevated foliage wind and glyph-level grass animation.
 - [x] Add/adjust deterministic tests that do not depend on wall-clock time; run GPU demo/manual smoke where available.
 - [x] Inspect the current diff and separate inherited changes from this slice. Do not reset or discard unrelated work.
 - [x] Run the project checks from `ascii-mmorpg/`: `cargo fmt --all -- --check`, `cargo test --workspace --locked`, `cargo run --locked -p ascii-mmorpg-tools -- content`, and `cargo clippy --workspace --all-targets --locked -- -D warnings`.
-- [x] Run a visual GPU check (`cargo run --locked -p ascii-mmorpg-client -- --wgpu-demo 60` or the repository’s current equivalent) and record actual output. If GPU/native dependencies block it, record the exact blocker.
-- [ ] Do not implement reflections or a separate upscaler until a benchmark shows the existing 4× SSAA path is the bottleneck and a minimal design is chosen.
+- [x] Run a visual GPU check (`cargo run --locked -p ascii-mmorpg-client -- --wgpu-demo 60` or `graphics_capture`) and record actual output.
+- [x] Commit and push verified codebase to `origin/main` (`5652ab6`) per user request.
+- [ ] Defer reflections and a separate upscaler until a benchmark shows the existing 4× SSAA path is the bottleneck and a minimal design is chosen.
 
 ## Current slice verification evidence (2026-10-12)
 
