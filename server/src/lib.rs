@@ -74,6 +74,19 @@ impl Simulation {
         self.messages.clear();
     }
 
+    /// Strict-scheduler tick: advances exactly one tick and applies all
+    /// queued commands inside that tick, in receive order. Callers must
+    /// pre-validate protocol versions; mismatched commands must never reach
+    /// here (see `rejected_protocol_command_does_not_advance_tick`).
+    pub fn advance_tick_with(&mut self, commands: Vec<(EntityId, ClientCommand)>) {
+        self.tick = self.tick.saturating_add(1);
+        self.messages.clear();
+        for (player_id, command) in commands {
+            self.ensure_player(player_id);
+            self.apply(player_id, command.command);
+        }
+    }
+
     pub fn fixed_tick_for(
         &mut self,
         player_id: EntityId,
@@ -321,6 +334,18 @@ mod tests {
         }));
         assert!(matches!(event.as_slice(), [ServerEvent::Error(_)]));
         assert_eq!(simulation.tick, 0);
+    }
+
+    #[test]
+    fn queued_tick_applies_all_commands_in_one_tick() {
+        let mut simulation = Simulation::demo();
+        simulation.players.get_mut(&1).unwrap().stats.hp = 10;
+        simulation.advance_tick_with(vec![
+            (1, ClientCommand::new(0, Command::Rest)),
+            (1, ClientCommand::new(0, Command::Rest)),
+        ]);
+        assert_eq!(simulation.tick, 1);
+        assert_eq!(simulation.players.get(&1).unwrap().stats.hp, 12);
     }
 
     #[test]

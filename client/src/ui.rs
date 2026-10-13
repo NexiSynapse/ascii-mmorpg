@@ -8,7 +8,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Gauge, Paragraph, Widget};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Gauge, Paragraph, Widget};
 
 use crate::renderer::WeatherMode;
 
@@ -17,12 +17,36 @@ use crate::renderer::WeatherMode;
 pub enum ActiveModal {
     #[default]
     None,
+    /// Pause overlay (`P`): large-font menu layered over the frozen game.
+    /// Client-side input freeze only; in online mode the server keeps ticking.
+    Paused,
     /// Carried gear, equipped weapons/armor, satchel items, potions, and gold.
     Inventory,
     /// Attributes (STR, DEX, CON, INT, LUCK), level, experience, and active buffs.
     CharacterSheet,
     /// 2D Overworld radar map of the Whispering Forest and landmark positions.
     WorldMap,
+}
+
+/// Arguments for [`RatatuiHud::render_composed_frame`], bundled so the compose
+/// entry point stays under the argument-count lint.
+pub struct ComposedScene<'a> {
+    /// Authoritative snapshot to render.
+    pub world: &'a WorldSnapshot,
+    /// Terminal width in cells.
+    pub width: u16,
+    /// Terminal height in cells.
+    pub height: u16,
+    /// Active weather overlay.
+    pub weather: WeatherMode,
+    /// Renderer label for the top bar (e.g. `"CPU PROCEDURAL"`).
+    pub backend_name: &'a str,
+    /// Open modal, if any (drives the overlay layer).
+    pub modal: ActiveModal,
+    /// Row-major scene cells to blit into the scene partition.
+    pub cells: &'a [crate::partitions::SceneCell],
+    /// Scene grid width in cells.
+    pub cells_width: usize,
 }
 
 /// Comprehensive dark fantasy MMORPG HUD powered by Ratatui.
@@ -104,6 +128,7 @@ impl RatatuiHud {
         self.render_top_bar(&mut buf, main_layout[0], world, weather, backend_name);
         match modal {
             ActiveModal::None => self.render_combat_log(&mut buf, main_layout[1], world),
+            ActiveModal::Paused => self.render_pause_menu(&mut buf, main_layout[1], world),
             ActiveModal::Inventory => self.render_inventory_modal(&mut buf, main_layout[1], world),
             ActiveModal::CharacterSheet => {
                 self.render_character_sheet_modal(&mut buf, main_layout[1], world)
@@ -113,6 +138,211 @@ impl RatatuiHud {
         self.render_controls_legend(&mut buf, main_layout[2], modal != ActiveModal::None);
 
         buffer_to_ansi(&buf)
+    }
+
+    /// Composes the full terminal frame in one Ratatui buffer: HUD top bar,
+    /// game scene (blitted from either renderer), side minimap/threat panel,
+    /// combat-log strip, legend, and — when a modal is open — a centered
+    /// overlay with real occlusion (`Clear`).
+    ///
+    /// Unlike the legacy appended-HUD path, the output always has exactly
+    /// `height` rows, so the differential rasterizer never sees a line-count
+    /// change mid-session (no full-repaint flashes on ConPTY).
+    pub fn render_composed_frame(&mut self, spec: ComposedScene<'_>) -> String {
+        let ComposedScene {
+            world,
+            width,
+            height,
+            weather,
+            backend_name,
+            modal,
+            cells: scene,
+            cells_width: scene_width,
+        } = spec;
+        self.update_messages(&world.messages);
+
+        let area = Rect::new(0, 0, width.max(40), height.max(10));
+        let mut buf = Buffer::empty(area);
+
+        // Top bar (3) -> main scene row (fill) -> log strip (4) -> legend (1).
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(4),
+                Constraint::Length(4),
+                Constraint::Length(1),
+            ])
+            .split(area);
+
+        self.render_top_bar(&mut buf, rows[0], world, weather, backend_name);
+
+        // Main row: scene plus a fixed side panel on wide terminals.
+        let (scene_area, side_area) = if area.width >= 64 {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(20), Constraint::Length(28)])
+                .split(rows[1]);
+            (cols[0], Some(cols[1]))
+        } else {
+            (rows[1], None)
+        };
+        crate::partitions::blit_scene(&mut buf, scene_area, scene, scene_width);
+        if let Some(side) = side_area {
+            self.render_side_panel(&mut buf, side, world);
+        }
+
+        // Log strip: messages on the left, an always-populated status card on
+        // the right, so no row is ever blank filler.
+        let log_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(10), Constraint::Length(30)])
+            .split(rows[2]);
+        let log_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Rgb(80, 75, 70)))
+            .title(Span::styled(
+                " 📜 Log ",
+                Style::default()
+                    .fg(Color::Rgb(210, 175, 110))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner_log = log_block.inner(log_cols[0]);
+        log_block.render(log_cols[0], &mut buf);
+        Paragraph::new(self.log_lines(world, inner_log.height as usize))
+            .render(inner_log, &mut buf);
+
+        let weather_label = match weather {
+            WeatherMode::Rain => "Rain",
+            WeatherMode::Snow => "Snow",
+            WeatherMode::Storm => "Storm",
+        };
+        let backend_short = if backend_name.contains("WGPU") {
+            "WGPU 3D"
+        } else {
+            "CPU"
+        };
+        let status_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Rgb(80, 75, 70)))
+            .title(Span::styled(
+                " Status ",
+                Style::default()
+                    .fg(Color::Rgb(140, 190, 230))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner_status = status_block.inner(log_cols[1]);
+        status_block.render(log_cols[1], &mut buf);
+        Paragraph::new(vec![
+            Line::from(vec![Span::styled(
+                format!(
+                    "POS ({},{}) TICK {}",
+                    world.player.position.x, world.player.position.y, world.tick
+                ),
+                Style::default().fg(Color::Rgb(200, 210, 225)),
+            )]),
+            Line::from(vec![Span::styled(
+                format!("WX {weather_label} {backend_short}"),
+                Style::default().fg(Color::Rgb(140, 190, 230)),
+            )]),
+        ])
+        .render(inner_status, &mut buf);
+
+        self.render_controls_legend(&mut buf, rows[3], modal != ActiveModal::None);
+
+        // Modal overlay: true occlusion over the whole main row.
+        if modal != ActiveModal::None {
+            let overlay = crate::partitions::centered_rect(
+                rows[1],
+                area.width.saturating_sub(8).clamp(40, 72),
+                rows[1].height.max(1),
+            );
+            Clear.render(overlay, &mut buf);
+            match modal {
+                ActiveModal::None => {}
+                ActiveModal::Paused => self.render_pause_menu(&mut buf, overlay, world),
+                ActiveModal::Inventory => self.render_inventory_modal(&mut buf, overlay, world),
+                ActiveModal::CharacterSheet => {
+                    self.render_character_sheet_modal(&mut buf, overlay, world);
+                }
+                ActiveModal::WorldMap => self.render_world_map_modal(&mut buf, overlay, world),
+            }
+        }
+
+        buffer_to_ansi(&buf)
+    }
+
+    /// Renders the side minimap/threat panel: player position, a compact radar,
+    /// live threats, and a static zone reference card, so the panel stays full
+    /// in every game state. Lives inside the HUD (no extra GPU pass), so it
+    /// costs nothing at zoomed-out frame rates.
+    fn render_side_panel(&self, buf: &mut Buffer, area: Rect, world: &WorldSnapshot) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Rgb(80, 75, 70)))
+            .title(Span::styled(
+                " 🗺 Minimap ",
+                Style::default()
+                    .fg(Color::Rgb(140, 240, 160))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(area);
+        block.render(area, buf);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        let mut lines = vec![Line::from(vec![
+            Span::styled("📍 ", Style::default().fg(Color::Rgb(240, 210, 140))),
+            Span::styled(
+                format!("({},{})", world.player.position.x, world.player.position.y),
+                Style::default()
+                    .fg(Color::Rgb(240, 210, 140))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " Whispering Forest",
+                Style::default().fg(Color::Rgb(140, 190, 230)),
+            ),
+        ])];
+
+        // Compact radar: fixed rows, always populated.
+        let radar = [
+            ("  +--------------------+", Color::Rgb(80, 120, 90)),
+            ("  | ♠♠ [==GATE==] ♠ ▲R |", Color::Rgb(100, 160, 110)),
+            ("  | ♠ RUIN   TORCH ♠♠  |", Color::Rgb(160, 150, 120)),
+            ("  | ~~[==BRIDGE==]~~R  |", Color::Rgb(70, 150, 220)),
+            ("  | ♠♠  TORCH   MEADW  |", Color::Rgb(80, 140, 90)),
+            ("  +--------------------+", Color::Rgb(80, 120, 90)),
+        ];
+        for (art, color) in radar {
+            lines.push(Line::from(vec![Span::styled(
+                art,
+                Style::default().fg(color),
+            )]));
+        }
+
+        // Zone reference card: static, always visible below the radar.
+        let zone = ["Ruins(-8,-5) Gate(2,-12)", "River y~8  Torch(-6,2)"];
+        for fact in zone {
+            lines.push(Line::from(vec![Span::styled(
+                fact,
+                Style::default().fg(Color::Rgb(150, 160, 175)),
+            )]));
+        }
+
+        lines.push(Line::from(vec![Span::styled(
+            "🎯 Threats",
+            Style::default()
+                .fg(Color::Rgb(220, 140, 120))
+                .add_modifier(Modifier::BOLD),
+        )]));
+        let room = (inner.height as usize).saturating_sub(lines.len());
+        lines.extend(Self::threat_lines(world, inner.width as usize, false, room));
+        Paragraph::new(lines).render(inner, buf);
     }
 
     /// Renders the top navigation header and health gauge.
@@ -259,7 +489,35 @@ impl RatatuiHud {
         let inner_log = log_block.inner(chunks[0]);
         log_block.render(chunks[0], buf);
 
-        let visible_lines = inner_log.height as usize;
+        Paragraph::new(self.log_lines(world, inner_log.height as usize)).render(inner_log, buf);
+
+        // 2. Target Radar / Nearby Threat Card
+        let threat_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Rgb(80, 75, 70)))
+            .title(Span::styled(
+                " 🎯 Nearby Threats ",
+                Style::default()
+                    .fg(Color::Rgb(220, 140, 120))
+                    .add_modifier(Modifier::BOLD),
+            ));
+
+        let inner_threat = threat_block.inner(chunks[1]);
+        threat_block.render(chunks[1], buf);
+
+        Paragraph::new(Self::threat_lines(
+            world,
+            inner_threat.width as usize,
+            inner_threat.height >= 5,
+            inner_threat.height as usize,
+        ))
+        .render(inner_threat, buf);
+    }
+
+    /// Last `visible` log lines with semantic event coloring. Shared by the
+    /// combat-log widget and the composed-frame log strip.
+    fn log_lines(&self, world: &WorldSnapshot, visible: usize) -> Vec<Line<'static>> {
         let mut styled_lines = Vec::new();
 
         let msgs: Vec<&String> = if !self.log_history.is_empty() {
@@ -268,7 +526,7 @@ impl RatatuiHud {
             world.messages.iter().collect()
         };
 
-        let start_idx = msgs.len().saturating_sub(visible_lines);
+        let start_idx = msgs.len().saturating_sub(visible);
         for &msg in &msgs[start_idx..] {
             let (prefix, color) = if msg.contains("hit") || msg.contains("damage") {
                 ("⚔ ", Color::Rgb(255, 130, 80))
@@ -287,31 +545,29 @@ impl RatatuiHud {
                     prefix,
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(msg.as_str(), Style::default().fg(color)),
+                Span::styled(msg.clone(), Style::default().fg(color)),
             ]));
         }
 
-        Paragraph::new(styled_lines).render(inner_log, buf);
+        styled_lines
+    }
 
-        // 2. Target Radar / Nearby Threat Card
-        let threat_block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Rgb(80, 75, 70)))
-            .title(Span::styled(
-                " 🎯 Nearby Threats ",
-                Style::default()
-                    .fg(Color::Rgb(220, 140, 120))
-                    .add_modifier(Modifier::BOLD),
-            ));
-
-        let inner_threat = threat_block.inner(chunks[1]);
-        threat_block.render(chunks[1], buf);
-
+    /// Threat-card lines shared by the combat-log widget and the composed-frame
+    /// side panel. `inner_width` bounds the enemy HP bar, `portraits` gates the
+    /// ASCII target portraits, and at most `max_lines` are returned.
+    fn threat_lines(
+        world: &WorldSnapshot,
+        inner_width: usize,
+        portraits: bool,
+        max_lines: usize,
+    ) -> Vec<Line<'static>> {
         let mut threat_spans = Vec::new();
         let mut found_monster = false;
 
         for e in &world.entities {
+            if max_lines > 0 && threat_spans.len() >= max_lines {
+                break;
+            }
             if e.kind == EntityKind::Monster && e.stats.is_alive() {
                 let dx = e.position.x - world.player.position.x;
                 let dy = e.position.y - world.player.position.y;
@@ -328,7 +584,7 @@ impl RatatuiHud {
                 ]));
 
                 // Step 6: Target Portrait in UI for nearby monsters
-                if inner_threat.height >= 5 && !found_monster {
+                if portraits && !found_monster {
                     if e.name.contains("Skeleton") {
                         threat_spans.push(Line::from(vec![
                             Span::styled(
@@ -388,7 +644,7 @@ impl RatatuiHud {
                     0.0
                 };
 
-                let hp_bar_len = inner_threat.width.saturating_sub(12) as usize;
+                let hp_bar_len = inner_width.saturating_sub(12);
                 let filled = (enemy_ratio * hp_bar_len as f64).round() as usize;
                 let empty = hp_bar_len.saturating_sub(filled);
 
@@ -409,24 +665,158 @@ impl RatatuiHud {
                 ]));
 
                 found_monster = true;
-                if threat_spans.len() >= inner_threat.height as usize {
-                    break;
-                }
             }
         }
 
-        if !found_monster {
+        if !found_monster && max_lines > 0 {
             threat_spans.push(Line::from(vec![Span::styled(
                 "✨ Area peaceful.",
                 Style::default().fg(Color::Rgb(120, 180, 140)),
             )]));
-            threat_spans.push(Line::from(vec![Span::styled(
-                "No hostile creatures nearby.",
-                Style::default().fg(Color::Rgb(120, 120, 120)),
-            )]));
+            if threat_spans.len() < max_lines {
+                threat_spans.push(Line::from(vec![Span::styled(
+                    "No hostile creatures nearby.",
+                    Style::default().fg(Color::Rgb(120, 120, 120)),
+                )]));
+            }
         }
 
-        Paragraph::new(threat_spans).render(inner_threat, buf);
+        threat_spans.truncate(max_lines);
+        threat_spans
+    }
+
+    /// Renders the pause overlay: a large-font menu partition layered over the
+    /// frozen game. Authored with heavy block glyphs and wide padding (the
+    /// `Large` partition profile) so options read at a glance, unlike the
+    /// dense game grid which optimizes for scenery detail.
+    fn render_pause_menu(&self, buf: &mut Buffer, area: Rect, world: &WorldSnapshot) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Double)
+            .border_style(Style::default().fg(Color::Rgb(255, 210, 80)))
+            .title(Span::styled(
+                " █▓░  PAUSED  ░▓█ ",
+                Style::default()
+                    .fg(Color::Rgb(255, 215, 115))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(area);
+        block.render(area, buf);
+
+        let paused_layout = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(inner);
+
+        let menu_lines = vec![
+            Line::from(vec![Span::styled(
+                "  █  GAME PAUSED  █",
+                Style::default()
+                    .fg(Color::Rgb(255, 220, 120))
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![Span::styled(
+                "  ━━━━━━━━━━━━━━━━━━━",
+                Style::default().fg(Color::Rgb(160, 140, 90)),
+            )]),
+            Line::from(vec![
+                Span::styled(
+                    "  [P] ",
+                    Style::default()
+                        .fg(Color::Rgb(255, 210, 80))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "▓▓ Resume play",
+                    Style::default()
+                        .fg(Color::Rgb(140, 240, 160))
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  [I] ",
+                    Style::default()
+                        .fg(Color::Rgb(240, 200, 100))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "██ Inventory & gear",
+                    Style::default().fg(Color::Rgb(225, 232, 240)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  [C] ",
+                    Style::default()
+                        .fg(Color::Rgb(140, 190, 255))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "██ Character sheet",
+                    Style::default().fg(Color::Rgb(225, 232, 240)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  [M] ",
+                    Style::default()
+                        .fg(Color::Rgb(120, 220, 140))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "██ Overworld map",
+                    Style::default().fg(Color::Rgb(225, 232, 240)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  [Q] ",
+                    Style::default()
+                        .fg(Color::Rgb(220, 100, 100))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "▓▓ Quit to desktop",
+                    Style::default().fg(Color::Rgb(230, 150, 150)),
+                ),
+            ]),
+        ];
+        Paragraph::new(menu_lines).render(paused_layout[0], buf);
+
+        let p = &world.player;
+        let help_lines = vec![
+            Line::from(vec![Span::styled(
+                "▓ Keybinds & settings",
+                Style::default()
+                    .fg(Color::Rgb(220, 190, 120))
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![Span::styled(
+                format!(
+                    "  ██ HP {}/{}  ATK {}  DEF {}",
+                    p.stats.hp, p.stats.max_hp, p.stats.attack, p.stats.defense
+                ),
+                Style::default().fg(Color::Rgb(200, 210, 225)),
+            )]),
+            Line::from(vec![Span::styled(
+                "  ░░ WASD / arrows: move",
+                Style::default().fg(Color::Rgb(180, 180, 180)),
+            )]),
+            Line::from(vec![Span::styled(
+                "  ░░ F attack   R rest",
+                Style::default().fg(Color::Rgb(180, 180, 180)),
+            )]),
+            Line::from(vec![Span::styled(
+                "  ░░ V/T weather   Esc resume",
+                Style::default().fg(Color::Rgb(180, 180, 180)),
+            )]),
+            Line::from(vec![Span::styled(
+                "  ░░ Online: server keeps ticking",
+                Style::default().fg(Color::Rgb(140, 140, 140)),
+            )]),
+        ];
+        Paragraph::new(help_lines).render(paused_layout[1], buf);
     }
 
     /// Renders the Inventory modal window.
@@ -779,42 +1169,40 @@ impl RatatuiHud {
         let legend = if modal_open {
             Line::from(vec![
                 Span::styled(
-                    " [Esc/Key] ",
+                    " [Esc] ",
                     Style::default()
                         .fg(Color::Rgb(255, 210, 80))
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    "Close Modal  ",
-                    Style::default().fg(Color::Rgb(180, 180, 180)),
-                ),
+                Span::styled("Close ", Style::default().fg(Color::Rgb(180, 180, 180))),
                 Span::styled(
                     "[I] ",
                     Style::default()
                         .fg(Color::Rgb(240, 200, 100))
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    "Inventory  ",
-                    Style::default().fg(Color::Rgb(160, 160, 160)),
-                ),
+                Span::styled("Inv ", Style::default().fg(Color::Rgb(160, 160, 160))),
                 Span::styled(
                     "[C] ",
                     Style::default()
                         .fg(Color::Rgb(140, 190, 255))
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    "Character  ",
-                    Style::default().fg(Color::Rgb(160, 160, 160)),
-                ),
+                Span::styled("Char ", Style::default().fg(Color::Rgb(160, 160, 160))),
                 Span::styled(
                     "[M] ",
                     Style::default()
                         .fg(Color::Rgb(120, 220, 140))
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("Map  ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled("Map ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled(
+                    "[P] ",
+                    Style::default()
+                        .fg(Color::Rgb(255, 210, 80))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Pause ", Style::default().fg(Color::Rgb(160, 160, 160))),
                 Span::styled(
                     "[Q] ",
                     Style::default()
@@ -831,51 +1219,58 @@ impl RatatuiHud {
                         .fg(Color::Rgb(240, 200, 100))
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("Move  ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled("Move ", Style::default().fg(Color::Rgb(160, 160, 160))),
                 Span::styled(
                     "[F] ",
                     Style::default()
                         .fg(Color::Rgb(255, 110, 110))
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("Attack  ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled("Atk ", Style::default().fg(Color::Rgb(160, 160, 160))),
                 Span::styled(
                     "[R] ",
                     Style::default()
                         .fg(Color::Rgb(120, 220, 140))
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("Rest  ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled("Rest ", Style::default().fg(Color::Rgb(160, 160, 160))),
                 Span::styled(
                     "[I] ",
                     Style::default()
                         .fg(Color::Rgb(240, 200, 100))
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("Inv  ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled("Inv ", Style::default().fg(Color::Rgb(160, 160, 160))),
                 Span::styled(
                     "[C] ",
                     Style::default()
                         .fg(Color::Rgb(140, 190, 255))
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("Chars  ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled("Char ", Style::default().fg(Color::Rgb(160, 160, 160))),
                 Span::styled(
                     "[M] ",
                     Style::default()
                         .fg(Color::Rgb(120, 220, 140))
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("Map  ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled("Map ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled(
+                    "[P] ",
+                    Style::default()
+                        .fg(Color::Rgb(255, 210, 80))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Pause ", Style::default().fg(Color::Rgb(160, 160, 160))),
                 Span::styled(
                     "[V/T] ",
                     Style::default()
                         .fg(Color::Rgb(120, 190, 255))
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("Weather  ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled("Wx ", Style::default().fg(Color::Rgb(160, 160, 160))),
                 Span::styled(
-                    "[Q/Esc] ",
+                    "[Q] ",
                     Style::default()
                         .fg(Color::Rgb(220, 100, 100))
                         .add_modifier(Modifier::BOLD),
@@ -1081,5 +1476,106 @@ mod tests {
         assert!(map_rendered.contains("Whispering Forest"));
         assert!(map_rendered.contains("Position:"));
         assert!(map_rendered.contains("GATE"));
+    }
+
+    #[test]
+    fn test_pause_menu_renders_large_partition_options() {
+        let mut hud = RatatuiHud::new();
+        let world = sample_world();
+        let rendered = hud.render_hud_overlay_with_modal(
+            &world,
+            80,
+            14,
+            WeatherMode::Rain,
+            "WGPU 3D",
+            ActiveModal::Paused,
+        );
+        assert!(rendered.contains("PAUSED"));
+        assert!(rendered.contains("Resume play"));
+        assert!(rendered.contains("Inventory & gear"));
+        assert!(rendered.contains("Character sheet"));
+        assert!(rendered.contains("Overworld map"));
+        assert!(rendered.contains("Quit to desktop"));
+        assert!(rendered.contains("Keybinds"));
+    }
+
+    #[test]
+    fn test_legends_advertise_pause_key() {
+        let mut hud = RatatuiHud::new();
+        let world = sample_world();
+        // Playing legend.
+        let playing = hud.render_hud_overlay(&world, 80, 12, WeatherMode::Rain, "WGPU 3D");
+        assert!(playing.contains("Pause"));
+        // Modal legend.
+        let modal = hud.render_hud_overlay_with_modal(
+            &world,
+            80,
+            12,
+            WeatherMode::Rain,
+            "WGPU 3D",
+            ActiveModal::Inventory,
+        );
+        assert!(modal.contains("Pause"));
+    }
+
+    #[test]
+    fn test_composed_frame_partitions_and_overlay_occlusion() {
+        use crate::partitions::SceneCell;
+        let mut hud = RatatuiHud::new();
+        let world = sample_world();
+        let scene = vec![SceneCell::blank(); 80 * 30];
+
+        let playing = hud.render_composed_frame(ComposedScene {
+            world: &world,
+            width: 80,
+            height: 30,
+            weather: WeatherMode::Rain,
+            backend_name: "WGPU 3D",
+            modal: ActiveModal::None,
+            cells: &scene,
+            cells_width: 80,
+        });
+        assert_eq!(playing.lines().count(), 30);
+        assert!(playing.contains("Whispering Forest"));
+        assert!(playing.contains("Minimap"));
+        assert!(playing.contains("GATE"));
+
+        let paused = hud.render_composed_frame(ComposedScene {
+            world: &world,
+            width: 80,
+            height: 30,
+            weather: WeatherMode::Rain,
+            backend_name: "WGPU 3D",
+            modal: ActiveModal::Paused,
+            cells: &scene,
+            cells_width: 80,
+        });
+        assert_eq!(paused.lines().count(), 30);
+        assert!(paused.contains("PAUSED"));
+        assert!(
+            !paused.contains("Minimap"),
+            "overlay must occlude the side panel"
+        );
+    }
+
+    #[test]
+    fn test_composed_frame_narrow_terminal_has_no_side_panel() {
+        use crate::partitions::SceneCell;
+        let mut hud = RatatuiHud::new();
+        let world = sample_world();
+        let scene = vec![SceneCell::blank(); 50 * 30];
+        let rendered = hud.render_composed_frame(ComposedScene {
+            world: &world,
+            width: 50,
+            height: 30,
+            weather: WeatherMode::Rain,
+            backend_name: "WGPU 3D",
+            modal: ActiveModal::None,
+            cells: &scene,
+            cells_width: 50,
+        });
+        assert_eq!(rendered.lines().count(), 30);
+        assert!(!rendered.contains("Minimap"));
+        assert!(rendered.contains("Whispering Forest"));
     }
 }

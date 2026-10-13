@@ -78,70 +78,67 @@ enum Ink {
 }
 
 impl Ink {
-    const fn ansi(self) -> &'static str {
+    /// TrueColor table for composed-frame blitting.
+    /// Former `38;5;N` palette entries use standard xterm RGB approximations.
+    const fn rgb(self) -> (u8, u8, u8) {
         match self {
-            Self::Background => "\x1b[38;2;12;15;22m", // Deep midnight dark fantasy void
-            Self::Stone => "\x1b[38;5;101m",
-            Self::StoneDark => "\x1b[38;2;65;60;55m", // Shadowed stone face
-            Self::StoneLight => "\x1b[38;2;175;165;150m", // Sunlit stone highlight
-            Self::Moss => "\x1b[38;5;65m",
-            Self::Foliage => "\x1b[38;5;22m",
-            Self::Rain => "\x1b[38;5;60m",
-            Self::RainBright => "\x1b[38;5;116m",
-            Self::Player => "\x1b[38;5;117m",
-            Self::Monster => "\x1b[38;5;203m",
-            Self::Npc => "\x1b[38;5;221m",
-            Self::Item => "\x1b[38;5;220m",
-            Self::Spell => "\x1b[38;5;153m",
-            Self::Torch => "\x1b[38;5;220m",
-            Self::Text => "\x1b[38;5;252m",
-            Self::Muted => "\x1b[38;5;245m",
-            Self::KnightSteel => "\x1b[38;2;225;232;240m", // Polished steel plate
-            Self::KnightGold => "\x1b[38;2;255;210;75m",   // Golden helm crest / horns
-            Self::KnightCape => "\x1b[38;2;195;35;48m",    // Crimson battle cape
-            Self::KnightVisor => "\x1b[38;2;140;180;220m", // Eye slit steel blue
-            Self::DropShadow => "\x1b[38;2;16;20;28m",     // 3D ground drop shadow
-            Self::CobbleRoad => "\x1b[38;2;125;115;105m",  // Warm ancient cobblestone (dimmed)
-            Self::CobbleGlow => "\x1b[38;2;200;160;95m",   // Torchlit cobblestone (softened)
-            Self::CobbleBorder => "\x1b[38;2;65;60;55m",   // Cobblestone curb (dimmed)
-            Self::GrassMeadow => "\x1b[38;2;32;75;55m",    // Deep emerald grass (darker)
-            Self::GrassDark => "\x1b[38;2;22;50;38m",      // Shadowed grass
-            Self::GrassTorch => "\x1b[38;2;85;155;115m",   // Torchlit grass (softer)
-            Self::PineTree => "\x1b[38;2;35;80;65m",       // Frosty pine needles (darker)
-            Self::PineCanopy => "\x1b[38;2;25;60;48m",     // Deep pine shadow
-            Self::TreeShadow => "\x1b[38;2;12;20;16m",     // Tree base drop shadow
-            Self::TorchFlame => "\x1b[38;2;255;95;25m",    // Blazing orange flame
-            Self::TorchGlow => "\x1b[38;2;200;145;45m",    // Radiant amber halo (dimmed)
-            Self::Lightning => "\x1b[38;2;76;201;240m",    // Electric cyan lightning bolt
-            Self::LightningWhite => "\x1b[38;2;255;255;255m", // White lightning core
-            Self::BannerRed => "\x1b[38;2;165;25;38m",     // Crimson war banner (darker)
-            Self::WoodPost => "\x1b[38;2;135;85;50m",      // Rich timber post / bark
-            Self::FloatingDamage => "\x1b[38;2;255;220;50m", // Popping combat numbers
-            // Monster depth palette - mossy green/brown organic tones
-            Self::MossBody => "\x1b[38;2;88;130;72m", // Mossy green body mass
-            Self::MossEye => "\x1b[38;2;255;200;60m", // Glowing amber eyes
-            Self::MossHide => "\x1b[38;2;55;85;48m",  // Dark moss hide shadow
-            // Skeleton bone palette - pale sun-bleached undead
-            Self::BoneLight => "\x1b[38;2;216;212;200m", // Lit bone ridge
-            Self::Bone => "\x1b[38;2;168;164;150m",      // Weathered bone mass
-            Self::BoneDark => "\x1b[38;2;110;106;96m",   // Shadowed bone core
-            Self::BoneEye => "\x1b[38;2;255;233;168m",   // Hollow socket glint
-            // NPC depth palette
-            Self::NpcRobe => "\x1b[38;2;160;140;100m", // Worn linen robe
-            Self::NpcSkin => "\x1b[38;2;220;185;150m", // Warm skin tone
-            // Ruin depth palette
-            Self::RuinWall => "\x1b[38;2;110;100;88m", // Weathered ruin wall
-            Self::RuinWindow => "\x1b[38;2;45;55;80m", // Dark interior through window
-            Self::Snow => "\x1b[38;2;230;245;255m",    // Crisp winter snowflake
-            Self::SnowGlow => "\x1b[38;2;255;255;255m", // Crystalline specular highlight
-            Self::SnowSoft => "\x1b[38;2;160;195;225m", // Twilight soft snow flurry
-            Self::Splash => "\x1b[38;2;180;225;255m",  // Impact water spray
-            // Living Water Surface & Bridge Palette
-            Self::WaterDeep => "\x1b[38;2;24;62;120m", // Deep sapphire/azure current
-            Self::WaterShallow => "\x1b[38;2;48;128;185m", // Clear cerulean shallows
-            Self::WaterRipple => "\x1b[38;2;85;188;225m", // Cresting aquamarine wave ripple
-            Self::WaterShimmer => "\x1b[38;2;215;242;255m", // Sparkling specular glint
-            Self::BridgeWood => "\x1b[38;2;130;85;48m", // Weathered timber bridge plank
+            Self::Background => (12, 15, 22),
+            Self::Stone => (135, 135, 95),
+            Self::StoneDark => (65, 60, 55),
+            Self::StoneLight => (175, 165, 150),
+            Self::Moss => (95, 135, 95),
+            Self::Foliage => (0, 95, 0),
+            Self::Rain => (95, 95, 135),
+            Self::RainBright => (135, 215, 215),
+            Self::Player => (135, 215, 255),
+            Self::Monster => (255, 95, 95),
+            Self::Npc => (255, 215, 95),
+            Self::Item => (255, 215, 0),
+            Self::Spell => (175, 215, 255),
+            Self::Torch => (255, 215, 0),
+            Self::Text => (208, 208, 208),
+            Self::Muted => (138, 138, 138),
+            Self::KnightSteel => (225, 232, 240),
+            Self::KnightGold => (255, 210, 75),
+            Self::KnightCape => (195, 35, 48),
+            Self::KnightVisor => (140, 180, 220),
+            Self::DropShadow => (16, 20, 28),
+            Self::CobbleRoad => (125, 115, 105),
+            Self::CobbleGlow => (200, 160, 95),
+            Self::CobbleBorder => (65, 60, 55),
+            Self::GrassMeadow => (32, 75, 55),
+            Self::GrassDark => (22, 50, 38),
+            Self::GrassTorch => (85, 155, 115),
+            Self::PineTree => (35, 80, 65),
+            Self::PineCanopy => (25, 60, 48),
+            Self::TreeShadow => (12, 20, 16),
+            Self::TorchFlame => (255, 95, 25),
+            Self::TorchGlow => (200, 145, 45),
+            Self::Lightning => (76, 201, 240),
+            Self::LightningWhite => (255, 255, 255),
+            Self::BannerRed => (165, 25, 38),
+            Self::WoodPost => (135, 85, 50),
+            Self::FloatingDamage => (255, 220, 50),
+            Self::MossBody => (88, 130, 72),
+            Self::MossEye => (255, 200, 60),
+            Self::MossHide => (55, 85, 48),
+            Self::BoneLight => (216, 212, 200),
+            Self::Bone => (168, 164, 150),
+            Self::BoneDark => (110, 106, 96),
+            Self::BoneEye => (255, 233, 168),
+            Self::NpcRobe => (160, 140, 100),
+            Self::NpcSkin => (220, 185, 150),
+            Self::RuinWall => (110, 100, 88),
+            Self::RuinWindow => (45, 55, 80),
+            Self::Snow => (230, 245, 255),
+            Self::SnowGlow => (255, 255, 255),
+            Self::SnowSoft => (160, 195, 225),
+            Self::Splash => (180, 225, 255),
+            Self::WaterDeep => (24, 62, 120),
+            Self::WaterShallow => (48, 128, 185),
+            Self::WaterRipple => (85, 188, 225),
+            Self::WaterShimmer => (215, 242, 255),
+            Self::BridgeWood => (130, 85, 48),
         }
     }
 }
@@ -201,21 +198,17 @@ impl Canvas {
         }
     }
 
-    fn rows(&self) -> String {
-        let mut output = String::new();
-        for row in self.cells.chunks(self.width) {
-            let mut ink = None;
-            for cell in row {
-                if Some(cell.ink) != ink {
-                    output.push_str(cell.ink.ansi());
-                    ink = Some(cell.ink);
-                }
-                output.push(cell.glyph);
-            }
-            output.push_str("\x1b[0m\x1b[K\n");
-        }
-        output.pop();
-        output
+    /// Lowers the canvas to shared scene cells for composed-frame blitting.
+    /// Background stays the terminal default (`bg: None`).
+    fn scene_cells(&self) -> Vec<crate::partitions::SceneCell> {
+        self.cells
+            .iter()
+            .map(|cell| crate::partitions::SceneCell {
+                glyph: cell.glyph,
+                fg: cell.ink.rgb(),
+                bg: None,
+            })
+            .collect()
     }
 }
 
@@ -329,25 +322,24 @@ impl Renderer {
     }
 
     pub fn render_frame(&self, world: &WorldSnapshot, frame: u64) -> String {
+        // Composed frame: the scene blits into one shared Ratatui buffer with
+        // the HUD top bar, side panel, log strip, legend, and any modal
+        // overlay (real occlusion via `Clear`), so the output always fits the
+        // terminal exactly and dirty-line diffing never sees a line-count
+        // change mid-session.
         let canvas = self.render_canvas(world, frame);
-        let mut output = canvas.rows();
+        let scene = canvas.scene_cells();
         let mut hud = crate::ui::RatatuiHud::new();
-        let hud_height = if self.active_modal != crate::ui::ActiveModal::None {
-            12
-        } else {
-            7
-        };
-        let hud_overlay = hud.render_hud_overlay_with_modal(
+        hud.render_composed_frame(crate::ui::ComposedScene {
             world,
-            self.width.max(40) as u16,
-            hud_height,
-            self.weather,
-            "CPU PROCEDURAL",
-            self.active_modal,
-        );
-        output.push('\n');
-        output.push_str(&hud_overlay);
-        output
+            width: self.width.max(20) as u16,
+            height: self.height.max(10) as u16,
+            weather: self.weather,
+            backend_name: "CPU PROCEDURAL",
+            modal: self.active_modal,
+            cells: &scene,
+            cells_width: self.width.max(1) as usize,
+        })
     }
 
     /// Full scene pipeline without the text footer, so tests can inspect cells.
@@ -1351,15 +1343,18 @@ mod tests {
 
     #[test]
     fn scene_contains_entity_metadata_visuals_labels_bars_and_effect() {
-        let renderer = Renderer::new(32, 14).with_weather(WeatherMode::Rain);
+        // 100 cols: the side panel takes 28, leaving a 72-col scene slice so
+        // the mossling HP bar (canvas cols ~45-55) is not clipped.
+        let renderer = Renderer::new(100, 30).with_weather(WeatherMode::Rain);
         let frame = renderer.render_frame(&scene_world(), 4);
         assert!(frame.contains("Ranger"));
         assert!(frame.contains("Mossling"));
         assert!(frame.contains("[########]"));
         assert!(frame.contains("[#####---]"));
-        assert!(frame.contains("\x1b[38;5;153m"));
-        assert!(frame.contains("\x1b[38;5;203m"));
-        assert!(frame.contains("\x1b[38;5;117m"));
+        // Composed frames encode scene inks as TrueColor (xterm palette RGB).
+        assert!(frame.contains("\x1b[38;2;175;215;255m"));
+        assert!(frame.contains("\x1b[38;2;255;95;95m"));
+        assert!(frame.contains("\x1b[38;2;135;215;255m"));
         assert!(frame.contains('/'));
     }
 
@@ -1383,7 +1378,7 @@ mod tests {
 
     #[test]
     fn animation_phase_changes_frame_without_changing_snapshot() {
-        let renderer = Renderer::new(32, 14).with_weather(WeatherMode::Rain);
+        let renderer = Renderer::new(80, 30).with_weather(WeatherMode::Rain);
         let world = scene_world();
         let first = renderer.render_frame(&world, 0);
         let second = renderer.render_frame(&world, 1);
@@ -1433,8 +1428,10 @@ mod tests {
                 .expect("actor glyph should be visible")
         };
         assert_eq!(anchor(&before, '@'), anchor(&after, '@'));
-        assert_eq!(anchor(&before, 'm'), (30, 10));
-        assert_eq!(anchor(&after, 'm'), (29, 10));
+        // Composed frames put a 3-row HUD top bar above the scene, so canvas
+        // row 10 lands on frame row 13.
+        assert_eq!(anchor(&before, 'm'), (30, 13));
+        assert_eq!(anchor(&after, 'm'), (29, 13));
         assert_eq!(world.entities[0].position, Point { x: 18, y: 7 });
     }
 

@@ -8,11 +8,13 @@ pub mod assets;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod network;
+pub mod partitions;
 pub mod renderer;
 pub mod term;
 #[cfg(any(feature = "notcurses", test))]
 mod terminal_colors;
 pub mod ui;
+pub use partitions::{FontProfile, GameState, Partitions};
 pub use renderer::{Renderer, WeatherMode};
 pub use term::{
     Cell, CellMatrix, EncoderStrategy, FrameStats, SpanDiffEncoder, WinTimerPrecisionGuard,
@@ -34,6 +36,18 @@ pub trait SceneRenderer {
             self.set_active_modal(ActiveModal::None);
         } else {
             self.set_active_modal(modal);
+        }
+    }
+    fn is_paused(&self) -> bool {
+        self.active_modal() == ActiveModal::Paused
+    }
+    /// Toggles the pause overlay (`P`). Any other open modal is replaced by
+    /// pause; toggling while paused resumes play.
+    fn toggle_pause(&mut self) {
+        if self.is_paused() {
+            self.set_active_modal(ActiveModal::None);
+        } else {
+            self.set_active_modal(ActiveModal::Paused);
         }
     }
     fn render(&mut self, world: &WorldSnapshot) -> String {
@@ -148,7 +162,10 @@ pub struct PlainTerminal {
     width: u16,
     height: u16,
     buffer: Vec<u8>,
-    prev_lines: Vec<String>,
+    /// FNV-1a hash per previously drawn line. Hash diffing avoids cloning the
+    /// whole frame (~250 KB at zoomed-out grids) every frame; a 64-bit hash
+    /// makes a missed update effectively impossible.
+    prev_hashes: Vec<u64>,
     pub encoder: term::SpanDiffEncoder,
     _timer_guard: term::WinTimerPrecisionGuard,
 }
@@ -160,7 +177,7 @@ impl PlainTerminal {
             width,
             height,
             buffer: Vec::with_capacity((width as usize) * (height as usize) * 4),
-            prev_lines: Vec::new(),
+            prev_hashes: Vec::new(),
             encoder: term::SpanDiffEncoder::new(width, height),
             _timer_guard: term::WinTimerPrecisionGuard::new(),
         }
@@ -171,7 +188,7 @@ impl PlainTerminal {
             if width != self.width || height != self.height {
                 self.width = width;
                 self.height = height;
-                self.prev_lines.clear();
+                self.prev_hashes.clear();
                 self.encoder.resize(width, height);
             }
         }
@@ -198,7 +215,7 @@ impl PlainTerminal {
             .collect();
 
         // If line count changed or initial frame, perform full redraw with clean clear
-        if self.prev_lines.len() != current_lines.len() {
+        if self.prev_hashes.len() != current_lines.len() {
             self.buffer.clear();
             self.buffer.extend_from_slice(b"\x1b[?25l\x1b[H");
             for (i, line) in current_lines.iter().enumerate() {
@@ -212,17 +229,24 @@ impl PlainTerminal {
             }
             self.buffer.extend_from_slice(b"\x1b[J");
             writer.write_all(&self.buffer)?;
-            self.prev_lines = current_lines.iter().map(|&s| s.to_string()).collect();
+            self.prev_hashes = current_lines.iter().map(|line| fnv1a_hash(line)).collect();
             return Ok(());
         }
 
         // Differential row-level rendering: only transmit dirty rows!
+        // Lines are compared by hash (single pass, no per-frame clone).
+        let current_hashes: Vec<u64> = current_lines.iter().map(|line| fnv1a_hash(line)).collect();
         self.buffer.clear();
         let mut dirty_count = 0;
         let mut last_written_line: Option<usize> = None;
 
-        for (i, (&curr, prev)) in current_lines.iter().zip(self.prev_lines.iter()).enumerate() {
-            if curr != prev {
+        for (i, ((&curr, &hash), prev_hash)) in current_lines
+            .iter()
+            .zip(current_hashes.iter())
+            .zip(self.prev_hashes.iter())
+            .enumerate()
+        {
+            if hash != *prev_hash {
                 dirty_count += 1;
                 if last_written_line == Some(i.saturating_sub(1)) && i > 0 {
                     // Contiguous dirty rows: emit CRLF directly (0 coordinate jump overhead)
@@ -242,11 +266,21 @@ impl PlainTerminal {
 
         if dirty_count > 0 {
             writer.write_all(&self.buffer)?;
-            self.prev_lines = current_lines.iter().map(|&s| s.to_string()).collect();
+            self.prev_hashes = current_hashes;
         }
 
         Ok(())
     }
+}
+
+/// FNV-1a 64-bit hash for dirty-line diffing. Single pass, no allocation.
+fn fnv1a_hash(line: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in line.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 impl Default for PlainTerminal {
@@ -534,11 +568,13 @@ mod tests {
 
     #[test]
     fn renderer_places_player_and_status() {
-        let frame = Renderer::new(5, 5)
+        let frame = Renderer::new(80, 30)
             .with_weather(WeatherMode::Rain)
             .render(&sample_world());
-        assert!(frame.lines().nth(2).unwrap().contains('@'));
         assert!(frame.contains("HP 20/20"));
+        // Player glyph lives in the scene partition below the 3-row top bar.
+        let scene_hit = frame.lines().skip(3).any(|line| line.contains('@'));
+        assert!(scene_hit, "scene partition must show the player");
     }
 
     #[test]
@@ -623,5 +659,19 @@ mod tests {
         apply_local_command(&mut world, &command);
         assert_eq!(world.player.position, Point { x: -5, y: 2 });
         assert!(world.messages[0].contains("Blocked by Timber Lantern Post"));
+    }
+
+    #[test]
+    fn pause_toggle_flips_overlay_and_renders_pause_menu() {
+        let mut renderer = Renderer::new(80, 30);
+        assert!(!renderer.is_paused());
+        renderer.toggle_pause();
+        assert!(renderer.is_paused());
+        assert_eq!(renderer.active_modal(), ActiveModal::Paused);
+        let frame = renderer.render_frame(&sample_world(), 0);
+        assert!(frame.contains("PAUSED"), "paused frame must show the menu");
+        assert!(frame.contains("Resume play"));
+        renderer.toggle_pause();
+        assert!(!renderer.is_paused());
     }
 }

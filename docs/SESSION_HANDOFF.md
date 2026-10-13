@@ -73,7 +73,13 @@ The latest read-only GPU review identified the smallest high-value slice:
 - [x] Run the project checks from `ascii-mmorpg/`: `cargo fmt --all -- --check`, `cargo test --workspace --locked`, `cargo run --locked -p ascii-mmorpg-tools -- content`, and `cargo clippy --workspace --all-targets --locked -- -D warnings`.
 - [x] Run a visual GPU check (`cargo run --locked -p ascii-mmorpg-client -- --wgpu-demo 60` or `graphics_capture`) and record actual output.
 - [x] Commit and push verified codebase to `origin/main` (`5652ab6`) per user request.
-- [ ] Defer reflections and a separate upscaler until a benchmark shows the existing 4× SSAA path is the bottleneck and a minimal design is chosen.
+- [x] Implement strict queued-command 20 Hz scheduler: bounded queue (`MAX_PENDING = 512`), one tick per 50 ms idle or loaded, burst coalescing, immediate protocol-error rejection; `Simulation::advance_tick_with` + updated TCP loop tests.
+- [x] Tune water/specular lighting: tighter water specular lobe (32.0/0.9), deeper base, sun 0.4→0.35 / point 0.5→0.45, fog 14/38→16/42.
+- [x] Add cheap fresnel sky reflection on water as a no-new-texture stand-in; full planar/screen-space reflection pass stays deferred.
+- [x] Add edge-adaptive micro-contrast sharpen in compute pass (upscaler-lite); full FSR/temporal stays deferred pending profiling.
+- [x] Expand meadow grass density (~2x blades, ±18/±14, seed%2); reduce if batch timing regresses.
+- [x] Zoom perf + default-zoom legibility: capped GPU render grid (`MAX_RENDER_CELLS = 6144`, aspect-preserving, CPU nearest-neighbor upscale), adaptive SSAA (4x ≤4096 cells, else 2x), closer camera (eye 9.8/+11.5, FOV 38°), stronger entity-outline faction mix (0.40→0.60), wider pillar cull bounds.
+- [x] High-res zoom fix (reverted the render cap — it blurred everything): native 1:1 GPU grid at any zoom, adaptive SSAA only cuts sub-pixel samples; 5-bit ANSI channel quantization (~40% smaller frames, 98→59 KB at 220x70); hash-based dirty-line diffing in `PlainTerminal::draw_into` (no per-frame full-frame clone); `--wgpu-demo [N] [WxH]` size arg for headless zoom benchmarking.
 
 ## Current slice verification evidence (2026-10-12)
 
@@ -126,3 +132,39 @@ The next session should choose whether to implement a strict queued-command 20 H
 ```text
 Read `D:\Personal\codes\Projects\ASCII-Game\AGENTS.md`, `D:\Personal\codes\Projects\ASCII-Game\ascii-mmorpg\AGENTS.md`, and `D:\Personal\codes\Projects\ASCII-Game\ascii-mmorpg\docs\SESSION_HANDOFF.md`. Inspect the current worktree and preserve all existing changes. Decide whether the server should gain a strict queued-command 20 Hz scheduler or retain its documented input-driven timing; do not implement unrelated rendering work. Record exact files, commands, results, blockers, and one next action in `docs/SESSION_HANDOFF.md` and update the TODO list. Do not commit or push.
 ```
+
+## Pause + dynamic partitions slice (2026-10-13)
+
+Request: per-region font sizes (dense high-res game grid, readable HUD, large pause overlay) with dynamic partitions by game state, `P` to pause. Constraint: terminal font size is window-wide, so true per-region font scaling is impossible in one terminal window — density is simulated via glyph weight/spacing, documented in `client/src/partitions.rs`.
+
+Changed: `client/src/partitions.rs` (new: `FontProfile` Dense/Medium/Large, `GameState` Playing/Paused/ModalOpen + `from_modal`, `Partitions::default_for`/`profile_for_row`/`map_dense_glyph` identity choke point, 5 tests), `client/src/lib.rs` (`pub mod partitions`, re-export, `SceneRenderer::is_paused`/`toggle_pause` defaults, pause render test), `client/src/ui.rs` (`ActiveModal::Paused`, `render_pause_menu` large-block menu + stats/keybinds columns, `[P] Pause` in both legends, 2 tests), `client/src/main.rs` (`P` toggles pause, `Q` quits directly from pause, F/R + auto-move gated on `!is_paused`, help texts mention `P`), `client/src/gpu/renderer.rs` (paused-frame test), `AGENTS.md` (keybinds + partitions note).
+
+Minimap stays inside the HUD overlay (no extra GPU pass) — the FPS-optimal choice. Pause is client-side input freeze only; online the server keeps ticking.
+
+Verification (2026-10-13, Windows): `cargo fmt --all -- --check` clean; `cargo test --workspace` all pass (client 70 incl. 9 new, server 8, shared 14+3+2, rest 0-fail); `cargo run -p ascii-mmorpg-tools -- content` → `content ok: 11 definitions`; `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo run -p ascii-mmorpg-client -- --demo` exit 0; `--wgpu-demo 5` runs, no crash.
+
+Next action: visual check of the pause overlay in a real terminal (`play_ansi.bat`, press `P`); tune menu padding/width if the 55/45 split cramps narrow windows. Do not commit or push unless asked.
+
+## Ratatui composed-frame slice (2026-10-13)
+
+Choice: Ratatui layering (no new deps) over notcurses planes / native window. Verified notcurses backend uses a single plane (`lib.rs:313`) — no layering today; and no in-terminal library can do per-region font sizes (terminal-emulator owned), so layering + glyph weight is the achievable goal.
+
+Changed: `client/src/ui.rs` (`ComposedScene` spec, `render_composed_frame`: top bar / scene+side / log strip / legend + `Clear` modal overlay; `render_side_panel` minimap+threats; extracted `log_lines`/`threat_lines` shared with the legacy log widget), `client/src/partitions.rs` (`SceneCell`, `blit_scene`, `centered_rect`, +2 tests), `client/src/renderer.rs` (`Ink::rgb` table replaces dead `ansi()`/`rows()`, `Canvas::scene_cells`, composed `render_frame`), `client/src/gpu/renderer.rs` (cells→`SceneCell` compose; deleted dead `push_rgb_ansi`/`push_fast_u32`), `client/src/main.rs` (full-height resize, demo/line modes full size), `client/src/lib.rs` (player/status test updated to scene partition), `AGENTS.md` (compose bullet).
+
+Layout: side panel only at ≥64 cols; modal overlay covers the whole main row (true occlusion — verified by test asserting `Minimap` disappears when paused). Output is always exactly terminal-sized, so dirty-line diffing never sees line-count changes.
+
+Verification (2026-10-13, Windows): `fmt --check` clean; `cargo test --workspace` all pass (client 74); `tools content` ok; `clippy -D warnings` clean; `--demo` exit 0; `--wgpu-demo 10` at 100x30/160x50/220x70 → 9.1/12.2/23.2 ms/frame (debug, MX230; same ballpark as pre-slice, real-terminal bytes down since output no longer overflows screen height).
+
+Next action: visual check in a real terminal (`play_ansi.bat` + `P`, `I`, `M`); consider compact radar art in the side panel (currently position + threats). Do not commit or push unless asked.
+
+## Visual quality iteration (2026-10-13)
+
+Looked at real frames (temporary `client/tests/dump_frame_tmp.rs` harness, since removed; GPU ground truth via `cmd.exe` byte redirect because PowerShell re-encodes piped UTF-8 into `?`). Findings: scene partitions were dense, but the side panel (5 lines in 19 rows) and log strip (1 message in 5 rows) were black holes; the GPU terrain/grass ramps mapped bright bands to alphabet soup (`c/s/r`, `o/u/n/x`, `O/0/S/D`, `%/$/X/H`, `#/M/W`, grass `o/w/m/n`, `%/&/8/W`); structural vertical edges hashed to `I`.
+
+Changed: `client/src/gpu/shaders.rs` (terrain/grass/fallback bright bands → quiet strokes, then `░▒▓█` light pools; vertical structural edges emit `|`; entity materials keep letter detail for contrast), `client/src/ui.rs` (side panel: position + compact radar + zone card + threats; log strip 5→4 rows split into messages + always-full status card; compact legend fits 80 cols).
+
+Measured on 96x28 frames: GPU scene letter share now 14.7%, stray edge-`I` count 3 (legit material detail), `█`x61/`▒`x31/`░`x13/`▓`x10 light pools fire; CPU scene fill 64.9% with full panels and fitting legend.
+
+Verification: `fmt --check` clean; `cargo test --workspace` all pass (client 74); `tools content` ok; `clippy -D warnings` clean; `--demo` exit 0; `--wgpu-demo 10 220x70` ~18 ms/frame (debug, MX230 — no regression).
+
+Next action: play live (`play_ansi.bat`) and judge color + motion, which dumps can't show; remaining blanks (tall-terminal side bottom, single-message log) fill naturally with more entities/messages. Do not commit or push unless asked.

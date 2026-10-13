@@ -71,8 +71,7 @@ fn target_fps(args: &[String]) -> u32 {
 fn run_demo_mode() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = PlainTerminal::new();
     let (width, height) = terminal.size();
-    let renderer = Renderer::new(width as i16, height.saturating_sub(6) as i16)
-        .with_weather(WeatherMode::Rain);
+    let renderer = Renderer::new(width as i16, height as i16).with_weather(WeatherMode::Rain);
     let mut world = sample_world();
     world.messages =
         vec!["Finite glyph-scene demo: authored frames, ruins, rain, and spell trail.".into()];
@@ -90,11 +89,22 @@ fn run_wgpu_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|index| args.get(index + 1))
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(10);
+    // Optional render size `WxH` right after the frame count, e.g.
+    // `--wgpu-demo 10 220x70`, to benchmark zoomed-out terminal grids.
+    let (demo_w, demo_h) = args
+        .iter()
+        .position(|arg| arg == "--wgpu-demo")
+        .and_then(|index| args.get(index + 2))
+        .and_then(|value| {
+            let (w, h) = value.split_once('x')?;
+            Some((w.parse::<i16>().ok()?, h.parse::<i16>().ok()?))
+        })
+        .unwrap_or((80, 40));
 
     #[cfg(feature = "gpu")]
     {
         use ascii_mmorpg_client::gpu::GpuRenderer;
-        let mut renderer = GpuRenderer::new(80, 40, WeatherMode::Rain)
+        let mut renderer = GpuRenderer::new(demo_w, demo_h, WeatherMode::Rain)
             .map_err(|e| format!("wgpu init failed: {e}"))?;
         let adapter_info = renderer.ctx.adapter.get_info();
         eprintln!(
@@ -140,8 +150,7 @@ fn connect_address(args: &[String]) -> Result<Option<String>, String> {
 fn run_line_mode() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = PlainTerminal::new();
     let (width, height) = terminal.size();
-    let renderer = Renderer::new(width as i16, (height.saturating_sub(5)) as i16)
-        .with_weather(WeatherMode::Rain);
+    let renderer = Renderer::new(width as i16, height as i16).with_weather(WeatherMode::Rain);
     let mut world = sample_world();
     terminal.draw(&renderer.render(&world))?;
     println!("Commands are local in alpha; networking is available through the server protocol.");
@@ -218,7 +227,7 @@ fn run_realtime_with_terminal<T: Terminal>(
     let mut connection = address.map(ClientConnection::connect).transpose()?;
     let (width, height) = terminal.size();
     let render_w = width as i16;
-    let render_h = height.saturating_sub(5) as i16;
+    let render_h = height as i16;
 
     let mut renderer = if !force_cpu {
         #[cfg(feature = "gpu")]
@@ -240,9 +249,12 @@ fn run_realtime_with_terminal<T: Terminal>(
     let mut world = sample_world();
     world.messages = vec![match address {
         Some(address) => {
-            format!("Connecting to {address}... WASD move, F attack, R rest, I inv, C char, M map, Q quit.")
+            format!("Connecting to {address}... WASD move, F attack, R rest, I inv, C char, M map, P pause, Q quit.")
         }
-        None => "Real-time mode: WASD move, F attack, R rest, I inv, C char, M map, Q quit.".into(),
+        None => {
+            "Real-time mode: WASD move, F attack, R rest, I inv, C char, M map, P pause, Q quit."
+                .into()
+        }
     }];
 
     // Drain any terminal capability responses or stale escape codes from stdin
@@ -284,12 +296,9 @@ fn realtime_loop(
     let mut last_draw_ms = 0.0f64;
     'game: loop {
         let (width, height) = terminal.refresh_size();
-        let hud_reserve = if renderer.active_modal() != ascii_mmorpg_client::ActiveModal::None {
-            10
-        } else {
-            5
-        };
-        renderer.resize(width as i16, height.saturating_sub(hud_reserve) as i16);
+        // Composed frames always fill the terminal exactly (scene + HUD +
+        // overlay in one buffer), so no rows are reserved here.
+        renderer.resize(width as i16, height as i16);
         let mut disconnected = false;
         if let Some(connection) = connection.as_deref_mut() {
             while let Some(event) = connection.try_recv() {
@@ -358,6 +367,10 @@ fn realtime_loop(
                 } else if kind == KeyEventKind::Press {
                     let input = match code {
                         KeyCode::Char('q') | KeyCode::Char('Q') => {
+                            if renderer.active_modal() == ascii_mmorpg_client::ActiveModal::Paused {
+                                // Quit directly from the pause menu.
+                                break 'game;
+                            }
                             if renderer.active_modal() != ascii_mmorpg_client::ActiveModal::None {
                                 renderer.set_active_modal(ascii_mmorpg_client::ActiveModal::None);
                                 None
@@ -385,8 +398,24 @@ fn realtime_loop(
                             renderer.toggle_modal(ascii_mmorpg_client::ActiveModal::WorldMap);
                             None
                         }
-                        KeyCode::Char('f') | KeyCode::Char('F') => Some("f"),
-                        KeyCode::Char('r') | KeyCode::Char('R') => Some("r"),
+                        KeyCode::Char('p') | KeyCode::Char('P') => {
+                            renderer.toggle_pause();
+                            None
+                        }
+                        KeyCode::Char('f') | KeyCode::Char('F') => {
+                            if renderer.is_paused() {
+                                None
+                            } else {
+                                Some("f")
+                            }
+                        }
+                        KeyCode::Char('r') | KeyCode::Char('R') => {
+                            if renderer.is_paused() {
+                                None
+                            } else {
+                                Some("r")
+                            }
+                        }
                         KeyCode::Char('v')
                         | KeyCode::Char('t')
                         | KeyCode::Char('V')
@@ -428,18 +457,22 @@ fn realtime_loop(
         }
 
         if Instant::now() >= next_move {
-            if let Some(direction) = movement_direction(held) {
-                tick += 1;
-                let command = ascii_mmorpg_shared::ClientCommand::new(
-                    tick,
-                    ascii_mmorpg_shared::Command::Move(direction),
-                );
-                if let Some(connection) = connection.as_deref_mut() {
-                    if welcomed {
-                        connection.send_command(&command)?;
+            // Pausing freezes local input; the overlay still renders. In online
+            // mode the server world keeps ticking (pause is client-side only).
+            if !renderer.is_paused() {
+                if let Some(direction) = movement_direction(held) {
+                    tick += 1;
+                    let command = ascii_mmorpg_shared::ClientCommand::new(
+                        tick,
+                        ascii_mmorpg_shared::Command::Move(direction),
+                    );
+                    if let Some(connection) = connection.as_deref_mut() {
+                        if welcomed {
+                            connection.send_command(&command)?;
+                        }
+                    } else {
+                        apply_local_command(world, &command);
                     }
-                } else {
-                    apply_local_command(world, &command);
                 }
             }
             next_move = Instant::now() + Duration::from_millis(90);
@@ -474,7 +507,7 @@ fn realtime_loop(
                     WeatherMode::Storm => "Storm",
                 };
                 world.messages = vec![format!(
-                    "Real-time mode: WASD move, F attack, R rest, I inv, C char, M map, V weather ({weather_label}), Q quit. [{display_fps} FPS ({target_label}) | draw: {last_draw_ms:.2}ms]"
+                    "Real-time mode: WASD move, F attack, R rest, I inv, C char, M map, P pause, V weather ({weather_label}), Q quit. [{display_fps} FPS ({target_label}) | draw: {last_draw_ms:.2}ms]"
                 )];
             }
         }

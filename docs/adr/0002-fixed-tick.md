@@ -7,12 +7,12 @@ the current 20 Hz-target implementation described below.
 
 ## Decision
 
-The server owns simulation time and exposes a 20 Hz target (`TICK_HZ = 20`). The
-loopback runner is deterministic. In the current TCP runner, the simulation thread
-waits up to 50 ms for commands and advances one tick on an idle timeout; an input
-command is applied immediately and also advances one tick. Consequently, sustained
-input can advance faster than 20 Hz, so this is a 20 Hz idle target rather than a
-strict fixed-rate scheduler. Snapshots include the authoritative tick. The TCP
+The server owns simulation time and exposes a strict 20 Hz scheduler
+(`TICK_HZ = 20`). The loopback runner is deterministic. The TCP runner drains a
+bounded input queue (`MAX_PENDING = 512`) at tick boundaries: one tick per
+50 ms, idle or loaded, so burst input coalesces into the next tick and can no
+longer exceed 20 Hz. Protocol-version mismatches are rejected immediately
+without ticking or queueing. Snapshots include the authoritative tick. The TCP
 runner supports multiple connected clients through one simulation thread.
 
 ## Consequences
