@@ -1,10 +1,11 @@
 //! High-level GPU offscreen renderer for the ASCII MMORPG client
 //! with multi-buffered asynchronous staging rings and hardware instanced batching.
 
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use ascii_mmorpg_shared::collision::terrain_seed;
-use ascii_mmorpg_shared::{EntityKind, Point, WorldSnapshot};
+use ascii_mmorpg_shared::{EntityId, EntityKind, Point, WorldSnapshot};
 use glam::{Mat4, Vec2, Vec3};
 
 use super::context::GpuContext;
@@ -27,11 +28,19 @@ pub struct GpuRenderer {
     pub active_modal: crate::ui::ActiveModal,
     pub last_player_pos: Option<Point>,
     pub last_move_instant: Option<Instant>,
+    actor_walk_states: HashMap<EntityId, ActorWalkState>,
     pub player_walk_phase: f32,
     pub smooth_cam_pos: Option<Vec2>,
     pub smooth_player_pos: Option<Vec2>,
     animation_started: Instant,
     last_render_instant: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ActorWalkState {
+    position: Point,
+    last_moved_at: f32,
+    phase: f32,
 }
 
 impl GpuRenderer {
@@ -54,6 +63,7 @@ impl GpuRenderer {
             active_modal: crate::ui::ActiveModal::None,
             last_player_pos: None,
             last_move_instant: None,
+            actor_walk_states: HashMap::new(),
             player_walk_phase: 0.0,
             smooth_cam_pos: None,
             smooth_player_pos: None,
@@ -171,9 +181,48 @@ impl GpuRenderer {
             self.player_walk_phase += delta_seconds * 21.0;
             self.player_walk_phase
         } else {
-            self.player_walk_phase = 0.0;
-            0.0
+            self.player_walk_phase *= (-12.0 * delta_seconds).exp();
+            if self.player_walk_phase.abs() < 0.02 {
+                self.player_walk_phase = 0.0;
+            }
+            self.player_walk_phase
         }
+    }
+
+    /// Entity gait runs only after an authoritative position change. This
+    /// keeps stationary monsters planted instead of walking in place.
+    fn update_actor_walk_phases(
+        &mut self,
+        world: &WorldSnapshot,
+        delta_seconds: f32,
+        elapsed_seconds: f32,
+    ) -> HashMap<EntityId, f32> {
+        let mut live_ids = HashSet::with_capacity(world.entities.len() + 1);
+        let mut phases = HashMap::with_capacity(world.entities.len() + 1);
+        for actor in world.entities.iter().chain(std::iter::once(&world.player)) {
+            let id = actor.id;
+            live_ids.insert(id);
+            let state = self.actor_walk_states.entry(id).or_insert(ActorWalkState {
+                position: actor.position,
+                last_moved_at: elapsed_seconds,
+                phase: 0.0,
+            });
+            if actor.position != state.position {
+                state.position = actor.position;
+                state.last_moved_at = elapsed_seconds;
+            }
+            if elapsed_seconds - state.last_moved_at < 0.28 {
+                state.phase += delta_seconds * 21.0;
+            } else {
+                state.phase *= (-12.0 * delta_seconds).exp();
+                if state.phase.abs() < 0.02 {
+                    state.phase = 0.0;
+                }
+            }
+            phases.insert(id, state.phase);
+        }
+        self.actor_walk_states.retain(|id, _| live_ids.contains(id));
+        phases
     }
 
     /// Renders a batch of world snapshots continuously across the double-buffered GPU ring,
@@ -291,6 +340,7 @@ impl GpuRenderer {
         } else {
             self.update_walk_phase_delta(world, delta_seconds)
         };
+        let actor_walk_phases = self.update_actor_walk_phases(world, delta_seconds, animation_time);
         let target_x = world.player.position.x as f32 * 0.8;
         let target_z = world.player.position.y as f32 * 0.8;
         let target_pos = Vec2::new(target_x, target_z);
@@ -332,6 +382,7 @@ impl GpuRenderer {
             player_render_pos,
             &mut self.mesh,
             &mut self.batches,
+            Some(&actor_walk_phases),
         )
     }
 
@@ -382,6 +433,7 @@ impl GpuRenderer {
             player_render_pos,
             mesh,
             batches,
+            None,
         )
     }
 
@@ -397,6 +449,7 @@ impl GpuRenderer {
         player_render_pos: Vec2,
         mesh: &mut MeshBuffer,
         batches: &mut SceneBatches,
+        actor_walk_phases: Option<&HashMap<EntityId, f32>>,
     ) -> (CameraUniforms, LightingUniforms) {
         let px = player_render_pos.x;
         let pz = player_render_pos.y;
@@ -531,22 +584,31 @@ impl GpuRenderer {
                 EntityKind::Item => 4,
             };
             mesh.set_entity_context(entity.id, entity_class);
-            match entity.kind {
+            let actor_vertices = mesh.vertices.len();
+            let gait_phase = actor_walk_phases
+                .and_then(|phases| phases.get(&entity.id).copied())
+                .unwrap_or(0.0);
+            let model_scale = match entity.kind {
                 EntityKind::Monster => {
                     let label = entity.name.to_ascii_lowercase();
                     if label.contains("warrior") {
-                        mesh.add_skeleton_warrior([ex, 0.0, ez], time, 0.0);
+                        mesh.add_skeleton_warrior([ex, 0.0, ez], gait_phase, 0.0);
+                        0.72 // armored champion with broad shield and crest
                     } else if label.contains("skeleton") {
-                        mesh.add_skeleton([ex, 0.0, ez], time, 0.0);
+                        mesh.add_skeleton([ex, 0.0, ez], gait_phase, 0.0);
+                        0.70 // lean undead frame
                     } else {
-                        mesh.add_mossling([ex, 0.0, ez], time);
+                        mesh.add_mossling([ex, 0.0, ez], gait_phase);
+                        0.78 // stocky, low-slung beast
                     }
                 }
                 EntityKind::Npc => {
                     mesh.add_herbalist([ex, 0.0, ez], time);
+                    0.72 // human height; staff and lantern scale with the body
                 }
                 EntityKind::Player => {
                     mesh.add_humanoid([ex, 0.0, ez], 0.0, 0.0, 0.0);
+                    0.72
                 }
                 EntityKind::Item => {
                     let hover = (time * 3.0 + ex).sin() * 0.15;
@@ -557,12 +619,18 @@ impl GpuRenderer {
                         4.0,
                         0.1,
                     );
+                    1.0
                 }
+            };
+            if entity.kind != EntityKind::Item {
+                mesh.scale_vertices_since(actor_vertices, [ex, 0.0, ez], model_scale);
             }
         }
 
         mesh.set_entity_context(world.player.id, 1);
+        let player_vertices = mesh.vertices.len();
         mesh.add_humanoid([px, 0.0, pz], 0.0, walk_phase, 0.0);
+        mesh.scale_vertices_since(player_vertices, [px, 0.0, pz], 0.72);
         mesh.set_entity_context(0, 0);
 
         // 4. Instanced Props with View-Frustum Culling (Asciicker plane culling optimization)

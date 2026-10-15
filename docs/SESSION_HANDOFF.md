@@ -669,3 +669,30 @@ User recording showed a near-frozen window. Measured 19.5 fps debug / 43 fps rel
 Changed (engine/src/bridge.rs, present.rs, scene.rs, examples/game.rs + play.rs, this handoff): StaticLayers cache (ground rebuilt only on player-cell/zone/resize change, props once ever; animation still samples per frame in compose); view-ranged ground/rain builds (camera window + margin, pure world-coord functions so exact); Camera gains ox/oy glide fractions; presenter passes fractional cam uniform with a per-instance world flag (HUD stays pinned); glide_camera exponential follow helper with snap/hold/converge tests; ViewBounds bundles ranged-build rects. Uniform buffer padded to 48 bytes (WGSL 16-byte rounding caught by --frames proof, fixed same turn).
 
 Result: 140 fps release headroom (was 43), debug 25 (was 19.5); world glides instead of ticking. Verification: fmt clean; workspace all pass (engine 66+3 glide/flag tests, client 75); tools content ok; both clippy orders clean; game 120 presented; play/fx checks ok. Not committed/pushed (git still blocked).
+
+## Compact grounded characters + inertial movement (2026-10-15)
+
+- Reworked the engine warrior, skeleton, mossling, and herbalist sprites to 12/10/8/10 rows (pine art remains 20 rows). Animation phases keep matching heights and silhouettes at the smaller world scale.
+- Fixed `stamp_art` so sprite bottom/feet occupy the actor's ground row and contact shadows sit below the feet. The camera aims at the body center; nameplates remain above each sprite.
+- Added `engine::motion::KinematicMotion` for acceleration, bounded speed, normalized diagonal input, and drag. Both `game` and `play` examples use it; `play` still sends intents through the authoritative local server simulation.
+- Added fractional per-glyph motion offsets through `Cell` → `GlyphInstance` → WGSL. The player body, shadow, labels, and camera share a predicted sub-cell position while the simulation catches up. West-facing actors mirror their sprite.
+- Walking poses cycle at a speed-scaled cadence; idle poses remain planted and breathe through a subtle brightness pulse.
+- Verification: engine tests pass (79) with `present`; `play --check` succeeds; `game --frames 60` presented 60 frames; `cargo fmt --all -- --check` and engine clippy with `present` pass.
+
+Next action: compare against the referenced clip when it is available in the workspace and tune silhouettes/movement from a captured live window. The current checkout contains no video file, and the Windows app inventory did not expose the game window for direct capture.
+
+## Fine-cell anatomy and cloth pass (2026-10-15)
+
+The user said the engine characters looked like lifeless emoticons and asked for finer glyph cells, human body structure, and cloth design. Re-authored the four engine actor sheets using supported glyphs and multi-row silhouettes: a 27-row armored warrior, 29-row articulated skeleton, 25-row hooded herbalist, and 16-row mossling. The humanoid sheets delineate head/neck, shoulder girdle, chest, waist/pelvis, separate arms and legs, joints, armor planes, robe folds, and equipment. Each sheet keeps four same-height phases; the warrior and herbalist animate shoulders/limbs, while skeleton and mossling use distinct stride poses. Added the ▲/▼ atlas slots because the tree apex symbol had previously rendered as `?`.
+
+At 8 px pitch, the engine grid has twice the rows and columns for the same window. Added a doubled 40-row engine pine sheet so the landmark retains its screen size. `game` uses 8 px cells in fullscreen; `play` uses a 192x68 grid in its windowed preset. README now includes run commands. Anatomy cues are based on OpenStax divisions/joints and load paths; these remain readable game silhouettes, not literal anatomy diagrams. Source study: [pectoral girdle](https://openstax.org/books/anatomy-and-physiology-2e/pages/8-1-the-pectoral-girdle), [upper limb](https://openstax.org/books/anatomy-and-physiology/pages/8-2-bones-of-the-upper-limb), [pelvis](https://openstax.org/books/anatomy-and-physiology-2e/pages/8-3-the-pelvic-girdle-and-pelvis), [lower limb](https://openstax.org/books/anatomy-and-physiology/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs).
+
+The video file is present at the ignored path `data/videos/Recording 2026-10-15 175701.mp4`; an earlier workspace scan missed it because Git ignores `data/`. It was decoded directly with OpenCV and a frame around 4.55 seconds was reviewed, so this art pass now has a live renderer reference.
+
+## Video-guided actor scale and idle gait (2026-10-15)
+
+- The clip shows the terminal GPU client with the player, mossling, skeleton, herbalist, and nearby pines. Actors appear oversized against the environment; stationary monsters also cycle through walk poses.
+- Engine authored sheets remain detailed (warrior 27 rows, skeleton 29, herbalist 25, mossling 16) but are downsampled at stamp time to 0.72 / 0.70 / 0.72 / 0.82 respectively. Nearest-source sampling retains small costume and anatomy marks, while the focal cell, ground row, and mirror anchor stay stable. Their rendered heights are approximately half the engine's 40-row pine.
+- The terminal GPU path scales actor meshes around their ground anchors: human/NPC 0.72, skeleton 0.70, champion 0.72, mossling 0.78. Gait phases track authoritative position changes, decay after stopping, and drive the matching monster geometry.
+- `cargo fmt --all -- --check`, both client GPU/engine example checks, and `cargo run -p ascii-mmorpg-engine --features present --example game -- --frames 60` pass; the latter presented 60 frames. Capture a screenshot and compare against the clip to tune the ratios further.
+- For the windowed engine renderer, run `cargo run -p ascii-mmorpg-engine --features present --example game`; `cargo run -p ascii-mmorpg-engine --features present --example play` starts the playable loopback-server example. The terminal GPU client stays `cargo run -p ascii-mmorpg-client` (GPU is its default feature).

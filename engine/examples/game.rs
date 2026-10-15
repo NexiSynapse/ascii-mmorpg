@@ -18,6 +18,7 @@ fn main() {
 #[cfg(feature = "present")]
 fn main() {
     use ascii_mmorpg_engine::bridge::{self, HUD_H, LOG_H, VIEW_H, VIEW_W};
+    use ascii_mmorpg_engine::motion::KinematicMotion;
     use ascii_mmorpg_engine::present::{PresentOptions, SceneSource};
     use std::collections::HashSet;
     use winit::keyboard::KeyCode;
@@ -38,8 +39,7 @@ fn main() {
         view: bridge::SceneView,
         held: HashSet<KeyCode>,
         last_t: f32,
-        move_x: f32,
-        move_y: f32,
+        motion: KinematicMotion,
         cache: bridge::StaticLayers,
         follow: Option<(f32, f32)>,
     }
@@ -64,14 +64,16 @@ fn main() {
                 - (self.held.contains(&KeyCode::KeyA) as i32);
             let dy = (self.held.contains(&KeyCode::KeyS) as i32)
                 - (self.held.contains(&KeyCode::KeyW) as i32);
-            self.move_x += dx as f32 * dt * 8.0;
-            self.move_y += dy as f32 * dt * 8.0;
-            let step_x = self.move_x.trunc() as i32;
-            let step_y = self.move_y.trunc() as i32;
-            self.move_x -= step_x as f32;
-            self.move_y -= step_y as f32;
-            self.view.player.x += step_x;
-            self.view.player.y += step_y;
+            if let Some((step_x, step_y)) = self.motion.update((dx as f32, dy as f32), dt) {
+                self.view.player.x += i32::from(step_x);
+                self.view.player.y += i32::from(step_y);
+            }
+            self.view.player.render_offset = self.motion.remainder();
+            self.view.player.motion_speed =
+                self.motion.velocity().0.hypot(self.motion.velocity().1);
+            if dx != 0 {
+                self.view.player.facing_x = dx as i8;
+            }
             self.view.tick = (t * 20.0) as u64;
             let (scene, bcam) = bridge::scene_from_view_sized_cached(
                 &self.view,
@@ -83,8 +85,8 @@ fn main() {
             // instead of stepping cell to cell.
             let (next, cam) = ascii_mmorpg_engine::present::glide_camera(
                 self.follow,
-                bcam.x as f32,
-                bcam.y as f32,
+                bcam.x as f32 + self.view.player.render_offset.0,
+                bcam.y as f32 + self.view.player.render_offset.1,
                 dt,
             );
             self.follow = Some(next);
@@ -119,13 +121,13 @@ fn main() {
             view,
             held: HashSet::new(),
             last_t: 0.0,
-            move_x: 0.0,
-            move_y: 0.0,
+            motion: KinematicMotion::default(),
             cache: bridge::StaticLayers::new(),
             follow: None,
         },
         PresentOptions {
             title: "ASCII MMORPG — windowed 2.5D port".into(),
+            cell_px: 8.0,
             max_frames: frames,
             ..Default::default()
         },

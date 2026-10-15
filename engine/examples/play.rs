@@ -27,6 +27,7 @@ fn main() {
 #[cfg(feature = "present")]
 fn real_main() -> Result<(), String> {
     use ascii_mmorpg_engine::bridge::{HUD_H, LOG_H, VIEW_H, VIEW_W};
+    use ascii_mmorpg_engine::motion::KinematicMotion;
     use ascii_mmorpg_engine::present::{glide_camera, PresentOptions, SceneSource};
     use std::collections::HashSet;
     use std::time::Duration;
@@ -57,6 +58,9 @@ fn real_main() -> Result<(), String> {
         bridge::SceneActor {
             x: a.position.x as i32,
             y: a.position.y as i32,
+            render_offset: (0.0, 0.0),
+            motion_speed: 0.0,
+            facing_x: 1,
             kind: actor_kind(&a.kind),
             name: a.name.clone(),
             glyph: a.glyph,
@@ -87,25 +91,41 @@ fn real_main() -> Result<(), String> {
         }
     }
 
-    /// 8-way direction from held keys; opposites cancel (matches the
-    /// terminal client's 16-state movement resolution).
-    fn held_direction(held: &HashSet<KeyCode>) -> Option<Direction> {
+    /// Normalized ground-plane input; opposites cancel.
+    fn held_axes(held: &HashSet<KeyCode>) -> (f32, f32) {
         let north = held.contains(&KeyCode::KeyW) || held.contains(&KeyCode::ArrowUp);
         let south = held.contains(&KeyCode::KeyS) || held.contains(&KeyCode::ArrowDown);
         let east = held.contains(&KeyCode::KeyD) || held.contains(&KeyCode::ArrowRight);
         let west = held.contains(&KeyCode::KeyA) || held.contains(&KeyCode::ArrowLeft);
         let dx = (east as i8) - (west as i8);
         let dy = (south as i8) - (north as i8);
+        (f32::from(dx), f32::from(dy))
+    }
+
+    fn direction_from_step(dx: i8, dy: i8) -> Direction {
         match (dx, dy) {
-            (0, -1) => Some(Direction::North),
-            (0, 1) => Some(Direction::South),
-            (1, 0) => Some(Direction::East),
-            (-1, 0) => Some(Direction::West),
-            (1, -1) => Some(Direction::NorthEast),
-            (-1, -1) => Some(Direction::NorthWest),
-            (1, 1) => Some(Direction::SouthEast),
-            (-1, 1) => Some(Direction::SouthWest),
-            _ => None,
+            (0, -1) => Direction::North,
+            (0, 1) => Direction::South,
+            (1, 0) => Direction::East,
+            (-1, 0) => Direction::West,
+            (1, -1) => Direction::NorthEast,
+            (-1, -1) => Direction::NorthWest,
+            (1, 1) => Direction::SouthEast,
+            (-1, 1) => Direction::SouthWest,
+            _ => Direction::East,
+        }
+    }
+
+    fn direction_vector(direction: Direction) -> (f32, f32) {
+        match direction {
+            Direction::North => (0.0, -1.0),
+            Direction::NorthEast => (1.0, -1.0),
+            Direction::East => (1.0, 0.0),
+            Direction::SouthEast => (1.0, 1.0),
+            Direction::South => (0.0, 1.0),
+            Direction::SouthWest => (-1.0, 1.0),
+            Direction::West => (-1.0, 0.0),
+            Direction::NorthWest => (-1.0, -1.0),
         }
     }
 
@@ -115,6 +135,8 @@ fn real_main() -> Result<(), String> {
         last_t: f32,
         client_tick: Tick,
         held: HashSet<KeyCode>,
+        motion: KinematicMotion,
+        facing_x: i8,
         pending: Vec<Command>,
         cache: bridge::StaticLayers,
         follow: Option<(f32, f32)>,
@@ -130,6 +152,8 @@ fn real_main() -> Result<(), String> {
                 last_t: 0.0,
                 client_tick: 0,
                 held: HashSet::new(),
+                motion: KinematicMotion::default(),
+                facing_x: 1,
                 pending: Vec::new(),
                 cache: bridge::StaticLayers::new(),
                 follow: None,
@@ -142,13 +166,28 @@ fn real_main() -> Result<(), String> {
             for command in self.pending.drain(..) {
                 commands.push((PLAYER_ID, ClientCommand::new(self.client_tick, command)));
             }
-            if let Some(direction) = held_direction(&self.held) {
-                commands.push((
-                    PLAYER_ID,
-                    ClientCommand::new(self.client_tick, Command::Move(direction)),
-                ));
-            }
             self.sim.advance_tick_with(commands);
+        }
+
+        fn render_offset(&self) -> (f32, f32) {
+            let mut offset = self.motion.remainder();
+            for command in &self.pending {
+                if let Command::Move(direction) = command {
+                    let (dx, dy) = direction_vector(*direction);
+                    offset.0 += dx;
+                    offset.1 += dy;
+                }
+            }
+            offset
+        }
+
+        fn make_scene_view(&self, snapshot: &WorldSnapshot) -> bridge::SceneView {
+            let mut view = scene_view_from_snapshot(snapshot);
+            view.player.render_offset = self.render_offset();
+            let velocity = self.motion.velocity();
+            view.player.motion_speed = velocity.0.hypot(velocity.1);
+            view.player.facing_x = self.facing_x;
+            view
         }
     }
 
@@ -156,33 +195,53 @@ fn real_main() -> Result<(), String> {
         fn scene_at(&mut self, t: f32) -> (Scene, Camera) {
             let dt = Duration::from_secs_f32((t - self.last_t).max(0.0));
             self.last_t = t;
+            if let Some((dx, dy)) = self.motion.update(held_axes(&self.held), dt.as_secs_f32()) {
+                self.pending
+                    .push(Command::Move(direction_from_step(dx, dy)));
+            }
             for _ in 0..self.clock.advance(dt).min(MAX_TICKS_PER_FRAME) {
                 self.tick_once();
             }
             let snapshot = self.sim.snapshot_for(PLAYER_ID);
-            bridge::scene_from_view(&scene_view_from_snapshot(&snapshot))
+            bridge::scene_from_view(&self.make_scene_view(&snapshot))
         }
 
         fn scene_at_size(&mut self, t: f32, width: u32, height: u32) -> (Scene, Camera) {
             let dt = Duration::from_secs_f32((t - self.last_t).max(0.0));
             self.last_t = t;
+            if let Some((dx, dy)) = self.motion.update(held_axes(&self.held), dt.as_secs_f32()) {
+                self.pending
+                    .push(Command::Move(direction_from_step(dx, dy)));
+            }
             for _ in 0..self.clock.advance(dt).min(MAX_TICKS_PER_FRAME) {
                 self.tick_once();
             }
             let snapshot = self.sim.snapshot_for(PLAYER_ID);
+            let view = self.make_scene_view(&snapshot);
             let (scene, bcam) = bridge::scene_from_view_sized_cached(
-                &scene_view_from_snapshot(&snapshot),
+                &view,
                 width as i32,
                 height as i32,
                 &mut self.cache,
             );
-            let (next, cam) =
-                glide_camera(self.follow, bcam.x as f32, bcam.y as f32, dt.as_secs_f32());
+            let (next, cam) = glide_camera(
+                self.follow,
+                bcam.x as f32 + view.player.render_offset.0,
+                bcam.y as f32 + view.player.render_offset.1,
+                dt.as_secs_f32(),
+            );
             self.follow = Some(next);
             (scene, cam)
         }
 
         fn key(&mut self, code: KeyCode, pressed: bool) {
+            if pressed {
+                match code {
+                    KeyCode::KeyA | KeyCode::ArrowLeft => self.facing_x = -1,
+                    KeyCode::KeyD | KeyCode::ArrowRight => self.facing_x = 1,
+                    _ => {}
+                }
+            }
             match code {
                 KeyCode::KeyF if pressed => self.pending.push(Command::Attack),
                 KeyCode::KeyR if pressed => self.pending.push(Command::Rest),
@@ -220,10 +279,13 @@ fn real_main() -> Result<(), String> {
         if mossling.stats.hp >= 8 {
             return Err("check: F attack did not damage the mossling".into());
         }
-        // Movement path: hold East for 12 ticks, player must advance.
+        // Movement path: acceleration should carry the player forward over time.
         let mut game = LocalGame::new();
         game.key(KeyCode::KeyD, true);
-        let (scene, camera) = game.scene_at(0.6);
+        let (mut scene, mut camera) = game.scene_at(0.0);
+        for frame in 1..=40 {
+            (scene, camera) = game.scene_at(frame as f32 * 0.05);
+        }
         let x = game.sim.snapshot_for(PLAYER_ID).player.position.x;
         if x <= 2 {
             return Err(format!("check: held East did not move the player (x={x})"));
@@ -240,7 +302,7 @@ fn real_main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--check") {
         run_check()?;
-        eprintln!("play check ok: attack damaged mossling, held key moved player");
+        eprintln!("play check ok: attack damaged mossling, inertial movement advanced player");
         return Ok(());
     }
     let frames = args
@@ -253,8 +315,9 @@ fn real_main() -> Result<(), String> {
         LocalGame::new(),
         PresentOptions {
             title: "ASCII MMORPG — playable windowed port".into(),
-            width_cells: VIEW_W as u32,
-            height_cells: (HUD_H + VIEW_H + LOG_H) as u32,
+            cell_px: 8.0,
+            width_cells: (VIEW_W * 2) as u32,
+            height_cells: ((HUD_H + VIEW_H + LOG_H) * 2) as u32,
             max_frames: frames,
             ..Default::default()
         },

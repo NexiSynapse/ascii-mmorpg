@@ -106,6 +106,7 @@ struct GlyphInstance {
     scale: f32,
     /// 1 = world layer (rides the fractional camera), 0 = pinned UI.
     world: u32,
+    offset: [f32; 2],
 }
 
 #[repr(C)]
@@ -405,6 +406,11 @@ impl App {
                             offset: 56,
                             shader_location: 7,
                         },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 60,
+                            shader_location: 8,
+                        },
                     ],
                 }],
             },
@@ -656,6 +662,7 @@ fn frame_instances(
                 },
                 scale: cell.scale.clamp(0.25, 2.0),
                 world: in_world as u32,
+                offset: [cell.offset_x, cell.offset_y],
             });
         }
     }
@@ -701,7 +708,8 @@ fn vs(@builtin(vertex_index) vi: u32,
        @location(4) bg: vec3<f32>,
        @location(5) gradient_axis: u32,
        @location(6) size: f32,
-       @location(7) world: u32) -> VOut {
+      @location(7) world: u32,
+      @location(8) motion_offset: vec2<f32>) -> VOut {
     var c = vec2<f32>(0.0, 0.0);
     if (vi == 1u) { c = vec2<f32>(1.0, 0.0); }
     else if (vi == 2u || vi == 4u) { c = vec2<f32>(1.0, 1.0); }
@@ -715,7 +723,7 @@ fn vs(@builtin(vertex_index) vi: u32,
     // Fractional follow: world instances glide between cells while pinned
     // UI stays put (no cell-stepping while walking).
     let shift = select(vec2<f32>(0.0, 0.0), u.cam, world != 0u);
-    let pix = (vec2<f32>(grid) - shift + c0) * cell;
+    let pix = (vec2<f32>(grid) + motion_offset - shift + c0) * cell;
     let ndc = vec2<f32>(pix.x / f32(u.surf.x), 1.0 - pix.y / f32(u.surf.y)) * 2.0 - vec2<f32>(1.0);
     let tile = vec2<f32>(f32(glyph % 32u), f32(glyph / 32u));
     var o: VOut;
@@ -936,5 +944,15 @@ mod tests {
         let instances = frame_instances(&frame, 4, 1, &[(1, 0, 2, 1)]);
         let flags: Vec<u32> = instances.iter().map(|i| i.world).collect();
         assert_eq!(flags, vec![0, 1, 1, 0]);
+    }
+
+    #[test]
+    fn instance_preserves_fractional_actor_motion() {
+        let mut frame = Frame::blank(1, 1);
+        frame.cells[0] =
+            Cell::new('@', Rgb::new(255, 255, 255), Rgb::new(0, 0, 0)).with_offset(0.35, -0.2);
+        let instances = frame_instances(&frame, 1, 1, &[(0, 0, 1, 1)]);
+        assert_eq!(instances[0].offset, [0.35, -0.2]);
+        assert!(SHADER.contains("grid) + motion_offset - shift"));
     }
 }

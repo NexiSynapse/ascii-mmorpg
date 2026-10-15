@@ -28,6 +28,9 @@ pub struct Cell {
     pub transparent: bool,
     pub glow: f32,
     pub scale: f32,
+    /// Per-glyph fractional translation in cell units (used for moving actors).
+    pub offset_x: f32,
+    pub offset_y: f32,
 }
 
 impl Cell {
@@ -42,6 +45,8 @@ impl Cell {
         transparent: true,
         glow: 0.0,
         scale: 1.0,
+        offset_x: 0.0,
+        offset_y: 0.0,
     };
 
     pub const fn new(glyph: char, fg: Rgb, bg: Rgb) -> Self {
@@ -55,6 +60,8 @@ impl Cell {
             transparent: false,
             glow: 0.0,
             scale: 1.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
         }
     }
 
@@ -85,6 +92,13 @@ impl Cell {
     pub const fn with_fg_gradient(mut self, other: Rgb, axis: Axis) -> Self {
         self.fg_end = other;
         self.fg_gradient = Some(axis);
+        self
+    }
+
+    /// Shift the glyph quad smoothly without moving its cell in the scene grid.
+    pub const fn with_offset(mut self, x: f32, y: f32) -> Self {
+        self.offset_x = x;
+        self.offset_y = y;
         self
     }
 }

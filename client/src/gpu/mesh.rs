@@ -292,6 +292,21 @@ impl MeshBuffer {
         self.entity_class = u32::from(entity_class);
     }
 
+    /// Uniformly resize newly added model geometry around its ground anchor.
+    /// Normals and per-vertex entity metadata are unchanged; callers pass the
+    /// vertex count captured immediately before generating one actor.
+    pub fn scale_vertices_since(&mut self, first_vertex: usize, anchor: [f32; 3], scale: f32) {
+        if !scale.is_finite() || scale <= 0.0 {
+            return;
+        }
+        let anchor = Vec3::from(anchor);
+        let first_vertex = first_vertex.min(self.vertices.len());
+        for vertex in &mut self.vertices[first_vertex..] {
+            let position = Vec3::from(vertex.position);
+            vertex.position = (anchor + (position - anchor) * scale).to_array();
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn add_quad(
         &mut self,

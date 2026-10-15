@@ -12,9 +12,9 @@ pub const ATLAS_ROWS: u32 = 16;
 
 /// Extra non-ASCII cells the game uses (shading blocks, box drawing).
 /// Slots 256.. live past the direct codepoint range; see [`slot`].
-const EXTRA_GLYPHS: [char; 12] = [
+const EXTRA_GLYPHS: [char; 14] = [
     '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}', '\u{2502}', '\u{2500}', '\u{250C}', '\u{2510}',
-    '\u{2514}', '\u{2518}', '\u{253C}', '\u{25A0}',
+    '\u{2514}', '\u{2518}', '\u{253C}', '\u{25A0}', '\u{25B2}', '\u{25BC}',
 ];
 
 pub struct Atlas {

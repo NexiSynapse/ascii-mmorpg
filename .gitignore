@@ -7,3 +7,4 @@
 
 # Local agent/runtime state and dependencies; never publish private workspace data.
 /.opencode/
+/AGENTS.md

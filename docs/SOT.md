@@ -758,3 +758,22 @@ Following comparative evaluation of six industry-leading terminal and retro-3D e
 5. **CPU Renderer Idle Foot Posture**:
    - Ensured parity with the GPU pipeline by locking the player character model to stationary Frame 0 when idle in the CPU procedural renderer.
 
+## 25. Engine character scale, grounding, and inertial movement
+
+- Windowed engine examples use an 8 px glyph pitch for a high-density scene grid. Engine-only pine art is doubled from the 20-row source to retain its physical screen scale at the finer pitch.
+- Humanoid art is authored as connected armor/cloth silhouettes: 27-row warrior with helmet, collar, shoulder plates, torso/waist plates, gauntlets, separated legs, knee articulation, greaves, and boots; 29-row skeleton with skull/jaw, rib cage, sternum, pelvis, and paired long bones; 25-row herbalist with hood, neck wrap, hanging tunic, belt, satchel, sleeves, and split legs. The 16-row mossling uses a broader, lower four-limbed silhouette.
+- Design study uses the anatomical regions and joints as structural landmarks, rather than copying medical illustration: the pectoral girdle links torso to upper limbs, the pelvic girdle supports weight and anchors the legs, and each arm and leg is segmented around visible joints. See [OpenStax on the pectoral girdle](https://openstax.org/books/anatomy-and-physiology-2e/pages/8-1-the-pectoral-girdle), [upper-limb regions](https://openstax.org/books/anatomy-and-physiology/pages/8-2-bones-of-the-upper-limb), [pelvic support](https://openstax.org/books/anatomy-and-physiology-2e/pages/8-3-the-pelvic-girdle-and-pelvis), and [lower-limb muscles and movement](https://openstax.org/books/anatomy-and-physiology/pages/11-6-appendicular-muscles-of-the-pelvic-girdle-and-lower-limbs).
+- `stamp_art` anchors each model's bottom row to the actor's server-owned ground position. Contact shadows remain below the feet; the camera aims at the body center so the full model stays in view.
+- `engine::motion::KinematicMotion` adds acceleration, bounded ground-plane speed, diagonal normalization, and drag to both windowed engine examples. It emits movement intents only; the loopback server remains authoritative for position and collision.
+- Player body cells, shadow, and nameplates carry fractional render offsets; the GPU presenter applies them per glyph and the camera follows the same predicted position. This smooths motion between server cell updates without changing world authority.
+- Walking pose cadence follows speed and horizontal facing mirrors the model. Idle poses stay planted and use a slow brightness breath.
+- The capture `data/videos/Recording 2026-10-15 175701.mp4` is present but ignored by Git. It was reviewed this session; the nearby actor/tree comparison motivated a follow-up scale pass in both renderer paths.
+- Verification (2026-10-15, Windows): engine tests pass (79) with `present`; `play --check` passes; `game --frames 60` and `play --frames 60` each presented 60 frames; `cargo fmt --all -- --check` and engine clippy with `present` pass.
+
+## 26. Video-guided actor scale and idle gait
+
+- Corrected the earlier handoff note: the user recording is available under the ignored `data/videos/` directory. A frame around 4.55 seconds shows the live terminal GPU renderer and the player, mossling, skeleton, herbalist, and nearby pines.
+- The engine's 8 px cell actor art now downsamples to a compact footprint while preserving the authored high-detail sheets and exact foot/camera anchor. Player and herbalist render at 0.72 scale, skeleton at 0.70, and mossling at 0.82 against the 40-row pine.
+- The terminal GPU renderer applies corresponding model scales (humanoid/NPC 0.72, skeleton 0.70, champion 0.72, mossling 0.78) around ground anchors. Entity gait phases advance only when authoritative snapshot positions change and decay after stopping, so stationary monsters hold their stance.
+- Verification (2026-10-15, Windows): `cargo fmt --all -- --check`; `cargo check -p ascii-mmorpg-client --features gpu --bin ascii-mmorpg-client`; `cargo check -p ascii-mmorpg-engine --features present --examples`; and `cargo run -p ascii-mmorpg-engine --features present --example game -- --frames 60` all pass, with 60 frames presented. A screenshot comparison against the clip was not performed after the scale changes.
+

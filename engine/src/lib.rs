@@ -32,6 +32,7 @@ mod compose;
 pub mod demo;
 pub mod fx;
 mod layer;
+pub mod motion;
 mod partition;
 mod scene;
 pub mod sprite;

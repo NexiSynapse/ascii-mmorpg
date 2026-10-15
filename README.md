@@ -65,6 +65,25 @@ optional source references for future tooling; they are not loaded by the ASCII
 renderer. The client does not load, convert, or transmit glTF/FBX or other
 source models.
 
+## Windowed rendering engine
+
+The engine examples use the GPU glyph presenter and fine 8 px cells. Run the
+interactive scene with WASD, attack with F, rest with R, and quit with Q or
+Escape:
+
+```text
+cargo run -p ascii-mmorpg-engine --features present --example game
+```
+
+The playable example drives a local authoritative simulation:
+
+```text
+cargo run -p ascii-mmorpg-engine --features present --example play
+```
+
+Add `-- --dungeon` to `game` for the vault scene, or `-- --frames 120` to either
+example to close after a finite render run.
+
 The checked-in slice is deliberately honest about the alpha boundary: it has
 the shared protocol, deterministic combat/loot rules, fixed 20 Hz simulation,
 TCP framing, an ASCII renderer, bot smoke coverage, and validated RON content.

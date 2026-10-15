@@ -130,6 +130,12 @@ pub enum ActorKind {
 pub struct SceneActor {
     pub x: i32,
     pub y: i32,
+    /// Fractional predicted motion, relative to the authoritative cell.
+    pub render_offset: (f32, f32),
+    /// Current planar speed; controls gait cadence.
+    pub motion_speed: f32,
+    /// Horizontal facing: positive is the source pose, negative mirrors it.
+    pub facing_x: i8,
     pub kind: ActorKind,
     pub name: String,
     pub glyph: char,
@@ -233,20 +239,21 @@ fn void_density(x: i32, y: i32, ax: i32, ay: i32) -> f32 {
     }
 }
 
-/// Compact volumetric actor art (`engine/assets/actors/*.txt`, `---`
-/// separated phases, same format as the terminal set). Sized for windowed
-/// grids: ~9–13 rows against 20+-row views, foot-anchored, with the kind's
-/// focal glyph held steady at one local cell in every phase so camera,
-/// palette, and glow contracts keep working.
+/// Fine-cell volumetric actor art (`engine/assets/actors/*.txt`, `---`
+/// separated phases, same format as the terminal set). At the presenter's
+/// 8 px cell pitch, human models use 25–29 articulated rows; each cell adds
+/// a contour, material break, or joint cue. Models are foot-anchored, with
+/// the kind's focal glyph held steady at one local cell in every phase.
 const WARRIOR_ART: &str = include_str!("../assets/actors/warrior.txt");
 const MOSSLING_ART: &str = include_str!("../assets/actors/mossling.txt");
 const SKELETON_ART: &str = include_str!("../assets/actors/skeleton.txt");
 const HERBALIST_ART: &str = include_str!("../assets/actors/herbalist.txt");
-const TREE_ART: &str = include_str!("../../assets/ascii/tree.txt");
+// Doubled on both axes for the 8 px high-density scene grid.
+const TREE_ART: &str = include_str!("../assets/actors/pine.txt");
 
-/// Flip-book speed of actor art: one phase per 1/6 s, so poses never repeat
-/// inside the reference's no-repeat window.
-const ART_FPS: f32 = 6.0;
+/// Walking poses advance with speed; idle uses a quiet breathing cadence.
+const WALK_FPS: f32 = 7.0;
+const IDLE_FPS: f32 = 1.2;
 
 fn cached_frames(source: &'static str) -> &'static Vec<Vec<String>> {
     static WARRIOR: OnceLock<Vec<Vec<String>>> = OnceLock::new();
@@ -313,6 +320,70 @@ fn art_for(a: &SceneActor) -> Option<(&'static str, Rgb, f32)> {
             Some((SKELETON_ART, Rgb::new(232, 232, 222), 0.2))
         }
         ActorKind::Monster => Some((MOSSLING_ART, Rgb::new(140, 225, 135), 0.2)),
+    }
+}
+
+/// Keep actors at believable world scale beside the doubled 40-row pine.
+/// The mossling is intentionally shorter, while the skeletal frame is a
+/// little narrower than a human's so it reads as a lean undead.
+fn actor_art_scale(a: &SceneActor) -> f32 {
+    match a.kind {
+        ActorKind::Player => 0.72,
+        ActorKind::Npc => 0.72,
+        ActorKind::Monster
+            if a.name.to_ascii_lowercase().contains("skeleton")
+                || a.glyph.eq_ignore_ascii_case(&'s') =>
+        {
+            0.70
+        }
+        ActorKind::Monster => 0.82,
+        ActorKind::Item => 1.0,
+    }
+}
+
+fn scaled_sprite_size(frames: &[Vec<String>], scale: f32) -> (i32, i32) {
+    let (w, h) = sprite::sprite_size(frames);
+    (
+        ((w as f32 * scale).round() as i32).max(1),
+        ((h as f32 * scale).round() as i32).max(1),
+    )
+}
+
+/// Map a destination cell to its nearest source cell. The focal source cell
+/// is kept exactly in `stamp_art`, avoiding loss of the camera anchor while
+/// reducing the overall footprint.
+fn source_cell(destination: i32, source_len: i32, destination_len: i32) -> i32 {
+    if source_len <= 1 || destination_len <= 1 {
+        0
+    } else {
+        (destination * (source_len - 1) + (destination_len - 1) / 2) / (destination_len - 1)
+    }
+}
+
+fn destination_cell(source: i32, source_len: i32, destination_len: i32) -> i32 {
+    if source_len <= 1 || destination_len <= 1 {
+        0
+    } else {
+        (source * (destination_len - 1) + (source_len - 1) / 2) / (source_len - 1)
+    }
+}
+
+/// Distinct glyph materials keep armor planes and woven cloth readable even
+/// when the caller leaves the actor palette at its kind default.
+fn material_ink(kind: ActorKind, glyph: char, base: Rgb) -> Rgb {
+    match (kind, glyph) {
+        (ActorKind::Player, '▓') => Rgb::new(155, 182, 216), // plate steel
+        (ActorKind::Player, '▒') => Rgb::new(112, 92, 128),  // cloth underlayer
+        (ActorKind::Player, '=' | '+') => Rgb::new(225, 178, 82), // brass fittings
+        (ActorKind::Player, 'o') => Rgb::new(111, 202, 245), // visor glint
+        (ActorKind::Npc, '#') => Rgb::new(127, 83, 146),     // woven robe
+        (ActorKind::Npc, '=' | '-') => Rgb::new(218, 174, 99), // stitching / wrap
+        (ActorKind::Npc, '.') => Rgb::new(221, 198, 159),    // face under hood
+        (ActorKind::Monster, 's') => Rgb::new(115, 183, 205), // sternum marker
+        (ActorKind::Monster, '#') if base.r > base.g => Rgb::new(222, 225, 213),
+        (ActorKind::Monster, '▓') if base.g > base.r => Rgb::new(88, 167, 93),
+        (ActorKind::Monster, '@') if base.g > base.r => Rgb::new(202, 228, 115),
+        _ => base,
     }
 }
 
@@ -650,14 +721,14 @@ fn push_rain(layer: &mut Layer, x0: i32, x1: i32, y0: i32, y1: i32) {
         }
     }
 }
-/// Landmark pine: 20-row art with interior darkness punched out by hash,
+/// Landmark pine: 40-row art with interior darkness punched out by hash,
 /// brightened rim rows, and a brown trunk (reference canopies have dark
 /// gaps and lit edges, not solid triangles). Mask and regions derive from
 /// phase 0 so holes never flicker between sway phases.
 fn stamp_tree(layer: &mut Layer, x: i32, y: i32) {
     let frames = cached_frames(TREE_ART);
     let (w, h) = sprite::sprite_size(frames);
-    let trunk_top = h - 7;
+    let trunk_top = h - 14;
     let (ox, oy) = (x - w / 2, y - (h - 1));
     let at = |fx: i32, fy: i32| -> char {
         frames
@@ -742,31 +813,73 @@ const SWORD: &[(i32, i32, char, Rgb, f32)] = &[
     (0, 1, '|', Rgb::new(170, 110, 55), 0.0),
 ];
 
-/// Stamp volumetric art foot-anchored: the focal cell lands on the actor
-/// position, the feet on the row below, every other phase-varying cell
-/// flip-books at [`ART_FPS`]. The focal cell keeps the palette track and
+/// Stamp volumetric art foot-anchored: the final sprite row lands on the
+/// actor ground cell; the focal cell keeps the palette track and
 /// aura glow. Returns the art's top world row for plate anchoring.
 fn stamp_art(layer: &mut Layer, a: &SceneActor, source: &'static str, tint: Rgb, aura: f32) -> i32 {
     let frames = cached_frames(source);
-    let (w, h) = sprite::sprite_size(frames);
-    let (fx, fy) = focal_of(frames, a.glyph);
-    let (ox, oy) = (a.x - fx, a.y - fy);
+    let (source_w, source_h) = sprite::sprite_size(frames);
+    let (w, h) = scaled_sprite_size(frames, actor_art_scale(a));
+    let (source_fx, source_fy) = focal_of(frames, a.glyph);
+    let (fx, fy) = (
+        destination_cell(source_fx, source_w, w),
+        destination_cell(source_fy, source_h, h),
+    );
+    let (focal_screen_x, focal_source_x) = if a.facing_x < 0 {
+        (w - 1 - fx, source_w - 1 - source_fx)
+    } else {
+        (fx, source_fx)
+    };
+    let (ox, oy) = (a.x - w / 2, a.y - (h - 1));
     let palette = a.palette.unwrap_or(ColorTrack::Static(tint));
     let at = |fx: i32, fy: i32| -> char {
+        if fx < 0 || fy < 0 || fx >= w || fy >= h {
+            return ' ';
+        }
+        let source_x = if fx == focal_screen_x {
+            focal_source_x
+        } else {
+            source_cell(fx, source_w, w)
+        };
+        let source_y = if fy == self::destination_cell(source_fy, source_h, h) {
+            source_fy
+        } else {
+            source_cell(fy, source_h, h)
+        };
+        let art_x = if a.facing_x < 0 {
+            source_w - 1 - source_x
+        } else {
+            source_x
+        };
         frames
             .first()
-            .and_then(|frame| frame.get(fy as usize))
-            .and_then(|line| line.chars().nth(fx as usize))
+            .and_then(|frame| frame.get(source_y as usize))
+            .and_then(|line| line.chars().nth(art_x as usize))
             .unwrap_or(' ')
     };
     for cy in 0..h as usize {
         for cx in 0..w as usize {
+            let source_x = if cx as i32 == focal_screen_x {
+                focal_source_x
+            } else {
+                source_cell(cx as i32, source_w, w)
+            };
+            let source_y = if cy as i32 == fy {
+                source_fy
+            } else {
+                source_cell(cy as i32, source_h, h)
+            };
+            let art_x = if a.facing_x < 0 {
+                (source_w - 1 - source_x) as usize
+            } else {
+                source_x as usize
+            };
             let glyphs: Vec<char> = frames
                 .iter()
                 .map(|frame| {
                     frame
-                        .get(cy)
-                        .and_then(|line| line.chars().nth(cx))
+                        .get(source_y as usize)
+                        .and_then(|line| line.chars().nth(art_x))
                         .unwrap_or(' ')
                 })
                 .collect();
@@ -784,23 +897,41 @@ fn stamp_art(layer: &mut Layer, a: &SceneActor, source: &'static str, tint: Rgb,
                 ColorTrack::Gradient {
                     start, end, axis, ..
                 } => Cell::new(glyphs[0], start.scaled(shade), BG).with_fg_gradient(end, axis),
-                _ => Cell::new(glyphs[0], tint.scaled(shade), BG),
+                ColorTrack::Static(color) => {
+                    let color = if a.palette.is_some() {
+                        color
+                    } else {
+                        material_ink(a.kind, glyphs[0], color)
+                    };
+                    Cell::new(glyphs[0], color.scaled(shade), BG)
+                }
+                ColorTrack::Rainbow { .. } => Cell::new(glyphs[0], tint.scaled(shade), BG),
             };
             cell.bold = true;
-            let mut placed = if frames.len() > 1 && glyphs.iter().any(|g| *g != glyphs[0]) {
-                AnimCell::animated(
-                    ox + cx as i32,
-                    oy + cy as i32,
-                    cell,
-                    Anim::still().with(Track::Cycle {
-                        frames: glyphs,
-                        fps: ART_FPS,
-                    }),
-                )
+            cell.offset_x = a.render_offset.0;
+            cell.offset_y = a.render_offset.1;
+            let varied = frames.len() > 1 && glyphs.iter().any(|g| *g != glyphs[0]);
+            let anim = if a.motion_speed > 0.15 && varied {
+                Anim::still().with(Track::Cycle {
+                    frames: glyphs,
+                    fps: IDLE_FPS + (WALK_FPS - IDLE_FPS) * (a.motion_speed / 4.0).clamp(0.0, 1.0),
+                })
+            } else if a.motion_speed <= 0.15 {
+                Anim::still().with(Track::Pulse {
+                    low: 0.97,
+                    high: 1.03,
+                    period: 2.4,
+                    phase: (cx as f32 + cy as f32 * 0.7) * 0.22,
+                })
             } else {
-                AnimCell::still(ox + cx as i32, oy + cy as i32, cell)
+                Anim::still()
             };
-            if (cx as i32, cy as i32) == (fx, fy) {
+            let mut placed = if anim.tracks.is_empty() {
+                AnimCell::still(ox + cx as i32, oy + cy as i32, cell)
+            } else {
+                AnimCell::animated(ox + cx as i32, oy + cy as i32, cell, anim)
+            };
+            if (art_x as i32, source_y) == (source_fx, source_fy) {
                 placed = placed.colored(palette);
                 placed.cell.glow = aura;
             }
@@ -812,10 +943,15 @@ fn stamp_art(layer: &mut Layer, a: &SceneActor, source: &'static str, tint: Rgb,
 /// Opaque backing strip plus text: plates stay legible over bright art
 /// (reference nameplates always float free of the texture). Spaces inside
 /// the text keep the backing instead of punching holes.
-fn push_backed_text(layer: &mut Layer, x: i32, y: i32, text: &str, fg: Rgb) {
+fn push_backed_text(layer: &mut Layer, x: i32, y: i32, text: &str, fg: Rgb, offset: (f32, f32)) {
     let w = text.chars().count() as i32;
+    let start = layer.cells.len();
     layer.fill_rect(x, y, w, 1, Cell::new(' ', fg, BG));
     layer.push_text(x, y, text, fg, BG);
+    for cell in &mut layer.cells[start..] {
+        cell.cell.offset_x = offset.0;
+        cell.cell.offset_y = offset.1;
+    }
 }
 
 fn push_actor(
@@ -829,7 +965,8 @@ fn push_actor(
         layer.push(AnimCell::still(
             a.x + dx,
             a.y + 1,
-            Cell::new('.', Rgb::new(22, 26, 38), BG),
+            Cell::new('.', Rgb::new(22, 26, 38), BG)
+                .with_offset(a.render_offset.0, a.render_offset.1),
         ));
     }
     // Volumetric art for bodies, mini glyphs for items. Returns the art's
@@ -841,6 +978,8 @@ fn push_actor(
                 let mut cell = Cell::new(glyph, part_fg, BG);
                 cell.bold = true;
                 cell.glow = glow;
+                cell.offset_x = a.render_offset.0;
+                cell.offset_y = a.render_offset.1;
                 layer.push(AnimCell::still(a.x + dx, a.y + dy, cell));
             }
             a.y - 2
@@ -858,7 +997,14 @@ fn push_actor(
         label_y -= 1;
     }
     label_rows.push((x0, x0 + w, label_y));
-    push_backed_text(labels, x0, label_y, &a.name, Rgb::new(230, 230, 230));
+    push_backed_text(
+        labels,
+        x0,
+        label_y,
+        &a.name,
+        Rgb::new(230, 230, 230),
+        a.render_offset,
+    );
     // HP pips only while damaged (and always for the followed player).
     let damaged = a.hp < a.max_hp;
     let is_player = a.kind == ActorKind::Player;
@@ -876,7 +1022,7 @@ fn push_actor(
         } else {
             Rgb::new(140, 230, 120)
         };
-        push_backed_text(labels, a.x - 5, label_y - 1, &bar, color);
+        push_backed_text(labels, a.x - 5, label_y - 1, &bar, color, a.render_offset);
         // Register the pips row too, so later actors' plates stack above it
         // instead of overwriting the bar.
         label_rows.push((a.x - 5, a.x + 5, label_y - 1));
@@ -1027,9 +1173,15 @@ pub fn scene_from_view_sized_cached(
     // Camera first: ground and rain build only the visible range plus a
     // margin (all detail is a pure function of world coords, so this is
     // exact and an order of magnitude fewer cells than the whole meadow).
+    // Aim at the body's center above the foot contact, so the full model sits
+    // in the viewport rather than pushing its head off the top edge.
+    let player_frames = art_for(&view.player).map(|(source, _, _)| cached_frames(source));
+    let player_half_height = player_frames
+        .map(|frames| scaled_sprite_size(frames, actor_art_scale(&view.player)).1 / 2)
+        .unwrap_or(0);
     let camera = Camera {
         x: view.player.x - width / 2,
-        y: view.player.y - world_h / 2,
+        y: view.player.y - world_h / 2 - player_half_height,
         ox: 0.0,
         oy: 0.0,
     };
@@ -1226,6 +1378,9 @@ pub fn demo_view() -> SceneView {
         player: SceneActor {
             x: 20,
             y: 14,
+            render_offset: (0.0, 0.0),
+            motion_speed: 0.0,
+            facing_x: 1,
             kind: ActorKind::Player,
             name: "Adventurer".into(),
             glyph: '@',
@@ -1242,6 +1397,9 @@ pub fn demo_view() -> SceneView {
             SceneActor {
                 x: 52,
                 y: 14,
+                render_offset: (0.0, 0.0),
+                motion_speed: 0.0,
+                facing_x: 1,
                 kind: ActorKind::Monster,
                 name: "Mossling".into(),
                 glyph: 'm',
@@ -1252,6 +1410,9 @@ pub fn demo_view() -> SceneView {
             SceneActor {
                 x: 76,
                 y: 18,
+                render_offset: (0.0, 0.0),
+                motion_speed: 0.0,
+                facing_x: 1,
                 kind: ActorKind::Monster,
                 name: "Skeleton".into(),
                 glyph: 's',
@@ -1267,6 +1428,9 @@ pub fn demo_view() -> SceneView {
             SceneActor {
                 x: -6,
                 y: 16,
+                render_offset: (0.0, 0.0),
+                motion_speed: 0.0,
+                facing_x: 1,
                 kind: ActorKind::Npc,
                 name: "Herbalist".into(),
                 glyph: 'h',
@@ -1282,6 +1446,9 @@ pub fn demo_view() -> SceneView {
             SceneActor {
                 x: 36,
                 y: 9,
+                render_offset: (0.0, 0.0),
+                motion_speed: 0.0,
+                facing_x: 1,
                 kind: ActorKind::Item,
                 name: "Iron Sword".into(),
                 glyph: '!',
@@ -1326,6 +1493,9 @@ pub fn dungeon_view() -> SceneView {
         player: SceneActor {
             x: 20,
             y: 14,
+            render_offset: (0.0, 0.0),
+            motion_speed: 0.0,
+            facing_x: 1,
             kind: ActorKind::Player,
             name: "Adventurer".into(),
             glyph: '@',
@@ -1337,6 +1507,9 @@ pub fn dungeon_view() -> SceneView {
             SceneActor {
                 x: 34,
                 y: 12,
+                render_offset: (0.0, 0.0),
+                motion_speed: 0.0,
+                facing_x: 1,
                 kind: ActorKind::Monster,
                 name: "Skeleton".into(),
                 glyph: 's',
@@ -1347,6 +1520,9 @@ pub fn dungeon_view() -> SceneView {
             SceneActor {
                 x: 28,
                 y: 8,
+                render_offset: (0.0, 0.0),
+                motion_speed: 0.0,
+                facing_x: 1,
                 kind: ActorKind::Item,
                 name: "Rusty Stiletto".into(),
                 glyph: '!',
@@ -1389,12 +1565,27 @@ mod tests {
         (world.x + world.w / 2, world.y + world.h / 2)
     }
 
+    fn player_focal_center(view: &SceneView) -> (i32, i32) {
+        let (cx, cy) = world_center(view);
+        let frames = cached_frames(WARRIOR_ART);
+        let (width, height) = scaled_sprite_size(frames, actor_art_scale(&view.player));
+        let (source_fx, source_fy) = focal_of(frames, view.player.glyph);
+        let (focal_x, focal_y) = (
+            destination_cell(source_fx, sprite::sprite_size(frames).0, width),
+            destination_cell(source_fy, sprite::sprite_size(frames).1, height),
+        );
+        (
+            cx + focal_x - width / 2,
+            cy + focal_y - (height - 1) + height / 2,
+        )
+    }
+
     #[test]
     fn player_stays_centered_and_named() {
         let view = demo_view();
         let rows = frame_rows(&view, 0.0);
         assert_eq!(rows.len(), (HUD_H + VIEW_H + LOG_H) as usize);
-        let (cx, cy) = world_center(&view);
+        let (cx, cy) = player_focal_center(&view);
         assert_eq!(rows[cy as usize].chars().nth(cx as usize).unwrap(), '@');
         assert!(
             rows.iter().any(|row| row.contains("Adventurer")),
@@ -1411,7 +1602,7 @@ mod tests {
         let mut view = demo_view();
         view.player.x += 6;
         let rows = frame_rows(&view, 0.0);
-        let (cx, cy) = world_center(&view);
+        let (cx, cy) = player_focal_center(&view);
         assert_eq!(rows[cy as usize].chars().nth(cx as usize).unwrap(), '@');
     }
 
@@ -1445,7 +1636,7 @@ mod tests {
             saturation: 1.0,
             value: 1.0,
         });
-        let (cx, cy) = world_center(&view);
+        let (cx, cy) = player_focal_center(&view);
         let (scene, camera) = scene_from_view(&view);
         let a = compose(&scene, &camera, 0.0)
             .get(cx, cy)
@@ -1463,7 +1654,7 @@ mod tests {
         let mut view = demo_view();
         view.actors.clear();
         view.player.palette = Some(ColorTrack::Static(Rgb::new(255, 30, 20)));
-        let (cx, cy) = world_center(&view);
+        let (cx, cy) = player_focal_center(&view);
         let (scene, camera) = scene_from_view(&view);
         let frame = compose(&scene, &camera, 0.0);
         let adjacent = frame.get(cx + 1, cy).expect("ground beside player");
@@ -1481,7 +1672,7 @@ mod tests {
     fn actor_gradient_reaches_composed_frame_data() {
         let mut view = demo_view();
         view.actors.clear();
-        let (cx, cy) = world_center(&view);
+        let (cx, cy) = player_focal_center(&view);
         let (scene, camera) = scene_from_view(&view);
         let cell = compose(&scene, &camera, 0.0)
             .get(cx, cy)
@@ -1532,7 +1723,7 @@ mod tests {
         // every phase (camera/palette/glow contracts depend on it).
         let mut view = demo_view();
         view.actors.clear();
-        let (cx, cy) = world_center(&view);
+        let (cx, cy) = player_focal_center(&view);
         let (scene, camera) = scene_from_view(&view);
         for t in [0.0, 0.17, 0.34, 0.5, 0.67, 0.84] {
             let cell = compose(&scene, &camera, t)
@@ -1672,6 +1863,102 @@ mod tests {
     }
 
     #[test]
+    fn actor_models_are_ground_anchored_and_smaller_than_pines() {
+        let warrior = sprite::parse_frames(WARRIOR_ART);
+        let skeleton = sprite::parse_frames(SKELETON_ART);
+        let mossling = sprite::parse_frames(MOSSLING_ART);
+        let pine = sprite::parse_frames(TREE_ART);
+        let height = |frames: &[Vec<String>]| frames[0].len() as i32;
+        let actor = demo_view().player;
+        let warrior_height = scaled_sprite_size(&warrior, actor_art_scale(&actor)).1;
+        let skeleton_height = scaled_sprite_size(
+            &skeleton,
+            actor_art_scale(&SceneActor {
+                kind: ActorKind::Monster,
+                glyph: 's',
+                name: "Skeleton".into(),
+                ..actor.clone()
+            }),
+        )
+        .1;
+        let mossling_height = scaled_sprite_size(
+            &mossling,
+            actor_art_scale(&SceneActor {
+                kind: ActorKind::Monster,
+                glyph: 'm',
+                name: "Mossling".into(),
+                ..actor.clone()
+            }),
+        )
+        .1;
+        assert!(warrior_height <= height(&pine) / 2);
+        assert!(skeleton_height < warrior_height + 2);
+        assert!(mossling_height < skeleton_height);
+
+        let mut layer = Layer::new("actor", 2);
+        let top = stamp_art(
+            &mut layer,
+            &actor,
+            WARRIOR_ART,
+            Rgb::new(200, 200, 200),
+            0.0,
+        );
+        assert_eq!(top + warrior_height - 1, actor.y);
+        assert!(layer.cells.iter().any(|cell| cell.y == actor.y));
+        assert!(layer.cells.iter().all(|cell| cell.y <= actor.y));
+    }
+
+    #[test]
+    fn moving_actor_cells_carry_fractional_offset_and_mirrored_focal_glyph() {
+        let mut actor = demo_view().player;
+        actor.render_offset = (0.35, -0.2);
+        actor.motion_speed = 4.0;
+        actor.facing_x = -1;
+        let frames = cached_frames(WARRIOR_ART);
+        let (w, h) = scaled_sprite_size(frames, actor_art_scale(&actor));
+        let (source_fx, source_fy) = focal_of(frames, actor.glyph);
+        let (fx, fy) = (
+            destination_cell(source_fx, sprite::sprite_size(frames).0, w),
+            destination_cell(source_fy, sprite::sprite_size(frames).1, h),
+        );
+        let (ox, oy) = (actor.x - w / 2, actor.y - (h - 1));
+        let mut layer = Layer::new("actor", 2);
+        stamp_art(
+            &mut layer,
+            &actor,
+            WARRIOR_ART,
+            Rgb::new(200, 200, 200),
+            0.0,
+        );
+        let focal = layer
+            .cells
+            .iter()
+            .find(|cell| cell.x == ox + w - 1 - fx && cell.y == oy + fy)
+            .expect("mirrored chest focal cell");
+        assert_eq!(focal.cell.glyph, '@');
+        assert_eq!(
+            (focal.cell.offset_x, focal.cell.offset_y),
+            actor.render_offset
+        );
+        assert!(layer.cells.iter().any(|cell| matches!(
+            cell.anim.tracks.last(),
+            Some(Track::Cycle { fps, .. }) if (*fps - WALK_FPS).abs() < 0.001
+        )));
+
+        actor.motion_speed = 0.0;
+        let mut idle = Layer::new("idle", 2);
+        stamp_art(&mut idle, &actor, WARRIOR_ART, Rgb::new(200, 200, 200), 0.0);
+        assert!(idle.cells.iter().any(|cell| matches!(
+            cell.anim.tracks.last(),
+            Some(Track::Pulse { period, .. }) if (*period - 2.4).abs() < 0.001
+        )));
+        assert!(!idle
+            .cells
+            .iter()
+            .any(|cell| matches!(cell.anim.tracks.last(), Some(Track::Cycle { .. }))));
+    }
+
+    #[test]
     fn landmark_trees_use_full_pine_art() {
         let rows = frame_rows(&demo_view(), 0.0);
         assert!(
@@ -1794,7 +2081,14 @@ mod tests {
     fn plate_backing_fills_spaces_opaque() {
         let mut scene = Scene::default();
         let mut layer = Layer::new("labels", 3);
-        push_backed_text(&mut layer, 10, 4, "A B", Rgb::new(230, 230, 230));
+        push_backed_text(
+            &mut layer,
+            10,
+            4,
+            "A B",
+            Rgb::new(230, 230, 230),
+            (0.0, 0.0),
+        );
         scene.layers.push(layer);
         scene
             .partitions
