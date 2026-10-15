@@ -1,0 +1,371 @@
+//! Pure, bounded particle/effect layers.
+//!
+//! [`layer`] samples explicit seconds; it does not retain state or consult a
+//! clock.  Emitter origins are world cell coordinates (fractional values are
+//! rounded when stamped), and `grow` values are seconds per revealed point.
+//! Each emitter is capped at [`MAX_CELLS`] output cells, including long text,
+//! paths, and deliberately huge counts.  Invalid, non-finite, or out-of-range
+//! inputs simply produce no cells.
+
+use crate::{AnimCell, Cell, Layer};
+
+/// Hard safety limit for one emitter's contribution to a layer.
+pub const MAX_CELLS: usize = 4096;
+const COORD_LIMIT: f32 = 1_000_000.0;
+
+/// A time-bounded effect source. `start` and `lifetime` are seconds in the
+/// caller's explicit timeline; the effect is visible for `start <= time <
+/// start + lifetime`.
+#[derive(Clone, Debug)]
+pub struct Emitter {
+    pub origin: (f32, f32),
+    pub start: f32,
+    pub lifetime: f32,
+    pub cell: Cell,
+    pub kind: Effect,
+}
+
+/// Data-driven particle archetypes. All sampling is deterministic for a given
+/// emitter and time, including [`Effect::Burst`] (whose seed is not global
+/// state).
+#[derive(Clone, Debug)]
+pub enum Effect {
+    Burst {
+        count: usize,
+        speed: f32,
+        seed: u32,
+    },
+    Ring {
+        count: usize,
+        radius: f32,
+    },
+    Chain {
+        points: Vec<(i32, i32)>,
+        grow: f32,
+    },
+    Spike {
+        length: usize,
+        direction: (f32, f32),
+        grow: f32,
+    },
+    Number {
+        text: String,
+        rise: f32,
+    },
+}
+
+/// Build an effect layer at `time`. Sampling is order-independent and has no
+/// I/O, game state, allocation beyond the returned layer, or wall-clock use.
+pub fn layer(name: impl Into<String>, z: i32, emitters: &[Emitter], time: f32) -> Layer {
+    let mut out = Layer::new(name, z);
+    if !time.is_finite() {
+        return out;
+    }
+    for emitter in emitters {
+        let Some(age) = active_age(emitter, time) else {
+            continue;
+        };
+        if !valid_origin(emitter.origin) {
+            continue;
+        }
+        match &emitter.kind {
+            Effect::Burst { count, speed, seed } => {
+                if *count == 0 || !speed.is_finite() || *speed < 0.0 {
+                    continue;
+                }
+                let n = (*count).min(MAX_CELLS);
+                for i in 0..n {
+                    let angle = hash_unit(seed.wrapping_add(i as u32)).to_radians();
+                    push(
+                        &mut out,
+                        emitter,
+                        emitter.origin.0 + angle.cos() * *speed * age,
+                        emitter.origin.1 + angle.sin() * *speed * age,
+                        '•',
+                        age,
+                    );
+                }
+            }
+            Effect::Ring { count, radius } => {
+                if *count == 0 || !radius.is_finite() || *radius < 0.0 {
+                    continue;
+                }
+                let n = (*count).min(MAX_CELLS);
+                let r = *radius * (age / emitter.lifetime);
+                if !r.is_finite() {
+                    continue;
+                }
+                for i in 0..n {
+                    let angle = i as f32 * 360.0 / *count as f32;
+                    let radians = angle.to_radians();
+                    push(
+                        &mut out,
+                        emitter,
+                        emitter.origin.0 + radians.cos() * r,
+                        emitter.origin.1 + radians.sin() * r,
+                        'o',
+                        age,
+                    );
+                }
+            }
+            Effect::Chain { points, grow } => {
+                if points.is_empty() || !valid_grow(*grow) {
+                    continue;
+                }
+                let revealed = ((age / *grow).floor() as usize)
+                    .min(points.len())
+                    .min(MAX_CELLS);
+                for (i, &(x, y)) in points.iter().take(revealed).enumerate() {
+                    let glyph = if (i + 1) % 5 == 0 {
+                        'O'
+                    } else {
+                        chain_glyph(points, i)
+                    };
+                    push(
+                        &mut out,
+                        emitter,
+                        emitter.origin.0 + x as f32,
+                        emitter.origin.1 + y as f32,
+                        glyph,
+                        age,
+                    );
+                }
+            }
+            Effect::Spike {
+                length,
+                direction,
+                grow,
+            } => {
+                if *length == 0 || !valid_grow(*grow) || !valid_direction(*direction) {
+                    continue;
+                }
+                let revealed = ((age / *grow).floor() as usize).min(*length).min(MAX_CELLS);
+                let glyph = ray_glyph(*direction);
+                for i in 0..revealed {
+                    let distance = i as f32 + 1.0;
+                    push(
+                        &mut out,
+                        emitter,
+                        emitter.origin.0 + direction.0 * distance,
+                        emitter.origin.1 + direction.1 * distance,
+                        glyph,
+                        age,
+                    );
+                }
+            }
+            Effect::Number { text, rise } => {
+                if text.is_empty() || !rise.is_finite() || *rise < 0.0 {
+                    continue;
+                }
+                let y = emitter.origin.1 - *rise * age;
+                for (i, glyph) in text.chars().take(MAX_CELLS).enumerate() {
+                    push(
+                        &mut out,
+                        emitter,
+                        emitter.origin.0 + i as f32,
+                        y,
+                        glyph,
+                        age,
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
+fn active_age(emitter: &Emitter, time: f32) -> Option<f32> {
+    if !emitter.start.is_finite() || !emitter.lifetime.is_finite() || emitter.lifetime <= 0.0 {
+        return None;
+    }
+    let age = time - emitter.start;
+    (age.is_finite() && age >= 0.0 && age < emitter.lifetime).then_some(age)
+}
+
+fn valid_origin((x, y): (f32, f32)) -> bool {
+    x.is_finite() && y.is_finite() && x.abs() <= COORD_LIMIT && y.abs() <= COORD_LIMIT
+}
+fn valid_grow(grow: f32) -> bool {
+    grow.is_finite() && grow > 0.0
+}
+fn valid_direction((x, y): (f32, f32)) -> bool {
+    x.is_finite() && y.is_finite() && (x != 0.0 || y != 0.0) && x.abs() <= 1.0e4 && y.abs() <= 1.0e4
+}
+
+fn push(layer: &mut Layer, emitter: &Emitter, x: f32, y: f32, glyph: char, age: f32) {
+    if layer.cells.len() >= MAX_CELLS
+        || !x.is_finite()
+        || !y.is_finite()
+        || x.abs() > COORD_LIMIT
+        || y.abs() > COORD_LIMIT
+    {
+        return;
+    }
+    let fade = (1.0 - age / emitter.lifetime).clamp(0.0, 1.0);
+    let mut cell = emitter.cell;
+    cell.glyph = glyph;
+    cell.fg = cell.fg.scaled(fade);
+    cell.glow *= fade;
+    layer.push(AnimCell::still(x.round() as i32, y.round() as i32, cell));
+}
+
+fn hash_unit(seed: u32) -> f32 {
+    let mut x = seed.wrapping_mul(0x9e37_79b9).wrapping_add(0x7f4a_7c15);
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x85eb_ca6b);
+    x ^= x >> 13;
+    (x as f32 / u32::MAX as f32) * 360.0
+}
+
+fn chain_glyph(points: &[(i32, i32)], i: usize) -> char {
+    if i + 1 >= points.len() {
+        return '+';
+    }
+    let (dx, dy) = (points[i + 1].0 - points[i].0, points[i + 1].1 - points[i].1);
+    if dx == 0 {
+        '|'
+    } else if dy == 0 {
+        '-'
+    } else if dx.signum() == dy.signum() {
+        '\\'
+    } else {
+        '/'
+    }
+}
+
+fn ray_glyph((x, y): (f32, f32)) -> char {
+    if x.abs() > y.abs() * 1.5 {
+        '-'
+    } else if y.abs() > x.abs() * 1.5 {
+        '|'
+    } else if x.signum() == y.signum() {
+        '\\'
+    } else {
+        '/'
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Rgb;
+
+    fn e(kind: Effect) -> Emitter {
+        Emitter {
+            origin: (2.0, 3.0),
+            start: 1.0,
+            lifetime: 4.0,
+            cell: Cell::new('*', Rgb::new(100, 80, 60), Rgb::new(0, 0, 0))
+                .with_glow(1.0)
+                .with_scale(0.5),
+            kind,
+        }
+    }
+
+    #[test]
+    fn all_kinds_sample_and_decay() {
+        let es = [
+            e(Effect::Burst {
+                count: 3,
+                speed: 1.0,
+                seed: 4,
+            }),
+            e(Effect::Ring {
+                count: 4,
+                radius: 2.0,
+            }),
+            e(Effect::Chain {
+                points: vec![(0, 0), (1, 0), (1, 1)],
+                grow: 1.0,
+            }),
+            e(Effect::Spike {
+                length: 3,
+                direction: (1.0, 0.0),
+                grow: 1.0,
+            }),
+            e(Effect::Number {
+                text: "42".into(),
+                rise: 1.0,
+            }),
+        ];
+        let a = layer("fx", 2, &es, 2.5);
+        assert!(!a.cells.is_empty());
+        assert!(a
+            .cells
+            .iter()
+            .all(|c| c.cell.scale == 0.5 && c.cell.glow < 1.0));
+    }
+
+    #[test]
+    fn deterministic_and_time_bounded() {
+        let es = [e(Effect::Burst {
+            count: 8,
+            speed: 2.0,
+            seed: 9,
+        })];
+        let a = layer("x", 0, &es, 2.0);
+        let b = layer("x", 0, &es, 2.0);
+        assert_eq!(
+            a.cells
+                .iter()
+                .map(|c| (c.x, c.y, c.cell.glyph))
+                .collect::<Vec<_>>(),
+            b.cells
+                .iter()
+                .map(|c| (c.x, c.y, c.cell.glyph))
+                .collect::<Vec<_>>()
+        );
+        assert!(layer("x", 0, &es, 0.9).cells.is_empty());
+        assert!(layer("x", 0, &es, 5.0).cells.is_empty());
+    }
+
+    #[test]
+    fn invalid_and_huge_inputs_are_safe() {
+        let es = [
+            e(Effect::Burst {
+                count: usize::MAX,
+                speed: f32::MAX,
+                seed: 1,
+            }),
+            e(Effect::Number {
+                text: "x".repeat(20_000),
+                rise: 1.0,
+            }),
+            Emitter {
+                origin: (f32::NAN, 0.0),
+                ..e(Effect::Ring {
+                    count: 2,
+                    radius: 1.0,
+                })
+            },
+        ];
+        assert!(layer("x", 0, &es, 2.0).cells.len() <= MAX_CELLS);
+        assert!(layer(
+            "x",
+            0,
+            &[e(Effect::Chain {
+                points: vec![(0, 0), (1, 0)],
+                grow: 0.0
+            })],
+            2.0
+        )
+        .cells
+        .is_empty());
+    }
+
+    #[test]
+    fn growth_reveals_chain_and_spike() {
+        let chain = [e(Effect::Chain {
+            points: vec![(0, 0), (1, 0), (1, 1)],
+            grow: 1.0,
+        })];
+        let spike = [e(Effect::Spike {
+            length: 3,
+            direction: (0.0, 1.0),
+            grow: 1.0,
+        })];
+        assert_eq!(layer("x", 0, &chain, 2.5).cells.len(), 1);
+        assert_eq!(layer("x", 0, &chain, 3.1).cells.len(), 2);
+        assert_eq!(layer("x", 0, &spike, 3.9).cells.len(), 2);
+    }
+}

@@ -11,7 +11,7 @@ third-party artwork or generated binary data.
 | `skeleton.txt` | Pale skeletal undead animation (reference bone-white idiom) | 4 |
 | `skeleton_warrior.txt` | Shield-and-blade skeleton warrior animation | 4 |
 | `npc_herbalist.txt` | NPC fallback animation | 4 |
-| `tree.txt` | Forest prop animated wind sway | 2 |
+| `tree.txt` | Forest prop animated wind sway | 4 |
 | `ruin.txt` | Ruin prop weathered stone animation | 2 |
 | `gate.txt` | Static medieval gatehouse adaptation | 1 |
 | `item_icons.txt` | Sword, shield, and generic item icons | 3 |

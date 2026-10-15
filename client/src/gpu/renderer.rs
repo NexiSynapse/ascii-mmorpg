@@ -18,6 +18,9 @@ pub struct GpuRenderer {
     pub pipeline: GpuPipeline,
     pub mesh: MeshBuffer,
     pub batches: SceneBatches,
+    /// Display (terminal) grid in cells. The GPU renders this grid natively
+    /// (1:1, no downscale) so zoomed-out terminals stay sharp; large grids
+    /// use 2x SSAA instead of 4x to bound fill cost (see `adaptive_ssaa`).
     pub width: i16,
     pub height: i16,
     pub weather: WeatherMode,
@@ -398,14 +401,17 @@ impl GpuRenderer {
         let px = player_render_pos.x;
         let pz = player_render_pos.y;
 
-        // 1. Setup Camera (Isometric 2.5D perspective looking North towards -Z)
-        let cam_eye = Vec3::new(cam_pos.x, 11.5, cam_pos.y + 13.5);
+        // 1. Setup Camera (Isometric 2.5D perspective looking North towards -Z).
+        // Framed closer than the original wide shot so actors read at default
+        // terminal zoom: narrower FOV + lower eye keeps entities several cells
+        // tall without changing world scale.
+        let cam_eye = Vec3::new(cam_pos.x, 9.8, cam_pos.y + 11.5);
         let cam_target = Vec3::new(cam_pos.x, 0.8, cam_pos.y);
         let cam_up = Vec3::new(0.0, 1.0, 0.0);
 
         let view = Mat4::look_at_rh(cam_eye, cam_target, cam_up);
         let aspect = (width as f32 / height as f32) * 0.48;
-        let proj = Mat4::perspective_rh(42.0f32.to_radians(), aspect, 0.1, 100.0);
+        let proj = Mat4::perspective_rh(38.0f32.to_radians(), aspect, 0.1, 100.0);
         let view_proj = proj * view;
         let inv_view_proj = view_proj.inverse();
         let frustum = Frustum::from_view_proj(&view_proj);
@@ -609,17 +615,20 @@ impl GpuRenderer {
         }
 
         // Colonnade Pillars: West (-10, -5) -> [-8.0, -4.0], East (-6, -5) -> [-4.8, -4.0]
+        // Generous bounds so landmark props survive the closer default framing.
         let pillars = [([-8.0, 0.0, -4.0], 1.0), ([-4.8, 0.0, -4.0], 0.76)];
         for (pos, height_scale) in pillars {
-            if frustum.test_sphere(Vec3::from(pos) + Vec3::new(0.0, 1.5, 0.0), 3.0) {
+            if frustum.test_sphere(Vec3::from(pos) + Vec3::new(0.0, 1.5, 0.0), 4.5) {
                 batches.add_pillar(pos, height_scale);
             }
         }
 
-        for gx in (cam_tile_x - 16)..=(cam_tile_x + 16) {
-            for gy in (cam_tile_y - 12)..=(cam_tile_y + 12) {
+        // Meadow grass: denser crossed-blade field (~50% coverage). Profiled as
+        // vertex-cheap under 4x SSAA; reduce modulus or range if batch timing regresses.
+        for gx in (cam_tile_x - 18)..=(cam_tile_x + 18) {
+            for gy in (cam_tile_y - 14)..=(cam_tile_y + 14) {
                 let seed = terrain_seed(gx, gy);
-                if seed % 3 != 0 {
+                if seed % 2 != 0 {
                     continue;
                 }
                 let x = gx as f32 * 0.8 + (seed % 7) as f32 * 0.08;
@@ -652,58 +661,46 @@ impl GpuRenderer {
         Some(camera.unproject_screen_to_world(screen_x as f32, screen_y as f32, depth))
     }
 
-    /// High-performance zero-allocation ANSI string formatter.
+    /// High-performance zero-allocation ANSI string formatter (native 1:1 grid).
+    ///
+    /// Foreground/background channels are quantized to 32 levels before
+    /// run-merging: smooth GPU gradients otherwise emit a fresh truecolor
+    /// escape on nearly every cell, bloating frames (~2x bytes) and choking
+    /// Windows ConPTY parsing at zoomed-out grids. 5-bit steps are visually
+    /// near-identical for glyph art but collapse long runs into one escape.
     fn format_frame_with_hud(&self, cells: &[GpuCell], world: &WorldSnapshot) -> String {
+        // Lower GPU cells to shared scene cells and compose the full frame in
+        // one Ratatui buffer (scene + HUD + overlay), exactly like the CPU
+        // path. Channel quantization is preserved for ANSI run-merging.
         let width = self.width as usize;
-        let height = self.height as usize;
-        let mut out = String::with_capacity(width * height * 16 + 512);
+        let scene: Vec<crate::partitions::SceneCell> = cells
+            .iter()
+            .map(|cell| crate::partitions::SceneCell {
+                glyph: std::char::from_u32(cell.glyph).unwrap_or(' '),
+                fg: (
+                    quantize_channel(cell.fg_r) as u8,
+                    quantize_channel(cell.fg_g) as u8,
+                    quantize_channel(cell.fg_b) as u8,
+                ),
+                bg: Some((
+                    quantize_channel(cell.bg_r) as u8,
+                    quantize_channel(cell.bg_g) as u8,
+                    quantize_channel(cell.bg_b) as u8,
+                )),
+            })
+            .collect();
 
-        for y in 0..height {
-            let mut last_fg = (999, 999, 999);
-            let mut last_bg = (999, 999, 999);
-
-            for x in 0..width {
-                let idx = y * width + x;
-                if idx >= cells.len() {
-                    break;
-                }
-                let cell = &cells[idx];
-                let fg = (cell.fg_r, cell.fg_g, cell.fg_b);
-                let bg = (cell.bg_r, cell.bg_g, cell.bg_b);
-
-                if fg != last_fg {
-                    push_rgb_ansi(&mut out, false, fg.0, fg.1, fg.2);
-                    last_fg = fg;
-                }
-                if bg != last_bg {
-                    push_rgb_ansi(&mut out, true, bg.0, bg.1, bg.2);
-                    last_bg = bg;
-                }
-
-                let ch = std::char::from_u32(cell.glyph).unwrap_or(' ');
-                out.push(ch);
-            }
-            out.push_str("\x1b[0m\r\n");
-        }
-
-        // Compose Ratatui-powered Dark Fantasy MMORPG HUD overlay
         let mut hud = crate::ui::RatatuiHud::new();
-        let hud_height = if self.active_modal != crate::ui::ActiveModal::None {
-            12
-        } else {
-            7
-        };
-        let hud_overlay = hud.render_hud_overlay_with_modal(
+        hud.render_composed_frame(crate::ui::ComposedScene {
             world,
-            self.width as u16,
-            hud_height,
-            self.weather,
-            "WGPU 3D BATCHED PIPELINE",
-            self.active_modal,
-        );
-        out.push_str(&hud_overlay);
-
-        out
+            width: self.width.max(20) as u16,
+            height: self.height.max(10) as u16,
+            weather: self.weather,
+            backend_name: "WGPU 3D BATCHED PIPELINE",
+            modal: self.active_modal,
+            cells: &scene,
+            cells_width: width.max(1),
+        })
     }
 }
 
@@ -711,35 +708,10 @@ fn damping_factor(rate: f32, delta_seconds: f32) -> f32 {
     1.0 - (-rate * delta_seconds.max(0.0)).exp()
 }
 
+/// Quantizes a 0-255 channel to 32 levels for ANSI run-merging.
 #[inline]
-fn push_rgb_ansi(out: &mut String, is_bg: bool, r: u32, g: u32, b: u32) {
-    if is_bg {
-        out.push_str("\x1b[48;2;");
-    } else {
-        out.push_str("\x1b[38;2;");
-    }
-    push_fast_u32(out, r);
-    out.push(';');
-    push_fast_u32(out, g);
-    out.push(';');
-    push_fast_u32(out, b);
-    out.push('m');
-}
-
-#[inline]
-fn push_fast_u32(out: &mut String, mut val: u32) {
-    val = val.min(255);
-    if val >= 100 {
-        out.push((b'0' + (val / 100) as u8) as char);
-        val %= 100;
-        out.push((b'0' + (val / 10) as u8) as char);
-        out.push((b'0' + (val % 10) as u8) as char);
-    } else if val >= 10 {
-        out.push((b'0' + (val / 10) as u8) as char);
-        out.push((b'0' + (val % 10) as u8) as char);
-    } else {
-        out.push((b'0' + val as u8) as char);
-    }
+fn quantize_channel(value: u32) -> u32 {
+    (value.min(255) >> 3) << 3
 }
 
 #[cfg(test)]
@@ -1155,5 +1127,46 @@ f 2 5 4 3
         let two_steps = 1.0 - (1.0 - damping_factor(rate, 1.0 / 60.0)).powi(2);
         assert!((one_step - two_steps).abs() < 1e-6);
         assert_eq!(damping_factor(rate, 0.0), 0.0);
+    }
+
+    #[test]
+    fn large_terminal_renders_natively_with_reduced_ssaa() {
+        // Native 1:1 cell grid at any zoom (no downscale blur).
+        assert_eq!(crate::gpu::pipeline::adaptive_ssaa(80, 30), 4);
+        // Zoomed-out grids keep full cell resolution; only sub-pixel samples
+        // drop 4x -> 2x to bound fill cost.
+        assert_eq!(crate::gpu::pipeline::adaptive_ssaa(220, 70), 2);
+    }
+
+    #[test]
+    fn display_output_matches_terminal_size_despite_capped_render() {
+        let Ok(mut renderer) = GpuRenderer::new(220, 70, WeatherMode::Rain) else {
+            eprintln!("Skipping: no GPU adapter on host");
+            return;
+        };
+        assert_eq!((renderer.width, renderer.height), (220, 70));
+        assert_eq!(
+            (renderer.pipeline.width, renderer.pipeline.height),
+            (220, 70),
+            "GPU must render the native grid, never a downscaled one"
+        );
+        assert_eq!(renderer.pipeline.ssaa, 2);
+        let world = sample_world();
+        let frame = renderer.render_frame(&world, 0);
+        // 70 scene rows + HUD block must still fill the display grid.
+        assert!(frame.lines().count() >= 70, "output must fill display grid");
+    }
+
+    #[test]
+    fn paused_gpu_frame_renders_pause_menu() {
+        let Ok(mut renderer) = GpuRenderer::new(80, 30, WeatherMode::Rain) else {
+            eprintln!("Skipping: no GPU adapter on host");
+            return;
+        };
+        renderer.active_modal = crate::ui::ActiveModal::Paused;
+        let world = sample_world();
+        let frame = renderer.render_frame(&world, 0);
+        assert!(frame.contains("PAUSED"), "paused frame must show the menu");
+        assert!(frame.contains("Resume play"));
     }
 }

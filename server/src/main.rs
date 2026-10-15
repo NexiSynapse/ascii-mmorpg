@@ -65,13 +65,32 @@ enum ServerCommand {
 }
 
 fn simulation_loop(command_rx: mpsc::Receiver<ServerCommand>, clients: ClientRegistry) {
+    use std::collections::VecDeque;
     let mut simulation = Simulation::demo();
+    // Strict 20 Hz scheduler: inputs queue here and are drained at tick
+    // boundaries (one tick per 50 ms). Inputs never advance a tick directly,
+    // so burst input cannot exceed 20 Hz. Cap bounds memory under flooding.
+    const MAX_PENDING: usize = 512;
+    let mut pending: VecDeque<(u64, ClientCommand)> = VecDeque::new();
+
+    // Drains the queue into a single tick and broadcasts the result.
+    let flush_tick = |simulation: &mut Simulation,
+                      pending: &mut VecDeque<(u64, ClientCommand)>,
+                      clients: &ClientRegistry| {
+        if pending.is_empty() {
+            simulation.advance_tick();
+        } else {
+            let queued: Vec<(u64, ClientCommand)> = pending.drain(..).collect();
+            simulation.advance_tick_with(queued);
+        }
+        broadcast_snapshots(simulation, clients);
+    };
+
     loop {
         let message = match command_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(message) => message,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                simulation.advance_tick();
-                broadcast_snapshots(&simulation, &clients);
+                flush_tick(&mut simulation, &mut pending, &clients);
                 continue;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -83,27 +102,26 @@ fn simulation_loop(command_rx: mpsc::Receiver<ServerCommand>, clients: ClientReg
                 clients.lock().unwrap().push((client_id, sender));
             }
             ServerCommand::Input { client_id, command } => {
-                let events = simulation.fixed_tick_for(client_id, Some(command));
-                if events
-                    .iter()
-                    .any(|event| matches!(event, ServerEvent::Error(_)))
-                {
+                // Protocol errors are reported immediately without ticking or queueing.
+                if command.protocol_version != ascii_mmorpg_shared::PROTOCOL_VERSION {
                     if let Some((_, sender)) = clients
                         .lock()
                         .unwrap()
                         .iter()
                         .find(|(id, _)| *id == client_id)
                     {
-                        for event in events {
-                            let _ = sender.send(event);
-                        }
+                        let _ = sender.send(ServerEvent::Error("protocol version mismatch".into()));
                     }
                     continue;
                 }
-                broadcast_snapshots(&simulation, &clients);
+                if pending.len() >= MAX_PENDING {
+                    pending.pop_front();
+                }
+                pending.push_back((client_id, command));
             }
             ServerCommand::Disconnect { client_id } => {
                 clients.lock().unwrap().retain(|(id, _)| *id != client_id);
+                pending.retain(|(id, _)| *id != client_id);
             }
         }
     }
@@ -204,17 +222,110 @@ mod tests {
         };
         assert_eq!(idle_snapshot.tick, 1);
 
+        // Strict scheduler: queued input applies at the next 50 ms tick
+        // boundary, not immediately on receipt.
         commands
             .send(ServerCommand::Input {
                 client_id: 1,
                 command: ClientCommand::new(0, Command::Rest),
             })
             .unwrap();
-        let input = event_rx.recv_timeout(Duration::from_millis(200)).unwrap();
+        let input = event_rx.recv_timeout(Duration::from_millis(500)).unwrap();
         let ServerEvent::Snapshot(input_snapshot) = input else {
             panic!("expected input snapshot")
         };
         assert_eq!(input_snapshot.tick, 2);
+        assert!(
+            input_snapshot
+                .messages
+                .iter()
+                .any(|message| message.contains("catch your breath")),
+            "queued Rest must apply inside tick 2"
+        );
+
+        drop(commands);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn tcp_loop_coalesces_burst_input_into_one_tick() {
+        let (commands, command_rx) = mpsc::channel();
+        let clients = Arc::new(Mutex::new(Vec::new()));
+        let (events, event_rx) = mpsc::channel();
+        let loop_clients = Arc::clone(&clients);
+        let worker = thread::spawn(move || simulation_loop(command_rx, loop_clients));
+
+        commands
+            .send(ServerCommand::Connect {
+                client_id: 7,
+                sender: events,
+            })
+            .unwrap();
+        let _ = event_rx.recv_timeout(Duration::from_millis(200)).unwrap();
+        let _ = event_rx.recv_timeout(Duration::from_millis(200)).unwrap();
+
+        // Three rapid inputs must not produce three ticks under the strict
+        // scheduler; they drain inside the next single tick.
+        for _ in 0..3 {
+            commands
+                .send(ServerCommand::Input {
+                    client_id: 7,
+                    command: ClientCommand::new(0, Command::Rest),
+                })
+                .unwrap();
+        }
+        let burst = event_rx.recv_timeout(Duration::from_millis(500)).unwrap();
+        let ServerEvent::Snapshot(burst_snapshot) = burst else {
+            panic!("expected burst snapshot")
+        };
+        assert_eq!(burst_snapshot.tick, 2);
+
+        drop(commands);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn tcp_loop_rejects_protocol_mismatch_without_tick_or_queue() {
+        let (commands, command_rx) = mpsc::channel();
+        let clients = Arc::new(Mutex::new(Vec::new()));
+        let (events, event_rx) = mpsc::channel();
+        let loop_clients = Arc::clone(&clients);
+        let worker = thread::spawn(move || simulation_loop(command_rx, loop_clients));
+
+        commands
+            .send(ServerCommand::Connect {
+                client_id: 9,
+                sender: events,
+            })
+            .unwrap();
+        let _ = event_rx.recv_timeout(Duration::from_millis(200)).unwrap();
+        let _ = event_rx.recv_timeout(Duration::from_millis(200)).unwrap();
+
+        commands
+            .send(ServerCommand::Input {
+                client_id: 9,
+                command: ClientCommand {
+                    protocol_version: ascii_mmorpg_shared::PROTOCOL_VERSION + 1,
+                    client_tick: 0,
+                    command: Command::Rest,
+                },
+            })
+            .unwrap();
+        let error = event_rx.recv_timeout(Duration::from_millis(200)).unwrap();
+        assert!(matches!(error, ServerEvent::Error(_)));
+        // Next tick must be idle tick 2 with no queued Rest applied.
+        let next = event_rx.recv_timeout(Duration::from_millis(500)).unwrap();
+        let ServerEvent::Snapshot(next_snapshot) = next else {
+            panic!("expected snapshot after error")
+        };
+        assert_eq!(next_snapshot.tick, 2);
+        assert!(
+            !next_snapshot
+                .messages
+                .iter()
+                .any(|message| message.contains("catch your breath")),
+            "rejected command must not queue"
+        );
 
         drop(commands);
         worker.join().unwrap();

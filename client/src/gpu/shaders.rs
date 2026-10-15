@@ -142,7 +142,11 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
 
     let V = normalize(camera.camera_pos.xyz - in.world_pos);
 
-    // Water surfaces: azure water color with dynamic wave normal specular shimmer
+    // Water surfaces: azure water color with dynamic wave normal specular shimmer.
+    // Tuned: tighter specular lobe (32.0) for calm glints, slightly deeper base,
+    // plus a cheap view-dependent fresnel sky reflection as a stand-in for a
+    // full reflection pass (no extra textures/bind groups; true planar or
+    // screen-space reflections remain deferred pending profiling).
     if (in.material_id >= 5.8 && in.material_id <= 6.2) {
         let wave_t = camera.time * 2.6;
         let wave_norm = normalize(vec3<f32>(
@@ -150,12 +154,14 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
             0.95,
             cos(wave_t + in.world_pos.z * 2.0) * 0.25
         ));
-        let water_base = vec3<f32>(0.09, 0.25, 0.48);
+        let water_base = vec3<f32>(0.08, 0.23, 0.46);
         let water_NdotL = max(dot(wave_norm, normalize(lighting.sun_dir.xyz)), 0.0);
         let water_H = normalize(normalize(lighting.sun_dir.xyz) + V);
-        let water_spec = pow(max(dot(wave_norm, water_H), 0.0), 16.0) * 0.85;
-        let water_color = water_base * (lighting.ambient_color.rgb + lighting.sun_color.rgb * water_NdotL) + vec3<f32>(water_spec);
-        out.color = vec4<f32>(water_color, 0.85);
+        let water_spec = pow(max(dot(wave_norm, water_H), 0.0), 32.0) * 0.9;
+        var water_color = water_base * (lighting.ambient_color.rgb + lighting.sun_color.rgb * water_NdotL) + vec3<f32>(water_spec);
+        let fresnel = pow(1.0 - max(dot(V, wave_norm), 0.0), 3.0) * 0.35;
+        water_color += vec3<f32>(0.35, 0.50, 0.70) * fresnel;
+        out.color = vec4<f32>(water_color, 0.88);
         out.normal_depth = vec4<f32>(wave_norm * 0.5 + 0.5, in.clip_position.z);
         out.metadata = pack_metadata(in.material_id, in.entity_id, in.entity_class);
         return out;
@@ -172,7 +178,7 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
     let H_sun = normalize(L_sun + V);
     let spec_power = max(1.0 / (in.roughness * in.roughness + 0.001), 2.0);
     let NdotH = max(dot(N, H_sun), 0.0);
-    var specular_light = pow(NdotH, spec_power) * (1.0 - in.roughness) * lighting.sun_color.rgb * 0.4;
+    var specular_light = pow(NdotH, spec_power) * (1.0 - in.roughness) * lighting.sun_color.rgb * 0.35;
 
     // Evaluate dynamic point lights (torches, campfires, entity lighting pools)
     let light_count = min(lighting.num_point_lights, 16u);
@@ -192,17 +198,18 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
 
             let H_point = normalize(L_point + V);
             let point_NdotH = max(dot(N, H_point), 0.0);
-            specular_light += pow(point_NdotH, spec_power) * light.color.rgb * (1.0 - in.roughness) * atten_sq * 0.5;
+            specular_light += pow(point_NdotH, spec_power) * light.color.rgb * (1.0 - in.roughness) * atten_sq * 0.45;
         }
     }
 
     // Final lit color
     var lit_color = in.color.rgb * diffuse_light + specular_light;
 
-    // Calm Atmospheric Distance Fog (calm twilight deep indigo falloff)
+    // Calm Atmospheric Distance Fog (calm twilight deep indigo falloff).
+    // Tuned 16/42 to preserve more midground terrain before the void gate.
     let dist_to_cam = length(camera.camera_pos.xyz - in.world_pos);
-    let fog_start = 14.0;
-    let fog_end = 38.0;
+    let fog_start = 16.0;
+    let fog_end = 42.0;
     let fog_factor = clamp((dist_to_cam - fog_start) / (fog_end - fog_start), 0.0, 1.0);
     let fog_color = vec3<f32>(0.06, 0.08, 0.12);
     lit_color = mix(lit_color, fog_color, fog_factor);
@@ -277,40 +284,39 @@ fn material_glyph(material: u32, band: u32, x: u32, y: u32) -> u32 {
             if (v == 2u) { return 61u; }  // '='
             return 34u;                   // '"'
         }
+        // Bright bands stay quiet (strokes, then shaded blocks for light
+        // pools) so letter-detailed actors and props pop by contrast.
         if (band == 4u) {
             if (v == 0u) { return 61u; }  // '='
-            if (v == 1u) { return 99u; }  // 'c'
-            if (v == 2u) { return 115u; } // 's'
-            return 114u;                  // 'r'
+            if (v == 1u) { return 45u; }  // '-'
+            if (v == 2u) { return 126u; } // '~'
+            return 58u;                   // ':'
         }
         if (band == 5u) {
-            if (v == 0u) { return 111u; } // 'o'
-            if (v == 1u) { return 117u; } // 'u'
-            if (v == 2u) { return 110u; } // 'n'
-            return 120u;                  // 'x'
+            if (v == 0u) { return 43u; }  // '+'
+            if (v == 1u) { return 61u; }  // '='
+            if (v == 2u) { return 42u; }  // '*'
+            return 111u;                  // 'o' pebble
         }
         if (band == 6u) {
-            if (v == 0u) { return 79u; }  // 'O'
-            if (v == 1u) { return 48u; }  // '0'
-            if (v == 2u) { return 83u; }  // 'S'
-            return 68u;                   // 'D'
+            if (v == 0u) { return 9617u; } // '░'
+            if (v == 1u) { return 9618u; } // '▒'
+            if (v == 2u) { return 9617u; } // '░'
+            return 9618u;                  // '▒'
         }
         if (band == 7u) {
-            if (v == 0u) { return 37u; }  // '%'
-            if (v == 1u) { return 36u; }  // '$'
-            if (v == 2u) { return 88u; }  // 'X'
-            return 72u;                   // 'H'
+            if (v == 0u) { return 9618u; } // '▒'
+            if (v == 1u) { return 9619u; } // '▓'
+            if (v == 2u) { return 9618u; } // '▒'
+            return 9619u;                  // '▓'
         }
         if (band == 8u) {
-            if (v == 0u) { return 35u; }  // '#'
-            if (v == 1u) { return 77u; }  // 'M'
-            if (v == 2u) { return 87u; }  // 'W'
-            return 38u;                   // '&'
+            if (v == 0u) { return 9619u; } // '▓'
+            if (v == 1u) { return 9608u; } // '█'
+            if (v == 2u) { return 9619u; } // '▓'
+            return 9608u;                  // '█'
         }
-        if (v == 0u) { return 64u; }      // '@'
-        if (v == 1u) { return 35u; }      // '#'
-        if (v == 2u) { return 37u; }      // '%'
-        return 66u;                       // 'B'
+        return 9608u;                     // '█' torch-core ground
     }
     if (material == 1u) { // metal: hard creases, rivets, and burnished plate
         if (band == 0u) { return 32u; }
@@ -447,28 +453,30 @@ fn material_glyph(material: u32, band: u32, x: u32, y: u32) -> u32 {
                 return 119u;                  // 'w'
             }
         }
+        // Bright foliage stays leafy (tips, glints, mass) instead of alphabet
+        // blocks, so lit grass reads as meadow rather than text.
         if (band == 4u) {
-            if (v == 0u) { return 111u; } // 'o'
-            if (v == 1u) { return 119u; } // 'w'
-            if (v == 2u) { return 109u; } // 'm'
-            return 110u;                  // 'n'
+            if (v == 0u) { return 118u; } // 'v' leaf tip
+            if (v == 1u) { return 121u; } // 'y'
+            if (v == 2u) { return 119u; } // 'w'
+            return 34u;                   // '"'
         }
         if (band == 5u) {
-            if (v == 0u) { return 37u; }  // '%'
-            if (v == 1u) { return 38u; }  // '&'
-            if (v == 2u) { return 56u; }  // '8'
-            return 87u;                   // 'W'
+            if (v == 0u) { return 42u; }  // '*'
+            if (v == 1u) { return 120u; } // 'x'
+            if (v == 2u) { return 43u; }  // '+'
+            return 34u;                   // '"'
         }
         if (band == 6u) {
-            if (v == 0u) { return 38u; }  // '&'
-            if (v == 1u) { return 87u; }  // 'W'
-            if (v == 2u) { return 77u; }  // 'M'
-            return 66u;                   // 'B'
+            if (v == 0u) { return 35u; }  // '#'
+            if (v == 1u) { return 42u; }  // '*'
+            if (v == 2u) { return 43u; }  // '+'
+            return 37u;                   // '%'
         }
         if (v == 0u) { return 35u; }      // '#'
-        if (v == 1u) { return 64u; }      // '@'
-        if (v == 2u) { return 77u; }      // 'M'
-        return 87u;                       // 'W'
+        if (v == 1u) { return 35u; }      // '#'
+        if (v == 2u) { return 42u; }      // '*'
+        return 35u;                       // '#'
     }
     if (material == 4u) { // emissive: fire, flickering torches, sparks, and glowing crystals
         if (band == 0u) { return 32u; }
@@ -597,7 +605,8 @@ fn material_glyph(material: u32, band: u32, x: u32, y: u32) -> u32 {
         if (v == 2u) { return 66u; }      // 'B'
         return 77u;                       // 'M'
     }
-    // High-Fidelity Ansenjeo Volumetric Ramp fallback
+    // High-Fidelity Ansenjeo Volumetric Ramp fallback (quiet like terrain:
+    // strokes and shaded blocks, never alphabet soup).
     if (band == 0u) { return 32u; }  // ' '
     if (band == 1u) {
         if (v == 0u) { return 46u; }  // '.'
@@ -619,38 +628,35 @@ fn material_glyph(material: u32, band: u32, x: u32, y: u32) -> u32 {
     }
     if (band == 4u) {
         if (v == 0u) { return 61u; }  // '='
-        if (v == 1u) { return 99u; }  // 'c'
-        if (v == 2u) { return 115u; } // 's'
-        return 114u;                  // 'r'
+        if (v == 1u) { return 45u; }  // '-'
+        if (v == 2u) { return 126u; } // '~'
+        return 58u;                   // ':'
     }
     if (band == 5u) {
-        if (v == 0u) { return 111u; } // 'o'
-        if (v == 1u) { return 117u; } // 'u'
-        if (v == 2u) { return 110u; } // 'n'
-        return 101u;                  // 'e'
+        if (v == 0u) { return 43u; }  // '+'
+        if (v == 1u) { return 61u; }  // '='
+        if (v == 2u) { return 42u; }  // '*'
+        return 111u;                  // 'o' pebble
     }
     if (band == 6u) {
-        if (v == 0u) { return 79u; }  // 'O'
-        if (v == 1u) { return 48u; }  // '0'
-        if (v == 2u) { return 83u; }  // 'S'
-        return 68u;                   // 'D'
+        if (v == 0u) { return 9617u; } // '░'
+        if (v == 1u) { return 9618u; } // '▒'
+        if (v == 2u) { return 9617u; } // '░'
+        return 9618u;                  // '▒'
     }
     if (band == 7u) {
-        if (v == 0u) { return 37u; }  // '%'
-        if (v == 1u) { return 36u; }  // '$'
-        if (v == 2u) { return 88u; }  // 'X'
-        return 72u;                   // 'H'
+        if (v == 0u) { return 9618u; } // '▒'
+        if (v == 1u) { return 9619u; } // '▓'
+        if (v == 2u) { return 9618u; } // '▒'
+        return 9619u;                  // '▓'
     }
     if (band == 8u) {
-        if (v == 0u) { return 35u; }  // '#'
-        if (v == 1u) { return 77u; }  // 'M'
-        if (v == 2u) { return 87u; }  // 'W'
-        return 38u;                   // '&'
+        if (v == 0u) { return 9619u; } // '▓'
+        if (v == 1u) { return 9608u; } // '█'
+        if (v == 2u) { return 9619u; } // '▓'
+        return 9608u;                  // '█'
     }
-    if (v == 0u) { return 64u; }      // '@'
-    if (v == 1u) { return 35u; }      // '#'
-    if (v == 2u) { return 37u; }      // '%'
-    return 66u;                       // 'B'
+    return 9608u;                     // '█'
 }
 
 fn luma_at(x: i32, y: i32) -> f32 {
@@ -846,7 +852,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         } else if (edge_x > edge_y * 1.6) {
             if (edge_hash == 0u) { glyph = 124u; } // '|'
             else if (edge_hash == 1u) { glyph = 33u; } // '!'
-            else { glyph = 73u; } // 'I'
+            else { glyph = 124u; } // '|' (never 'I': reads as text on terrain)
         } else if (edge_x > 0.22 && edge_y > 0.22) {
             let diag1 = abs(nd00.w - nd11.w);
             let diag2 = abs(nd10.w - nd01.w);
@@ -874,34 +880,39 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
             depth_luma = luma * clamp((1.0 - avg_nd.w) * 2500.0, 0.0, 1.0);
         }
         let dithered_luma = clamp(depth_luma + dither, 0.0, 1.0);
+        // Upscaler-lite: edge-adaptive micro-contrast. Cells near a detected
+        // discontinuity get a small S-curve push so glyph bands resolve detail
+        // without a separate FSR/temporal pass (still deferred pending profiling).
+        let edge_sharpen = clamp(edge_mag, 0.0, 1.0) * 0.12;
+        let sharpened_luma = clamp((dithered_luma - 0.5) * (1.0 + edge_sharpen) + 0.5, 0.0, 1.0);
 
         var band = 0u;
-        if (dithered_luma < 0.04) {
+        if (sharpened_luma < 0.04) {
             band = 0u;
-        } else if (dithered_luma < 0.10) {
+        } else if (sharpened_luma < 0.10) {
             band = 1u;
-        } else if (dithered_luma < 0.18) {
+        } else if (sharpened_luma < 0.18) {
             band = 2u;
-        } else if (dithered_luma < 0.28) {
+        } else if (sharpened_luma < 0.28) {
             band = 3u;
-        } else if (dithered_luma < 0.40) {
+        } else if (sharpened_luma < 0.40) {
             band = 4u;
-        } else if (dithered_luma < 0.54) {
+        } else if (sharpened_luma < 0.54) {
             band = 5u;
-        } else if (dithered_luma < 0.68) {
+        } else if (sharpened_luma < 0.68) {
             band = 6u;
-        } else if (dithered_luma < 0.82) {
+        } else if (sharpened_luma < 0.82) {
             band = 7u;
-        } else if (dithered_luma < 0.92) {
+        } else if (sharpened_luma < 0.92) {
             band = 8u;
         } else {
             band = 9u;
         }
 
         let volumetric_glyph = material_glyph(material_id, band, x, y);
-        if (far_void && dithered_luma < 0.08) {
+        if (far_void && sharpened_luma < 0.08) {
             glyph = 32u;
-        } else if (dithered_luma >= 0.04) {
+        } else if (sharpened_luma >= 0.04) {
             glyph = shape_glyph(material_id, base_x, base_y, x, y, volumetric_glyph);
         } else {
             glyph = volumetric_glyph;
@@ -953,10 +964,10 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     var bg_rgb = clamp(tonemapped * 0.12, vec3<f32>(0.0), vec3<f32>(1.0));
 
     if (entity_edge_x || entity_edge_y) {
-        if (entity_class == 1u) { fg_rgb = mix(fg_rgb, vec3<f32>(0.60, 1.00, 0.35), 0.40); }
-        if (entity_class == 2u) { fg_rgb = mix(fg_rgb, vec3<f32>(1.00, 0.28, 0.16), 0.40); }
-        if (entity_class == 3u) { fg_rgb = mix(fg_rgb, vec3<f32>(1.00, 0.78, 0.25), 0.40); }
-        if (entity_class == 4u) { fg_rgb = mix(fg_rgb, vec3<f32>(0.35, 0.85, 1.00), 0.40); }
+        if (entity_class == 1u) { fg_rgb = mix(fg_rgb, vec3<f32>(0.60, 1.00, 0.35), 0.60); }
+        if (entity_class == 2u) { fg_rgb = mix(fg_rgb, vec3<f32>(1.00, 0.28, 0.16), 0.60); }
+        if (entity_class == 3u) { fg_rgb = mix(fg_rgb, vec3<f32>(1.00, 0.78, 0.25), 0.60); }
+        if (entity_class == 4u) { fg_rgb = mix(fg_rgb, vec3<f32>(0.35, 0.85, 1.00), 0.60); }
         bg_rgb = fg_rgb * 0.08;
     }
 

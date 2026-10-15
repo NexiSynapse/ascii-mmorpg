@@ -210,6 +210,35 @@ mod tests {
     }
 
     #[test]
+    fn animation_frames_never_repeat_within_a_cycle() {
+        // Reference rule: poses must not repeat inside any 1/6 s window, so
+        // every authored cycle keeps all of its frames distinct (no pairs).
+        for asset in [PLAYER_WARRIOR, MONSTER_MOSSLING, SKELETON, SKELETON_WARRIOR] {
+            assert_eq!(asset.frame_count(), 4, "{}", asset.name());
+            for i in 0..4u64 {
+                for j in (i + 1)..4u64 {
+                    assert_ne!(
+                        asset.frame(i),
+                        asset.frame(j),
+                        "{} frames {i} and {j} must differ",
+                        asset.name()
+                    );
+                }
+            }
+        }
+        assert_eq!(TREE.frame_count(), 4);
+        for i in 0..4u64 {
+            for j in (i + 1)..4u64 {
+                assert_ne!(
+                    TREE.frame(i),
+                    TREE.frame(j),
+                    "tree frames {i} and {j} must differ"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn item_labels_select_sword_shield_and_generic_icons() {
         let library = AssetLibrary::new();
         assert!(library

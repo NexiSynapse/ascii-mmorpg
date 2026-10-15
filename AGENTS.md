@@ -1,15 +1,15 @@
 # AGENTS.md
 
 ## Source of truth
-- `docs/SOT.md` is authoritative for what exists. `docs/EXTERNAL_AGENT_EXPLAINER.md` is the comprehensive architecture, pipeline, quality, and animation explainer for external agents. `docs/PROJECT_PLAN.md` is direction, not done work. `README.md` is the runnable overview.
-- ADRs in `docs/adr/`: 0001 protocol, 0002 fixed-tick (stale: says 10 Hz single-client), 0003 ANSI fallback, 0004 alpha boundaries.
+- `docs/SOT.md` is authoritative for what exists. `docs/SESSION_HANDOFF.md` is the resumable engineering record (tick semantics, last slice, next action). `docs/PROJECT_PLAN.md` is direction, not done work. `README.md` is the runnable overview.
+- ADRs in `docs/adr/`: 0001 protocol, 0002 fixed-tick (current: 20 Hz idle target, not strict scheduler), 0003 ANSI fallback, 0004 alpha boundaries.
 - If docs conflict with code/config, trust code.
 
 ## Workspace
-- Cargo workspace (`edition 2021`, stable Rust): `crates/shared` (`ascii-mmorpg-shared`), `server` (`ascii-mmorpg-server`), `client` (`ascii-mmorpg-client`), `bot` (`ascii-mmorpg-bot`), `tools` (`ascii-mmorpg-tools`). Plus vendored `crates/libnotcurses-sys` via `[patch.crates-io]` — do not touch unless working on notcurses.
+- Cargo workspace (`edition 2021`): `crates/shared` (`ascii-mmorpg-shared`), `server`, `client`, `bot`, `tools`, `engine` (`ascii-mmorpg-engine`: portable animated-ASCII scene model — animated cells, layers, partitions, compositor; tracks Wave/Cycle/Pulse/Ease/Noise; `Cell::glow` light-buffer spill in `compose` + `Cell::scale` billboards, `Layer::push_text`/`fill_rect`/`border_rect`/`fill_shaded_rect`(`Shade`) helpers; `sprite::` importer turns `assets/ascii/*.txt` `---`-separated frames into flip-book layers; `bridge::` rebuilds the terminal game's 2.5D look from plain `SceneView` data (camera-follow world + pinned HUD/log, volumetric per-entity art deferred); no I/O, no game logic). Engine's windowed presenter lives behind `--features present` (`engine/src/present.rs`: winit + wgpu instanced glyph atlas 32x16 incl. `█░▒▓` extras, embedded Liberation Mono in `engine/assets/`; `run` for static scenes, `run_dynamic` + `SceneSource` for live scenes with key input — see `engine/examples/play.rs` for the playable loopback port, `engine/examples/fx.rs` for the shader-fx showcase; examples-only server/shared dev-deps keep the lib game-free): CI never compiles it, so verify locally with `--features present`; Vulkan-only instance (GLES teardown segfaults in mesa eglTerminate); Esc/Q or `--frames N` exits. Vendored `crates/libnotcurses-sys` via `[patch.crates-io]` — do not touch unless working on notcurses.
 - Authority split: server owns positions/stats/combat/ticks/snapshots; client owns input/presentation/animation. Never let clients author state; never send rendered frames over the wire; renderer must not mutate snapshots (`render_frame(&world, frame)` only reads).
 
-## Verify (CI order in `.github/workflows/ci.yml`, runs ubuntu + windows)
+## Verify (CI order in `.github/workflows/ci.yml`, ubuntu + windows)
 ```text
 cargo fmt --all -- --check
 cargo test --workspace
@@ -24,38 +24,28 @@ cargo clippy --workspace --all-targets -- -D warnings
 - Framing: 4-byte LE length + postcard payload, 1 MiB max (`MAX_FRAME_SIZE`), non-empty. Use `encode_frame/decode_frame/read_frame/write_frame`; do not invent framing.
 - `WorldSnapshot.player` is the per-connection local view; `entities` holds remotes + mobs. `EntityKind` (`Player/Monster/Npc/Item`) drives client visuals, not gameplay.
 - Combat is deterministic: `resolve_attack(attacker, defender, tick ^ target_id)`, Manhattan `MELEE_RANGE = 6` (`combat.rs`).
-- Collision: deterministic AABB spatial boundaries and diagonal sliding physics in `crates/shared/src/collision.rs` (`resolve_movement`, `overworld_obstacles`). Both `server::move_player` and `client::apply_local_command` use it.
+- Collision: deterministic AABB ground-footprint boundaries + diagonal sliding in `crates/shared/src/collision.rs` (`resolve_movement`, `overworld_obstacles`). Both `server::move_player` and `client::apply_local_command` use it; canopy/foliage never blocks. Highway corridor `|x| <= 4` is kept clear.
 
 ## Server (`server/src/main.rs`, `lib.rs`)
 - `cargo run -p ascii-mmorpg-server` prints loopback demo; `cargo run -p ascii-mmorpg-server -- --tcp 127.0.0.1:4000` serves TCP (multi-client reader/writer threads + one sim thread, per-client `snapshot_for(id)` broadcast).
-- Timing semantics: `TICK_HZ` is the 20 Hz simulation target. The TCP simulation thread advances once after each 50 ms receive timeout while idle, but each accepted input also calls `fixed_tick_for()` immediately; sustained input can therefore advance ticks faster than 20 Hz and prevent timeout-driven ticks. This is not a rigorously fixed-rate scheduler. Verify `server/src/main.rs` and `docs/SESSION_HANDOFF.md` before changing tick semantics.
+- `TICK_HZ = 20` is a strict scheduler: the TCP sim thread drains a bounded input queue (`MAX_PENDING = 512`) at tick boundaries — one tick per 50 ms idle or loaded, so burst input coalesces and can never exceed 20 Hz. Protocol mismatches are rejected immediately without ticking. See ADR 0002. `Simulation::advance_tick_with` is the batched entry point; `fixed_tick_for` remains for loopback/tests.
 
-## Client (`client/src/main.rs`, `lib.rs`, `renderer.rs`, `assets.rs`, `network.rs`)
-- Modes: default realtime (`WASD`/arrows move, `F` attack, `R` rest, `V`/`T` cycle weather, `Q`/`Esc` quit); `--line` legacy stdin mode; `--demo` offline demo; `--connect ADDR` TCP mode.
-- Flags use `rposition` so CLI overrides `.bat` defaults: `--fps <N|uncapped|max>` (default 60, `0` = uncapped), `--weather <rain|snow|storm>` (default rain), `--notcurses` requires `--features notcurses`.
-- `PlainTerminal` is a differential dirty-line rasterizer (`\x1b[{row};1H` + `\x1b[K`, full repaint only when line count changes or on resize) to avoid Windows ConPTY tearing. Preserve that behavior.
-- Terminal backends stay behind `Terminal` trait in `client/src/lib.rs`. Notcurses parsing handles only `0m` / `38;5;Nm`; keep bindings out of gameplay/renderer code.
-- Client presentation: Ratatui-powered dark fantasy HUD (`Gauge`, `Block`, `Paragraph`, `Layout`) in `client/src/ui.rs`, composited seamlessly across both GPU and CPU renderers with dirty-state ANSI serialization.
+## Client (`client/src/main.rs`, `lib.rs`, `renderer.rs`, `gpu/`, `ui.rs`, `term.rs`)
+- Modes: default realtime (`WASD`/arrows move, `F` attack, `R` rest, `I` inventory, `C` character, `M` map, `P` pause, `V`/`T` cycle weather, `Q`/`Esc` quit); `--line` legacy stdin mode; `--demo` offline demo (6 frames); `--connect ADDR` TCP mode. Pause (`ActiveModal::Paused`) freezes local input and shows a large-font menu; `Q` quits directly from pause. Client-side only — the server keeps ticking online.
+- `--fps`/`--weather` use `rposition` so CLI overrides `.bat` defaults: `--fps <N|uncapped|max>` (default 60, `0` = uncapped), `--weather <rain|snow|storm>` (default rain). `--notcurses` requires `--features notcurses`.
+- GPU is the default feature (`gpu`, alias `wgpu-scene`): offscreen 3D scene → color/normal-depth/entity-metadata targets → WGSL compute ASCII pass (`client/src/gpu/`). Always renders the native terminal grid (never downscaled); large grids use adaptive SSAA (4x ≤4096 cells, else 2x). The formatter quantizes channels to 32 levels for ANSI run-merging. Terrain/grass/fallback ramps stay quiet at bright bands (strokes, then `░▒▓█` light pools — never alphabet texture); structural vertical edges emit `|`; letter detail lives on entity materials so actors pop. Falls back to CPU renderer automatically on init failure; `--cpu` forces fallback. `--wgpu-demo [N] [WxH]` is the headless benchmark (optional size simulates zoomed-out grids). There is no `--wgpu` realtime flag.
+- `PlainTerminal` is a differential dirty-line rasterizer (`\x1b[{row};1H` + `\x1b[K`, full repaint only on line-count change or resize) to avoid Windows ConPTY tearing. Preserve that behavior. `client/src/term.rs` (`CellMatrix`, span-diff encoder) and Ratatui HUD in `client/src/ui.rs` feed through the same ANSI path.
+- Terminal backends stay behind `Terminal` trait in `client/src/lib.rs`. Input must come from each backend's own reader via `Terminal::next_key` (notcurses owns the tty, so crossterm must never touch stdin in `--notcurses` mode — keys silently die; releases need kitty protocol, hence `decay_held_keys`). Keep bindings out of gameplay/renderer code. Frames compose in one Ratatui buffer (`RatatuiHud::render_composed_frame` + `ComposedScene` spec in `client/src/ui.rs`): HUD top bar, blitted scene (`partitions::SceneCell`/`blit_scene`), side minimap/threat panel (terminals ≥64 cols), log strip, legend, modal overlay with `Clear` occlusion. Output is always exactly terminal-sized. CPU inks lower via `Ink::rgb`; GPU cells map directly (quantized). Minimap stays inside the HUD (no extra GPU pass).
+- GPU monster dispatch keys off label text (`warrior` → champion, `skeleton` → skeleton, else mossling) in `gpu/renderer.rs`; CPU asset selection mirrors it in `assets.rs`.
 
 ## Assets (`assets/ascii/`, `assets/ASSET_SOURCES.md`)
-- Frames are `include_str!`-embedded, `---` on its own line separates animation frames; runtime never reads asset files from disk. Item icons key off label text (`sword`/`shield`/generic).
-- Monster art keys off label text too (`skeleton warrior` → warrior, `skeleton` → skeleton, else mossling). Separator matching is line-based, so art may safely contain runs like `|---|`.
+- Frames are `include_str!`-embedded, `---` on its own line separates animation frames; runtime never reads asset files from disk. Item icons key off label text (`sword`/`shield`/generic). Separator matching is line-based, so art may safely contain runs like `|---|`.
 - `assets/ascii/MANIFEST.md` lists the real visual inputs; `assets/source/kenney/` (CC0) are reference-only, never loaded. Do not bulk-copy outside art without recording exact license/attribution in `ASSET_SOURCES.md`.
 
 ## Content (`content/*.ron`, `tools/`)
-- `cargo run -p ascii-mmorpg-tools -- content` validates `content/` (default arg is `content` dir). Enforces: exactly 3 spells, non-empty items, ≥2 zones, monster `loot` refs exist, loot weights > 0, `min <= max`.
+- `cargo run -p ascii-mmorpg-tools -- content` validates `content/` (default arg is `content` dir). Enforces: exactly 3 spells, non-empty items, ≥2 zones, monster `loot` refs exist, loot weights > 0, `min <= max` with `min > 0`.
 - Bot smoke: start server with `--tcp`, then `cargo run -p ascii-mmorpg-bot -- 127.0.0.1:4000 10`.
 
-## Notcurses / launchers
-- Launchers are path-independent: they resolve everything at runtime via `%~dp0`, so a fresh clone works without editing. Never hardcode install paths back in.
-- Exe lookup: `play_ansi.bat` prefers `target\release`, falls back to `target\debug`; `play_notcurses.bat` also probes `target\x86_64-pc-windows-gnu\{release,debug}` first. Both print `Using <exe>` and error with the `cargo build` command if nothing is found.
-- `play_notcurses.bat` locates MSYS2 UCRT64 via `%MSYS2_ROOT%` (default `C:\msys64`, fallback `C:\tools\msys64`), prepends `ucrt64\bin` + `usr\bin` to `PATH`, warns instead of failing if absent, and keeps `chcp 65001`.
-- `play_wezterm*.bat` locate WezTerm via `%WEZTERM_EXE%`, then `where wezterm-gui.exe`, then `%ProgramFiles%` / `%LOCALAPPDATA%` install dirs; they must keep targeting `wezterm-gui.exe start --always-new-process` (wrapper `wezterm.exe` detaches early → error 10054).
-- All `.bat` launchers default `--fps uncapped`.
-
-## GPU rendering (Path C, `gpu` default, `wgpu-scene` alias)
-- Flags: `--wgpu` (explicit realtime 3D hardware offscreen pipeline, combines with `--connect`/`--fps`/`--notcurses`), `--cpu` (forces CPU rasterizer fallback), `--wgpu-demo [N]` (headless benchmark reporting adapter info, frametimes, and FPS).
-- Pipeline: Offscreen 3D scene + real-time compute ASCII shader (`client/src/gpu/`). Default feature: `gpu` (`wgpu`, `bytemuck`, `pollster`, `glam`). Hardware instancing, 8 dynamic point lights, 4x SSAA (4x4 / 16 samples per cell) over `Rgba8UnormSrgb` color, `Rgba32Float` normal/depth, and `Rgba8Unorm` entity-metadata targets, Gribb-Hartmann frustum culling, O(1) depth unprojection, and asynchronous staging rings (`RING_SIZE = 2`) for high-throughput batch rendering.
-- Graceful fallback: Automatically falls back to CPU procedural renderer if GPU initialization fails, or can be forced with `--cpu`: `cargo run -p ascii-mmorpg-client -- --cpu`.
-- Verification: keep code warning-free under `cargo clippy --workspace --all-targets -- -D warnings`.
-
+## Launchers (`play_*.bat`)
+- Path-independent via `%~dp0`; never hardcode install paths. Exe lookup prefers `target\release`, falls back to `target\debug`; all default `--fps uncapped`.
+- `play_notcurses.bat` probes `target\x86_64-pc-windows-gnu\{release,debug}` first, resolves MSYS2 UCRT64 via `%MSYS2_ROOT%` (default `C:\msys64`, fallback `C:\tools\msys64`), warns instead of failing if absent, keeps `chcp 65001`. `play_wezterm*.bat` must keep targeting `wezterm-gui.exe start --always-new-process` (wrapper `wezterm.exe` detaches early → error 10054).

@@ -8,11 +8,13 @@ pub mod assets;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod network;
+pub mod partitions;
 pub mod renderer;
 pub mod term;
 #[cfg(any(feature = "notcurses", test))]
 mod terminal_colors;
 pub mod ui;
+pub use partitions::{FontProfile, GameState, Partitions};
 pub use renderer::{Renderer, WeatherMode};
 pub use term::{
     Cell, CellMatrix, EncoderStrategy, FrameStats, SpanDiffEncoder, WinTimerPrecisionGuard,
@@ -34,6 +36,18 @@ pub trait SceneRenderer {
             self.set_active_modal(ActiveModal::None);
         } else {
             self.set_active_modal(modal);
+        }
+    }
+    fn is_paused(&self) -> bool {
+        self.active_modal() == ActiveModal::Paused
+    }
+    /// Toggles the pause overlay (`P`). Any other open modal is replaced by
+    /// pause; toggling while paused resumes play.
+    fn toggle_pause(&mut self) {
+        if self.is_paused() {
+            self.set_active_modal(ActiveModal::None);
+        } else {
+            self.set_active_modal(ActiveModal::Paused);
         }
     }
     fn render(&mut self, world: &WorldSnapshot) -> String {
@@ -142,13 +156,36 @@ pub trait Terminal {
         self.size()
     }
     fn draw(&mut self, frame: &str) -> io::Result<()>;
+    /// Non-blocking key poll. Returns the next pending key, if any.
+    ///
+    /// Backends that own terminal input (e.g. notcurses, which reads the tty
+    /// itself) must override this — the game loop must never read stdin
+    /// through a different backend than the one driving the terminal, or keys
+    /// are swallowed and controls die.
+    fn next_key(&mut self) -> io::Result<Option<crossterm::event::KeyEvent>> {
+        use std::time::Duration;
+        if crossterm::event::poll(Duration::ZERO)? {
+            if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
+                return Ok(Some(key));
+            }
+        }
+        Ok(None)
+    }
+    /// Whether key releases may never arrive, so held movement keys must be
+    /// decayed after each consumed move tick instead of on release.
+    fn decay_held_keys(&self) -> bool {
+        false
+    }
 }
 
 pub struct PlainTerminal {
     width: u16,
     height: u16,
     buffer: Vec<u8>,
-    prev_lines: Vec<String>,
+    /// FNV-1a hash per previously drawn line. Hash diffing avoids cloning the
+    /// whole frame (~250 KB at zoomed-out grids) every frame; a 64-bit hash
+    /// makes a missed update effectively impossible.
+    prev_hashes: Vec<u64>,
     pub encoder: term::SpanDiffEncoder,
     _timer_guard: term::WinTimerPrecisionGuard,
 }
@@ -160,7 +197,7 @@ impl PlainTerminal {
             width,
             height,
             buffer: Vec::with_capacity((width as usize) * (height as usize) * 4),
-            prev_lines: Vec::new(),
+            prev_hashes: Vec::new(),
             encoder: term::SpanDiffEncoder::new(width, height),
             _timer_guard: term::WinTimerPrecisionGuard::new(),
         }
@@ -171,7 +208,7 @@ impl PlainTerminal {
             if width != self.width || height != self.height {
                 self.width = width;
                 self.height = height;
-                self.prev_lines.clear();
+                self.prev_hashes.clear();
                 self.encoder.resize(width, height);
             }
         }
@@ -198,7 +235,7 @@ impl PlainTerminal {
             .collect();
 
         // If line count changed or initial frame, perform full redraw with clean clear
-        if self.prev_lines.len() != current_lines.len() {
+        if self.prev_hashes.len() != current_lines.len() {
             self.buffer.clear();
             self.buffer.extend_from_slice(b"\x1b[?25l\x1b[H");
             for (i, line) in current_lines.iter().enumerate() {
@@ -212,17 +249,24 @@ impl PlainTerminal {
             }
             self.buffer.extend_from_slice(b"\x1b[J");
             writer.write_all(&self.buffer)?;
-            self.prev_lines = current_lines.iter().map(|&s| s.to_string()).collect();
+            self.prev_hashes = current_lines.iter().map(|line| fnv1a_hash(line)).collect();
             return Ok(());
         }
 
         // Differential row-level rendering: only transmit dirty rows!
+        // Lines are compared by hash (single pass, no per-frame clone).
+        let current_hashes: Vec<u64> = current_lines.iter().map(|line| fnv1a_hash(line)).collect();
         self.buffer.clear();
         let mut dirty_count = 0;
         let mut last_written_line: Option<usize> = None;
 
-        for (i, (&curr, prev)) in current_lines.iter().zip(self.prev_lines.iter()).enumerate() {
-            if curr != prev {
+        for (i, ((&curr, &hash), prev_hash)) in current_lines
+            .iter()
+            .zip(current_hashes.iter())
+            .zip(self.prev_hashes.iter())
+            .enumerate()
+        {
+            if hash != *prev_hash {
                 dirty_count += 1;
                 if last_written_line == Some(i.saturating_sub(1)) && i > 0 {
                     // Contiguous dirty rows: emit CRLF directly (0 coordinate jump overhead)
@@ -242,11 +286,21 @@ impl PlainTerminal {
 
         if dirty_count > 0 {
             writer.write_all(&self.buffer)?;
-            self.prev_lines = current_lines.iter().map(|&s| s.to_string()).collect();
+            self.prev_hashes = current_hashes;
         }
 
         Ok(())
     }
+}
+
+/// FNV-1a 64-bit hash for dirty-line diffing. Single pass, no allocation.
+fn fnv1a_hash(line: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in line.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 impl Default for PlainTerminal {
@@ -302,10 +356,64 @@ fn set_plane_channels(plane: &mut notcurses::sys::NcPlane, fg: (u8, u8, u8), bg:
     notcurses::sys::c_api::ncplane_set_channels(plane, channels.nc.0);
 }
 
+/// Maps a notcurses input event onto the crossterm key model used by the game
+/// loop, so both terminal backends share one input handler.
+#[cfg(feature = "notcurses")]
+fn map_notcurses_input(input: &notcurses::Input) -> Option<crossterm::event::KeyEvent> {
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use notcurses::{InputType, Key, Received};
+
+    let code = match input.received {
+        Received::Char(c) => KeyCode::Char(c),
+        Received::Key(key) if key == Key::Up => KeyCode::Up,
+        Received::Key(key) if key == Key::Down => KeyCode::Down,
+        Received::Key(key) if key == Key::Left => KeyCode::Left,
+        Received::Key(key) if key == Key::Right => KeyCode::Right,
+        Received::Key(key) if key == Key::Esc => KeyCode::Esc,
+        Received::Key(key) if key == Key::Enter => KeyCode::Enter,
+        _ => return None,
+    };
+    let kind = match input.itype {
+        InputType::Release => KeyEventKind::Release,
+        InputType::Repeat => KeyEventKind::Repeat,
+        // Press and Unknown (legacy terminals) both act as a fresh press.
+        _ => KeyEventKind::Press,
+    };
+    let mut modifiers = KeyModifiers::NONE;
+    if input.keymod.has_shift() {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+    if input.keymod.has_alt() {
+        modifiers |= KeyModifiers::ALT;
+    }
+    if input.keymod.has_ctrl() {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+    if input.keymod.has_super() {
+        modifiers |= KeyModifiers::SUPER;
+    }
+    let mut event = KeyEvent::new(code, modifiers);
+    event.kind = kind;
+    Some(event)
+}
+
 #[cfg(feature = "notcurses")]
 impl Terminal for NotcursesTerminal {
     fn size(&self) -> (u16, u16) {
         (self.width, self.height)
+    }
+
+    /// Input must come from notcurses itself: its input layer owns the tty,
+    /// so crossterm reads on stdin would starve and every key would die.
+    fn next_key(&mut self) -> io::Result<Option<crossterm::event::KeyEvent>> {
+        let input = self.context.poll_event().map_err(notcurses_error)?;
+        Ok(map_notcurses_input(&input))
+    }
+
+    /// Releases only arrive with the kitty keyboard protocol; decay held
+    /// movement keys after each consumed move tick instead.
+    fn decay_held_keys(&self) -> bool {
+        true
     }
 
     fn refresh_size(&mut self) -> (u16, u16) {
@@ -408,7 +516,7 @@ impl Terminal for NotcursesTerminal {
 
 #[cfg(feature = "notcurses")]
 fn notcurses_error(error: impl std::fmt::Display) -> io::Error {
-    io::Error::other(error.to_string())
+    io::Error::new(io::ErrorKind::Other, error.to_string())
 }
 
 pub fn parse_command(line: &str, tick: u64) -> Option<ClientCommand> {
@@ -534,11 +642,13 @@ mod tests {
 
     #[test]
     fn renderer_places_player_and_status() {
-        let frame = Renderer::new(5, 5)
+        let frame = Renderer::new(80, 30)
             .with_weather(WeatherMode::Rain)
             .render(&sample_world());
-        assert!(frame.lines().nth(2).unwrap().contains('@'));
         assert!(frame.contains("HP 20/20"));
+        // Player glyph lives in the scene partition below the 3-row top bar.
+        let scene_hit = frame.lines().skip(3).any(|line| line.contains('@'));
+        assert!(scene_hit, "scene partition must show the player");
     }
 
     #[test]
@@ -623,5 +733,72 @@ mod tests {
         apply_local_command(&mut world, &command);
         assert_eq!(world.player.position, Point { x: -5, y: 2 });
         assert!(world.messages[0].contains("Blocked by Timber Lantern Post"));
+    }
+
+    #[test]
+    fn pause_toggle_flips_overlay_and_renders_pause_menu() {
+        let mut renderer = Renderer::new(80, 30);
+        assert!(!renderer.is_paused());
+        renderer.toggle_pause();
+        assert!(renderer.is_paused());
+        assert_eq!(renderer.active_modal(), ActiveModal::Paused);
+        let frame = renderer.render_frame(&sample_world(), 0);
+        assert!(frame.contains("PAUSED"), "paused frame must show the menu");
+        assert!(frame.contains("Resume play"));
+        renderer.toggle_pause();
+        assert!(!renderer.is_paused());
+    }
+}
+
+#[cfg(all(test, feature = "notcurses"))]
+mod notcurses_input_tests {
+    use super::map_notcurses_input;
+    use crossterm::event::{KeyCode, KeyEventKind};
+    use notcurses::{Input, InputType, Key, KeyMod, Received};
+
+    fn input(received: Received, itype: InputType) -> Input {
+        Input {
+            received,
+            keymod: KeyMod::None,
+            itype,
+            cell: None,
+            offset: None,
+        }
+    }
+
+    #[test]
+    fn chars_arrows_esc_and_enter_map_to_game_keys() {
+        let key = map_notcurses_input(&input(Received::Char('q'), InputType::Press)).unwrap();
+        assert_eq!(key.code, KeyCode::Char('q'));
+        assert_eq!(key.kind, KeyEventKind::Press);
+        let key = map_notcurses_input(&input(Received::Key(Key::Up), InputType::Press)).unwrap();
+        assert_eq!(key.code, KeyCode::Up);
+        let key = map_notcurses_input(&input(Received::Key(Key::Down), InputType::Press)).unwrap();
+        assert_eq!(key.code, KeyCode::Down);
+        let key = map_notcurses_input(&input(Received::Key(Key::Left), InputType::Press)).unwrap();
+        assert_eq!(key.code, KeyCode::Left);
+        let key = map_notcurses_input(&input(Received::Key(Key::Right), InputType::Press)).unwrap();
+        assert_eq!(key.code, KeyCode::Right);
+        let key = map_notcurses_input(&input(Received::Key(Key::Esc), InputType::Press)).unwrap();
+        assert_eq!(key.code, KeyCode::Esc);
+        let key = map_notcurses_input(&input(Received::Key(Key::Enter), InputType::Press)).unwrap();
+        assert_eq!(key.code, KeyCode::Enter);
+    }
+
+    #[test]
+    fn release_and_repeat_kinds_survive_mapping() {
+        let key = map_notcurses_input(&input(Received::Char('w'), InputType::Release)).unwrap();
+        assert_eq!(key.kind, KeyEventKind::Release);
+        let key = map_notcurses_input(&input(Received::Char('w'), InputType::Repeat)).unwrap();
+        assert_eq!(key.kind, KeyEventKind::Repeat);
+        // Legacy terminals report Unknown; treat it as a fresh press.
+        let key = map_notcurses_input(&input(Received::Char('w'), InputType::Unknown)).unwrap();
+        assert_eq!(key.kind, KeyEventKind::Press);
+    }
+
+    #[test]
+    fn empty_and_unbound_input_maps_to_none() {
+        assert!(map_notcurses_input(&input(Received::NoInput, InputType::Unknown)).is_none());
+        assert!(map_notcurses_input(&input(Received::Key(Key::PgUp), InputType::Press)).is_none());
     }
 }

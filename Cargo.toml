@@ -5,6 +5,7 @@ members = [
     "client",
     "bot",
     "tools",
+    "engine",
 ]
 resolver = "2"
 
