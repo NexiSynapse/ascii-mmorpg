@@ -1,0 +1,5 @@
+[
+    (id: "whispering-forest", name: "Whispering Forest", width: 96, height: 64, spawn: (8, 32)),
+    (id: "ruined-gate", name: "Ruined Gate", width: 64, height: 48, spawn: (8, 24)),
+    (id: "rootbound-dungeon", name: "Rootbound Dungeon", width: 48, height: 48, spawn: (4, 24)),
+]

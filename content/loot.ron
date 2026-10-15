@@ -1,0 +1,9 @@
+[
+    (
+        id: "mossling_drop",
+        entries: [
+            (item: "glowmoss", weight: 3, min: 1, max: 2),
+            (item: "copper_coin", weight: 1, min: 1, max: 4),
+        ],
+    ),
+]

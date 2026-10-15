@@ -1,0 +1,5 @@
+[
+    (id: "rusted-sword", name: "Rusted Sword", slot: "weapon", rarity: "common", glyph: '/', power: 3),
+    (id: "forest-shield", name: "Forest Shield", slot: "shield", rarity: "uncommon", glyph: 'O', power: 2),
+    (id: "moss-charm", name: "Moss Charm", slot: "amulet", rarity: "rare", glyph: '*', power: 5),
+]
