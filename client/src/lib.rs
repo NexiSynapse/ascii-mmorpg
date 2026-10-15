@@ -156,6 +156,26 @@ pub trait Terminal {
         self.size()
     }
     fn draw(&mut self, frame: &str) -> io::Result<()>;
+    /// Non-blocking key poll. Returns the next pending key, if any.
+    ///
+    /// Backends that own terminal input (e.g. notcurses, which reads the tty
+    /// itself) must override this — the game loop must never read stdin
+    /// through a different backend than the one driving the terminal, or keys
+    /// are swallowed and controls die.
+    fn next_key(&mut self) -> io::Result<Option<crossterm::event::KeyEvent>> {
+        use std::time::Duration;
+        if crossterm::event::poll(Duration::ZERO)? {
+            if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
+                return Ok(Some(key));
+            }
+        }
+        Ok(None)
+    }
+    /// Whether key releases may never arrive, so held movement keys must be
+    /// decayed after each consumed move tick instead of on release.
+    fn decay_held_keys(&self) -> bool {
+        false
+    }
 }
 
 pub struct PlainTerminal {
@@ -336,10 +356,64 @@ fn set_plane_channels(plane: &mut notcurses::sys::NcPlane, fg: (u8, u8, u8), bg:
     notcurses::sys::c_api::ncplane_set_channels(plane, channels.nc.0);
 }
 
+/// Maps a notcurses input event onto the crossterm key model used by the game
+/// loop, so both terminal backends share one input handler.
+#[cfg(feature = "notcurses")]
+fn map_notcurses_input(input: &notcurses::Input) -> Option<crossterm::event::KeyEvent> {
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use notcurses::{InputType, Key, Received};
+
+    let code = match input.received {
+        Received::Char(c) => KeyCode::Char(c),
+        Received::Key(key) if key == Key::Up => KeyCode::Up,
+        Received::Key(key) if key == Key::Down => KeyCode::Down,
+        Received::Key(key) if key == Key::Left => KeyCode::Left,
+        Received::Key(key) if key == Key::Right => KeyCode::Right,
+        Received::Key(key) if key == Key::Esc => KeyCode::Esc,
+        Received::Key(key) if key == Key::Enter => KeyCode::Enter,
+        _ => return None,
+    };
+    let kind = match input.itype {
+        InputType::Release => KeyEventKind::Release,
+        InputType::Repeat => KeyEventKind::Repeat,
+        // Press and Unknown (legacy terminals) both act as a fresh press.
+        _ => KeyEventKind::Press,
+    };
+    let mut modifiers = KeyModifiers::NONE;
+    if input.keymod.has_shift() {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+    if input.keymod.has_alt() {
+        modifiers |= KeyModifiers::ALT;
+    }
+    if input.keymod.has_ctrl() {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+    if input.keymod.has_super() {
+        modifiers |= KeyModifiers::SUPER;
+    }
+    let mut event = KeyEvent::new(code, modifiers);
+    event.kind = kind;
+    Some(event)
+}
+
 #[cfg(feature = "notcurses")]
 impl Terminal for NotcursesTerminal {
     fn size(&self) -> (u16, u16) {
         (self.width, self.height)
+    }
+
+    /// Input must come from notcurses itself: its input layer owns the tty,
+    /// so crossterm reads on stdin would starve and every key would die.
+    fn next_key(&mut self) -> io::Result<Option<crossterm::event::KeyEvent>> {
+        let input = self.context.poll_event().map_err(notcurses_error)?;
+        Ok(map_notcurses_input(&input))
+    }
+
+    /// Releases only arrive with the kitty keyboard protocol; decay held
+    /// movement keys after each consumed move tick instead.
+    fn decay_held_keys(&self) -> bool {
+        true
     }
 
     fn refresh_size(&mut self) -> (u16, u16) {
@@ -442,7 +516,7 @@ impl Terminal for NotcursesTerminal {
 
 #[cfg(feature = "notcurses")]
 fn notcurses_error(error: impl std::fmt::Display) -> io::Error {
-    io::Error::other(error.to_string())
+    io::Error::new(io::ErrorKind::Other, error.to_string())
 }
 
 pub fn parse_command(line: &str, tick: u64) -> Option<ClientCommand> {
@@ -673,5 +747,58 @@ mod tests {
         assert!(frame.contains("Resume play"));
         renderer.toggle_pause();
         assert!(!renderer.is_paused());
+    }
+}
+
+#[cfg(all(test, feature = "notcurses"))]
+mod notcurses_input_tests {
+    use super::map_notcurses_input;
+    use crossterm::event::{KeyCode, KeyEventKind};
+    use notcurses::{Input, InputType, Key, KeyMod, Received};
+
+    fn input(received: Received, itype: InputType) -> Input {
+        Input {
+            received,
+            keymod: KeyMod::None,
+            itype,
+            cell: None,
+            offset: None,
+        }
+    }
+
+    #[test]
+    fn chars_arrows_esc_and_enter_map_to_game_keys() {
+        let key = map_notcurses_input(&input(Received::Char('q'), InputType::Press)).unwrap();
+        assert_eq!(key.code, KeyCode::Char('q'));
+        assert_eq!(key.kind, KeyEventKind::Press);
+        let key = map_notcurses_input(&input(Received::Key(Key::Up), InputType::Press)).unwrap();
+        assert_eq!(key.code, KeyCode::Up);
+        let key = map_notcurses_input(&input(Received::Key(Key::Down), InputType::Press)).unwrap();
+        assert_eq!(key.code, KeyCode::Down);
+        let key = map_notcurses_input(&input(Received::Key(Key::Left), InputType::Press)).unwrap();
+        assert_eq!(key.code, KeyCode::Left);
+        let key = map_notcurses_input(&input(Received::Key(Key::Right), InputType::Press)).unwrap();
+        assert_eq!(key.code, KeyCode::Right);
+        let key = map_notcurses_input(&input(Received::Key(Key::Esc), InputType::Press)).unwrap();
+        assert_eq!(key.code, KeyCode::Esc);
+        let key = map_notcurses_input(&input(Received::Key(Key::Enter), InputType::Press)).unwrap();
+        assert_eq!(key.code, KeyCode::Enter);
+    }
+
+    #[test]
+    fn release_and_repeat_kinds_survive_mapping() {
+        let key = map_notcurses_input(&input(Received::Char('w'), InputType::Release)).unwrap();
+        assert_eq!(key.kind, KeyEventKind::Release);
+        let key = map_notcurses_input(&input(Received::Char('w'), InputType::Repeat)).unwrap();
+        assert_eq!(key.kind, KeyEventKind::Repeat);
+        // Legacy terminals report Unknown; treat it as a fresh press.
+        let key = map_notcurses_input(&input(Received::Char('w'), InputType::Unknown)).unwrap();
+        assert_eq!(key.kind, KeyEventKind::Press);
+    }
+
+    #[test]
+    fn empty_and_unbound_input_maps_to_none() {
+        assert!(map_notcurses_input(&input(Received::NoInput, InputType::Unknown)).is_none());
+        assert!(map_notcurses_input(&input(Received::Key(Key::PgUp), InputType::Press)).is_none());
     }
 }

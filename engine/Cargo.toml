@@ -1,0 +1,27 @@
+[package]
+name = "ascii-mmorpg-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# Windowed presenter: opens a real OS window and draws engine Frames with a
+# GPU glyph atlas. Pulls winit/wgpu/fontdue; needs a display at runtime.
+# CI runs default features only — verify this locally (see docs/SESSION_HANDOFF.md).
+present = ["dep:winit", "dep:wgpu", "dep:fontdue", "dep:pollster", "dep:bytemuck"]
+
+[dependencies]
+bytemuck = { version = "1.21", optional = true }
+fontdue = { version = "0.9", optional = true }
+pollster = { version = "0.4", optional = true }
+wgpu = { version = "24", optional = true }
+winit = { version = "0.30", optional = true }
+
+# Examples-only: the `play` example drives a local server Simulation and maps
+# shared protocol types onto bridge views. The library itself stays free of
+# game crates (examples may use dev-dependencies).
+[dev-dependencies]
+ascii-mmorpg-server = { path = "../server" }
+ascii-mmorpg-shared = { path = "../crates/shared" }

@@ -3,7 +3,7 @@ use ascii_mmorpg_client::{
     PlainTerminal, Renderer, SceneRenderer, Terminal, WeatherMode,
 };
 use ascii_mmorpg_shared::{ServerEvent, PROTOCOL_VERSION};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use std::io::{self, BufRead};
 use std::time::{Duration, Instant};
@@ -229,13 +229,16 @@ fn run_realtime_with_terminal<T: Terminal>(
     let render_w = width as i16;
     let render_h = height as i16;
 
+    let mut gpu_notice: Option<String> = None;
     let mut renderer = if !force_cpu {
         #[cfg(feature = "gpu")]
         {
             match ascii_mmorpg_client::gpu::GpuRenderer::new(render_w, render_h, weather) {
                 Ok(gpu_r) => ActiveRenderer::Gpu(Box::new(gpu_r)),
                 Err(err) => {
-                    eprintln!("[WGPU] GPU offscreen init failed ({err}). Falling back to CPU.");
+                    // Route through the in-game log, not stderr: raw error
+                    // text on the fullscreen terminal reads as glitch "code".
+                    gpu_notice = Some(format!("GPU unavailable ({err}); CPU renderer active."));
                     ActiveRenderer::Cpu(Renderer::new(render_w, render_h).with_weather(weather))
                 }
             }
@@ -247,7 +250,7 @@ fn run_realtime_with_terminal<T: Terminal>(
     };
 
     let mut world = sample_world();
-    world.messages = vec![match address {
+    let help = match address {
         Some(address) => {
             format!("Connecting to {address}... WASD move, F attack, R rest, I inv, C char, M map, P pause, Q quit.")
         }
@@ -255,13 +258,17 @@ fn run_realtime_with_terminal<T: Terminal>(
             "Real-time mode: WASD move, F attack, R rest, I inv, C char, M map, P pause, Q quit."
                 .into()
         }
-    }];
+    };
+    world.messages = match gpu_notice {
+        Some(notice) => vec![notice, help],
+        None => vec![help],
+    };
 
-    // Drain any terminal capability responses or stale escape codes from stdin
+    // Drain any terminal capability responses or stale escape codes. Each
+    // backend drains through its own input reader: notcurses owns the tty in
+    // `--notcurses` mode, so crossterm must not touch stdin there.
     std::thread::sleep(Duration::from_millis(30));
-    while event::poll(Duration::ZERO)? {
-        let _ = event::read()?;
-    }
+    while terminal.next_key()?.is_some() {}
 
     terminal.draw(&renderer.render(&world))?;
 
@@ -353,103 +360,101 @@ fn realtime_loop(
             return Ok(());
         }
         let frame_start = Instant::now();
-        while event::poll(Duration::ZERO)? {
-            if let Event::Key(KeyEvent { code, kind, .. }) = event::read()? {
-                let movement = match code {
-                    KeyCode::Char('w') | KeyCode::Up => Some(0),
-                    KeyCode::Char('a') | KeyCode::Left => Some(1),
-                    KeyCode::Char('s') | KeyCode::Down => Some(2),
-                    KeyCode::Char('d') | KeyCode::Right => Some(3),
+        while let Some(KeyEvent { code, kind, .. }) = terminal.next_key()? {
+            let movement = match code {
+                KeyCode::Char('w') | KeyCode::Up => Some(0),
+                KeyCode::Char('a') | KeyCode::Left => Some(1),
+                KeyCode::Char('s') | KeyCode::Down => Some(2),
+                KeyCode::Char('d') | KeyCode::Right => Some(3),
+                _ => None,
+            };
+            if let Some(index) = movement {
+                held[index] = kind != KeyEventKind::Release;
+            } else if kind == KeyEventKind::Press {
+                let input = match code {
+                    KeyCode::Char('q') | KeyCode::Char('Q') => {
+                        if renderer.active_modal() == ascii_mmorpg_client::ActiveModal::Paused {
+                            // Quit directly from the pause menu.
+                            break 'game;
+                        }
+                        if renderer.active_modal() != ascii_mmorpg_client::ActiveModal::None {
+                            renderer.set_active_modal(ascii_mmorpg_client::ActiveModal::None);
+                            None
+                        } else {
+                            break 'game;
+                        }
+                    }
+                    KeyCode::Esc => {
+                        if renderer.active_modal() != ascii_mmorpg_client::ActiveModal::None {
+                            renderer.set_active_modal(ascii_mmorpg_client::ActiveModal::None);
+                            None
+                        } else {
+                            break 'game;
+                        }
+                    }
+                    KeyCode::Char('i') | KeyCode::Char('I') => {
+                        renderer.toggle_modal(ascii_mmorpg_client::ActiveModal::Inventory);
+                        None
+                    }
+                    KeyCode::Char('c') | KeyCode::Char('C') => {
+                        renderer.toggle_modal(ascii_mmorpg_client::ActiveModal::CharacterSheet);
+                        None
+                    }
+                    KeyCode::Char('m') | KeyCode::Char('M') => {
+                        renderer.toggle_modal(ascii_mmorpg_client::ActiveModal::WorldMap);
+                        None
+                    }
+                    KeyCode::Char('p') | KeyCode::Char('P') => {
+                        renderer.toggle_pause();
+                        None
+                    }
+                    KeyCode::Char('f') | KeyCode::Char('F') => {
+                        if renderer.is_paused() {
+                            None
+                        } else {
+                            Some("f")
+                        }
+                    }
+                    KeyCode::Char('r') | KeyCode::Char('R') => {
+                        if renderer.is_paused() {
+                            None
+                        } else {
+                            Some("r")
+                        }
+                    }
+                    KeyCode::Char('v')
+                    | KeyCode::Char('t')
+                    | KeyCode::Char('V')
+                    | KeyCode::Char('T') => {
+                        let next_weather = match renderer.weather() {
+                            WeatherMode::Rain => WeatherMode::Snow,
+                            WeatherMode::Snow => WeatherMode::Storm,
+                            WeatherMode::Storm => WeatherMode::Rain,
+                        };
+                        renderer.set_weather(next_weather);
+                        let weather_label = match next_weather {
+                            WeatherMode::Rain => "Rain",
+                            WeatherMode::Snow => "Snowfall",
+                            WeatherMode::Storm => "Storm",
+                        };
+                        world.messages =
+                            vec![format!("Weather overlay changed to {weather_label}.")];
+                        None
+                    }
                     _ => None,
                 };
-                if let Some(index) = movement {
-                    held[index] = kind != KeyEventKind::Release;
-                } else if kind == KeyEventKind::Press {
-                    let input = match code {
-                        KeyCode::Char('q') | KeyCode::Char('Q') => {
-                            if renderer.active_modal() == ascii_mmorpg_client::ActiveModal::Paused {
-                                // Quit directly from the pause menu.
-                                break 'game;
-                            }
-                            if renderer.active_modal() != ascii_mmorpg_client::ActiveModal::None {
-                                renderer.set_active_modal(ascii_mmorpg_client::ActiveModal::None);
-                                None
+                if let Some(input) = input {
+                    tick += 1;
+                    if let Some(command) = parse_command(input, tick) {
+                        if let Some(connection) = connection.as_deref_mut() {
+                            if !welcomed {
+                                world.messages =
+                                    vec!["Still waiting for the server welcome.".into()];
                             } else {
-                                break 'game;
+                                connection.send_command(&command)?;
                             }
-                        }
-                        KeyCode::Esc => {
-                            if renderer.active_modal() != ascii_mmorpg_client::ActiveModal::None {
-                                renderer.set_active_modal(ascii_mmorpg_client::ActiveModal::None);
-                                None
-                            } else {
-                                break 'game;
-                            }
-                        }
-                        KeyCode::Char('i') | KeyCode::Char('I') => {
-                            renderer.toggle_modal(ascii_mmorpg_client::ActiveModal::Inventory);
-                            None
-                        }
-                        KeyCode::Char('c') | KeyCode::Char('C') => {
-                            renderer.toggle_modal(ascii_mmorpg_client::ActiveModal::CharacterSheet);
-                            None
-                        }
-                        KeyCode::Char('m') | KeyCode::Char('M') => {
-                            renderer.toggle_modal(ascii_mmorpg_client::ActiveModal::WorldMap);
-                            None
-                        }
-                        KeyCode::Char('p') | KeyCode::Char('P') => {
-                            renderer.toggle_pause();
-                            None
-                        }
-                        KeyCode::Char('f') | KeyCode::Char('F') => {
-                            if renderer.is_paused() {
-                                None
-                            } else {
-                                Some("f")
-                            }
-                        }
-                        KeyCode::Char('r') | KeyCode::Char('R') => {
-                            if renderer.is_paused() {
-                                None
-                            } else {
-                                Some("r")
-                            }
-                        }
-                        KeyCode::Char('v')
-                        | KeyCode::Char('t')
-                        | KeyCode::Char('V')
-                        | KeyCode::Char('T') => {
-                            let next_weather = match renderer.weather() {
-                                WeatherMode::Rain => WeatherMode::Snow,
-                                WeatherMode::Snow => WeatherMode::Storm,
-                                WeatherMode::Storm => WeatherMode::Rain,
-                            };
-                            renderer.set_weather(next_weather);
-                            let weather_label = match next_weather {
-                                WeatherMode::Rain => "Rain",
-                                WeatherMode::Snow => "Snowfall",
-                                WeatherMode::Storm => "Storm",
-                            };
-                            world.messages =
-                                vec![format!("Weather overlay changed to {weather_label}.")];
-                            None
-                        }
-                        _ => None,
-                    };
-                    if let Some(input) = input {
-                        tick += 1;
-                        if let Some(command) = parse_command(input, tick) {
-                            if let Some(connection) = connection.as_deref_mut() {
-                                if !welcomed {
-                                    world.messages =
-                                        vec!["Still waiting for the server welcome.".into()];
-                                } else {
-                                    connection.send_command(&command)?;
-                                }
-                            } else {
-                                apply_local_command(world, &command);
-                            }
+                        } else {
+                            apply_local_command(world, &command);
                         }
                     }
                 }
@@ -474,6 +479,13 @@ fn realtime_loop(
                         apply_local_command(world, &command);
                     }
                 }
+            }
+            // Some backends only report presses (releases need kitty keyboard
+            // protocol), so decay held keys after each consumed tick instead
+            // of waiting for a release that may never arrive. Held movement
+            // still works: OS key repeat re-presses faster than the 90 ms tick.
+            if terminal.decay_held_keys() {
+                held = [false; 4];
             }
             next_move = Instant::now() + Duration::from_millis(90);
         }
