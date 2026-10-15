@@ -3,7 +3,8 @@
 //! an engine scene built by [`bridge`](ascii_mmorpg_engine::bridge).
 //!
 //! Run: `cargo run -p ascii-mmorpg-engine --features present --example game`
-//! Flags: `--frames N` exits after N presented frames (automated proof).
+//! Flags: `--frames N` exits after N presented frames (automated proof);
+//! `--dungeon` delves the sunken-vault preset instead of the meadow.
 //!
 //! The demo is interactive: movement keys move the player and F/R update the
 //! overlay log. Use F11 to toggle fullscreen and Q/Esc to quit.
@@ -28,13 +29,19 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|v| v.parse::<u64>().ok());
 
-    let view = bridge::demo_view();
+    let view = if args.iter().any(|arg| arg == "--dungeon") {
+        bridge::dungeon_view()
+    } else {
+        bridge::demo_view()
+    };
     struct Demo {
         view: bridge::SceneView,
         held: HashSet<KeyCode>,
         last_t: f32,
         move_x: f32,
         move_y: f32,
+        cache: bridge::StaticLayers,
+        follow: Option<(f32, f32)>,
     }
 
     impl SceneSource for Demo {
@@ -66,7 +73,22 @@ fn main() {
             self.view.player.x += step_x;
             self.view.player.y += step_y;
             self.view.tick = (t * 20.0) as u64;
-            bridge::scene_from_view_sized(&self.view, width as i32, height as i32)
+            let (scene, bcam) = bridge::scene_from_view_sized_cached(
+                &self.view,
+                width as i32,
+                height as i32,
+                &mut self.cache,
+            );
+            // Exponential follow toward the bridge camera: the world glides
+            // instead of stepping cell to cell.
+            let (next, cam) = ascii_mmorpg_engine::present::glide_camera(
+                self.follow,
+                bcam.x as f32,
+                bcam.y as f32,
+                dt,
+            );
+            self.follow = Some(next);
+            (scene, cam)
         }
 
         fn key(&mut self, code: KeyCode, pressed: bool) {
@@ -99,6 +121,8 @@ fn main() {
             last_t: 0.0,
             move_x: 0.0,
             move_y: 0.0,
+            cache: bridge::StaticLayers::new(),
+            follow: None,
         },
         PresentOptions {
             title: "ASCII MMORPG — windowed 2.5D port".into(),

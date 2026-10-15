@@ -533,3 +533,139 @@ Recovery options (require user decision):
 3. Check if another worktree/backup has the missing objects.
 
 Do NOT reset, delete, rebuild index, or fetch destructively without explicit user approval.
+
+## Amber wash + verified light falloff (2026-10-15, this session)
+
+Measured the reference burst halo (Video-47489 t=10.5 s, concentric-box signalstats): halo excess ≈15 brightness levels one cell out, fading by ~5 cells (~40 px at 8 px/cell), peak in the spark ring. Our old glow washed 163 levels at distance 1 (the windowed blob in the user's screenshot).
+
+Changed (`engine/src/scene.rs`, `compose.rs`, `present.rs`, `examples/fx.rs`, this handoff):
+- `Scene.wash: Option<Wash>` (`Wash{tint, strength}`, re-exported): `apply_wash` adds tint×strength to opaque backgrounds post-glow, clamped; `None` default keeps all existing tests byte-identical.
+- Glow retuned to the measured curve: reach glow×5 cells (was ×4), amplitude 0.12 (was 1.0) — glow-1.0 torch now washes ≈21/9/4 levels at distances 1/2/3. Player aura 0.4 stays subtle.
+- Presenter fullscreen wash: `Uniforms` gains `wash_rgb`/`wash_strength`, fragment mixes the final pixel (void included) — the true reference breathing-frame look. Fixed a bind-group visibility bug this exposed (uniform buffer is now VERTEX|FRAGMENT; caught by `--frames` proof, not by compile).
+- `fx` showcase: burst drives an amber wash flash (`strength = env×0.3`, cooling over 1.5 s).
+
+Verification (2026-10-15, Windows): `fmt --check` clean; `cargo test --workspace` all pass (engine 45 incl. new wash + reach tests, client 75, rest 0-fail); `tools content` ok; both clippy orders clean; `fx -- --check` ok; `fx -- --frames 180` → 180 presented; `game -- --frames 120` → 120 presented; `play -- --check` ok. Bridge glow test updated to the retuned amplitude (red-channel assertion instead of hue dominance). Not committed/pushed (git still blocked).
+
+## Boss/target panels + declutter hardening (2026-10-15, this session)
+
+`SceneView` gains data-driven `BossPanel{name,hp,max_hp,phase}` and `TargetPanel{name,hp,max_hp}` (selection/boss-event semantics stay with the caller).
+
+Changed (`engine/src/bridge.rs`, `engine/examples/play.rs`, this handoff):
+- `layout()` takes `extra_hud`: boss/target claim 2 rows each only when the world keeps 1+ row (small grids degrade gracefully). HUD builds with a row cursor: boss label (centered `Dragon - phase 2  4990/6000`) + full-width red bar, target label + white bar, then the existing zone/legend/live rows.
+- `push_bar` + `BarStyle{fill,empty,bg}` (bundled for the clippy arg limit): proportional `[###---]` fill, hp clamped.
+- Pips rows now registered in the declutter set, so stacked plates can never overwrite a bar.
+- `demo_view` carries Dragon 4990/6000 phase-2 + Mossling 6/8 fixtures (reconstruction-doc values, layout proof only); `play.rs` loopback sets both to `None` — live selection/boss events ride with the TCP slice.
+- Tests derive world-center geometry from the scene itself (`world_center` helper — HUD rows shift now); new boss fill-proportion, target text, and world-shrink/plate-legibility tests.
+
+Verification (2026-10-15, Windows): `fmt --check` clean; `cargo test --workspace` all pass (engine 48 incl. 3 new panel tests, client 75, rest 0-fail); `tools content` ok; both clippy orders clean; `game -- --frames 120` presented; `play -- --check` ok; `fx -- --check` ok. Not committed/pushed (git still blocked).
+
+## Full-video analysis: all 9,169 frames (2026-10-15, this session)
+
+Extracted 1-fps sheets (6) + per-frame YAVG/SATAVG/motion for every frame. Results per video (motion = mean frame-to-frame brightness delta, quiet = delta < 0.5):
+
+| video | frames | bright | sat | mot p50/p90/max | quiet | spikes>20 |
+|---|---|---|---|---|---|---|
+| v1 boss 89s | 2665 | 45.5 | 8 | 9.63/18.5/27.8 | 0.9% | 115 |
+| v2 skeleton/inv 49s | 1470 | 34.1 | 6 | 5.39/11.4/15.9 | 22.9% | 0 |
+| v3 spells 55s | 1652 | 35.9 | 6 | 1.65/8.11/30.0 | 20.4% | 2 |
+| v4 outdoor 32s | 951 | 40.7 | 6 | 9.82/16.9/20.5 | 0.0% | 16 |
+| v5 dungeon 30s | 891 | 30.6 | 6 | 1.17/4.45/6.9 | 10.2% | 0 |
+| v6 multiplayer 51s | 1540 | 42.5 | 5 | 9.33/16.2/33.7 | 0.0% | 67 |
+
+New findings beyond the strip reads:
+- Saturation is universally 5–8/255: the look is near-monochrome luminance art + white UI. Budget goes to luminance ramp density, not hue variety.
+- Two motion regimes: travel/battle (v1/v4/v6: p50 ~9–10, literally 0% quiet — rain guarantees v6) vs test/dungeon (v2/v3/v5: 10–23% quiet, mostly UI-open and idle framing). Engine idle must drift in travel scenes; UI-open may rest.
+- Flashes are boss-arena phenomena (~1/sec in v1/v6); spell effects stay local (2 spikes in all of v3). Keep effect flashes spatially bounded; fullscreen flashes for boss phases only.
+- Brightness hierarchy: boss arena 45 > multiplayer 42 > outdoor 41 > spells 36 > skeleton 34 > dungeon 31. Our meadow demo should sit ~35–40, dungeon zones ~30.
+- v1 sheets confirm: dark 2-avatar opening, dragon entrance ~5 s, ring telegraphs, phase-2/3 relabels, white spike phase, closing burst. v2: inventory occupies ~18–24 s (the quiet block). v5: darkest, calmest — pure lantern-atmosphere reference.
+
+## Denser grids + bigger sprites (2026-10-15, this session)
+Stepped actor art up one size and densified the default grid toward the reference pitch (~110 cols, ~20%-height actors).
+
+Changed (`engine/assets/actors/*.txt`, `engine/src/bridge.rs`, `engine/src/present.rs`, this handoff):
+- Art: warrior 13→19 rows, mossling 9→13, skeleton/herbalist 11→15; all phases height-locked per file (feet share one row or they flicker); focal glyphs steady in every phase (skeleton P2 fixed to `||==s==||`).
+- Default grid 64×23 → 96×35 (`VIEW_W/H`); presenter cells 20px → 16px. Camera math symbolic, unaffected.
+- Landmark pines upgraded to the 20-row terminal pine art (4-phase sway at 1.5 fps) via `stamp_scenery` + `TREE_ART`; new `cached_frames` entry.
+- Ground enrichment: tuft heads, pebbles, dry flowers break large-grid tiling; curb stones edge the road. All hash-deterministic and camera-stable.
+- Demo cast respread across the wider meadow.
+- Tests: `actor_art_phases_share_height`, default 96×35 dims, pine-canopy stamp check; panels world-geometry test updated to (7,26).
+
+Verification (2026-10-15, Windows): `fmt --check` clean; `cargo test --workspace` all pass (engine 51 incl. 3 new art/grid tests, client 75, rest 0-fail); `tools content` ok; both clippy orders clean; `game -- --frames 120` → 120 presented; `play -- --check` ok; `fx -- --check` ok. Not committed/pushed (git still blocked).
+
+## Darkness pass: near-black BG, void mask, vignette, depth (2026-10-15, this session)
+
+First slice of the 9-item visual-gap list (user asked for status + serial execution).
+
+Changed (engine/src/bridge.rs, this handoff): near-black base (5,6,12) + panels (7,9,16); 16x16 void mask (~1 in 4 blocks, roads/water punch through); world-radius vignette (full light 20 cells, 0.25 floor by 60, world-locked, player-anchored ground); depth grade 0.6-1.2; 3-wide actor contact shadows. Tests: vignette bounds/monotonic/floor, void fraction/determinism, world gaps with surviving road.
+
+Verification (2026-10-15, Windows): fmt clean; workspace all pass (engine 54 incl. 3 new darkness tests, client 75); tools content ok; both clippy orders clean; game 120 presented; play/fx checks ok. Not committed/pushed (git still blocked).
+
+## Light pools + torch repaint + void inversion fix (2026-10-15, this session)
+
+Second slice of the 9-item visual-gap list.
+
+Changed (engine/src/bridge.rs, engine/src/present.rs, this handoff): Light struct + light_falloff (1/(1+0.08d2), ~0.08 at 12 cells) + apply_light_pools over the ground layer (strongest light wins, fg lerped warm at 0.7 strength, faint bg lift). Sources: landmark torch (20,4) r=12 amber + player lantern r=10 warm-white (follows the player). Halos keep lifting backgrounds; pools recolor foregrounds. Presenter clear color dropped to (0.005,0.006,0.012) so void blocks sink below vignetted ground instead of glowing navy. Tests: falloff bounds, pool warms fg + leaves out-of-radius ground untouched.
+
+Verification (2026-10-15, Windows): fmt clean; workspace all pass (engine 56 incl. 2 new pool tests, client 75); tools content ok; both clippy orders clean; game 120 presented; play/fx checks ok. Not committed/pushed (git still blocked).
+
+## Tree canopy rework + winding material-zoned ground (2026-10-15, this session)
+
+Third slice of the 9-item visual-gap list.
+
+Changed (engine/src/bridge.rs, this handoff): stamp_tree replaces flat-tint stamping - interior canopy darkness punched by stable hash (mask from phase 0, holes never flicker), rim rows brightened 1.5x, interiors dimmed 0.7x, brown trunks, darker base green. Road wanders via triangle wave (rows 7-10, 3-row band, relative curbs). Material zones on coarse blocks: meadow / dark soil / gray stone / teal moss, specks on top. Tests: road smooth wander in-band, all 4 zones occur.
+
+Verification (2026-10-15, Windows): fmt clean; workspace all pass (engine 58 incl. 2 new ground tests, client 75); tools content ok; both clippy orders clean; game 120 presented; play/fx checks ok. Not committed/pushed (git still blocked).
+
+## Ambient particles + label backing + tree tune-up (2026-10-15, this session)
+
+Fourth slice of the 9-item visual-gap list (user screenshot showed the pine still blobbing + plates drowning in canopy).
+
+Changed (engine/src/bridge.rs, this handoff): tree interior holes 1/3 to 1/2, base green darkened, rim 1.35x/interior 0.5x; push_motes (44 hash-scattered drifting/blinking motes on a front-air layer, firefly/ember mix, subtle glow); push_backed_text (opaque backing strip under every plate and pip bar). Tests: backing keeps spaces opaque, motes visible at t=0 and t=5.
+
+Verification (2026-10-15, Windows): fmt clean; workspace all pass (engine 60 incl. 2 new, client 75); tools content ok; both clippy orders clean; game 120 presented; play/fx checks ok. Note: transient 56-vs-60 engine count between runs was a stale test binary from a concurrent save (0 failures in both); current tree is 60/60. Not committed/pushed (git still blocked).
+
+## Tree verification + dead code removal (2026-10-15, this session)
+
+User screenshot showed a solid pale canopy despite the rework. Headless direct-stamping test (tree_canopy_has_holes_and_rim_shading) proves holes + rim/interior split exist in current code - the screenshot was a stale pre-rework build (uniform tint matches the old stamp_scenery path exactly). Removed the now-unused stamp_scenery (clippy dead_code) after a brace-repair detour. No visual changes this turn beyond what the rework already did.
+
+Verification (2026-10-15, Windows): fmt clean; workspace all pass (engine 61 incl. canopy test, client 75); tools content ok; both clippy orders clean; game 120 presented; play/fx checks ok. Not committed/pushed (git still blocked).
+
+## Block-hole trees + distance voids + saturation + HUD trim (2026-10-15, this session)
+
+User screenshots still showed a solid pale canopy, so holes went to 2x2 blocks (single cells anti-alias away in captures), interior darkened further, rims restrained. Voids now distance-linked (dense within ~28 cells of the player, black beyond, matching reference arena-vs-distance behavior). Meadow greens re-saturated toward reference mid-tones. HUD trimmed to 2 rows (dropped LIVE WORLD dev note, dimmed legend). A headless direct-stamping test proved holes exist in current code, so any remaining solid-canopy screenshot means a stale local binary, not missing code.
+
+Verification (2026-10-15, Windows): fmt clean; workspace all pass (engine 61, client 75); tools content ok; both clippy orders clean; game 120 presented; play/fx checks ok. Not committed/pushed (git still blocked).
+
+## Dungeon lighting preset - Sunken Vault (2026-10-15, this session)
+
+Answers the full-video analysis item 3 (dungeon ~30 brightness, lantern falloff, zero flashes).
+
+Changed (engine/src/bridge.rs, engine/examples/game.rs + play.rs, this handoff): ZoneKind::Meadow/Dungeon field on SceneView (display name stays separate). Dungeon renders dark flagstone floor (pebbles only), north wall band + pillar colonnade + rubble laid around the delve party, two torch sconces with matching light-pool sources, 10 cool motes, no rain layer, lantern radius 14, no boss/target panels. game -- --dungeon delves the Sunken Vault fixture (skeleton guardian, Rusty Stiletto, still-air messages); play.rs loopback stays meadow with explicit Nones. Tests: vault mean-bg darker than meadow, wall band spans view, rain layer absent.
+
+Verification (2026-10-15, Windows): fmt clean; workspace all pass (engine 63 incl. 2 new dungeon tests, client 75); tools content ok; both clippy orders clean; game --dungeon 120 + game 120 presented; play/fx checks ok. Not committed/pushed (git still blocked).
+
+## Oval fix + dark canopy holes + actor rim light (2026-10-15, this session)
+
+User screenshots showed a pasted-oval light edge and an still-solid pine. Diagnosed: (1) linear vignette kink drew the oval - replaced with smoothstep + per-cell dither + wider radius, lantern widened to match; (2) transparent canopy holes reveal lit ground and stay invisible - interior gaps now stamped as near-black cells, proven by direct-stamping test (prior screenshot was additionally a stale pre-rework binary). Actor bodies shade rim-bright/interior-dim like the reference figures. Tests: smoothstep gradual + dither alive, dark-hole count, exact cell accounting.
+
+Verification (2026-10-15, Windows): fmt clean; workspace all pass (engine 64, client 75); tools content ok; both clippy orders clean; game 120 presented; play/fx checks ok. Not committed/pushed (git still blocked).
+
+## Distance-following ground density (2026-10-15, this session)
+
+User asked whether ASCII backgrounds are necessary - answer is no (reference voids are empty). Ground detail now dissolves with light: near field fully stamped, far field thins to flat dark quads via hash dither (no edge line). Roads, water, and torch pools exempt as landmarks; lights built before ground so density follows pools too. Side benefit: fewer cells composed at large grids.
+
+Verification (2026-10-15, Windows): fmt clean; workspace all pass (engine 65 incl. density test, client 75); tools content ok; both clippy orders clean; game 120 + game --dungeon 120 presented; play/fx checks ok. Not committed/pushed (git still blocked).
+
+## Smooth void transitions via tiered density (2026-10-15, this session)
+
+User screenshot showed hard rectangular void edges. Replaced binary is_void with void_density tiers (1.0 / 0.25 / 0.05): far blocks thin instead of switching off, dark areas keep sparse glyphs like the reference. Density gate multiplies vignette x void tier, so walking field-to-dark dissolves continuously. Test updated to tier distribution.
+
+Verification (2026-10-15, Windows): fmt clean; workspace all pass (engine 65, client 75); tools content ok; both clippy orders clean; game 120 + game --dungeon 120 presented; play/fx checks ok. Not committed/pushed (git still blocked).
+
+## Smoothness: layer caching, view ranging, sub-cell camera glide (2026-10-15, this session)
+
+User recording showed a near-frozen window. Measured 19.5 fps debug / 43 fps release: the loop rebuilt 51k ground cells every frame, and the camera stepped whole cells.
+
+Changed (engine/src/bridge.rs, present.rs, scene.rs, examples/game.rs + play.rs, this handoff): StaticLayers cache (ground rebuilt only on player-cell/zone/resize change, props once ever; animation still samples per frame in compose); view-ranged ground/rain builds (camera window + margin, pure world-coord functions so exact); Camera gains ox/oy glide fractions; presenter passes fractional cam uniform with a per-instance world flag (HUD stays pinned); glide_camera exponential follow helper with snap/hold/converge tests; ViewBounds bundles ranged-build rects. Uniform buffer padded to 48 bytes (WGSL 16-byte rounding caught by --frames proof, fixed same turn).
+
+Result: 140 fps release headroom (was 43), debug 25 (was 19.5); world glides instead of ticking. Verification: fmt clean; workspace all pass (engine 66+3 glide/flag tests, client 75); tools content ok; both clippy orders clean; game 120 presented; play/fx checks ok. Not committed/pushed (git still blocked).

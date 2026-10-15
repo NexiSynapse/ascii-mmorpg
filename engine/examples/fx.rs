@@ -24,7 +24,7 @@ fn real_main() -> Result<(), String> {
     use ascii_mmorpg_engine::fx::{layer as effect_layer, Effect, Emitter};
     use ascii_mmorpg_engine::present::{PresentOptions, SceneSource};
     use ascii_mmorpg_engine::{
-        compose, AnimCell, Camera, Cell, Layer, Partition, Rgb, Scene, Shade,
+        compose, AnimCell, Camera, Cell, Layer, Partition, Rgb, Scene, Shade, Wash,
     };
 
     const W: i32 = 64;
@@ -146,6 +146,15 @@ fn real_main() -> Result<(), String> {
 
             let effects = effect_layer("effects", 2, &self.effects, phase);
             scene.layers.push(effects);
+            // Amber wash flash: the burst ignites the whole frame early in
+            // the loop, then the air cools back to black (reference wash).
+            let flash = (1.0 - phase / 1.5).clamp(0.0, 1.0);
+            if flash > 0.0 {
+                scene.wash = Some(Wash {
+                    tint: Rgb::new(150, 85, 25),
+                    strength: flash * 0.3,
+                });
+            }
             let indices: Vec<usize> = (0..scene.layers.len()).collect();
             scene
                 .partitions

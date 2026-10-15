@@ -27,7 +27,7 @@ fn main() {
 #[cfg(feature = "present")]
 fn real_main() -> Result<(), String> {
     use ascii_mmorpg_engine::bridge::{HUD_H, LOG_H, VIEW_H, VIEW_W};
-    use ascii_mmorpg_engine::present::{PresentOptions, SceneSource};
+    use ascii_mmorpg_engine::present::{glide_camera, PresentOptions, SceneSource};
     use std::collections::HashSet;
     use std::time::Duration;
     use winit::keyboard::KeyCode;
@@ -79,6 +79,11 @@ fn real_main() -> Result<(), String> {
             messages: messages.cloned().collect(),
             tick: snap.tick,
             zone,
+            zone_kind: bridge::ZoneKind::Meadow,
+            // Live selection/boss events are a later slice; the panels stay
+            // hidden in loopback until then.
+            boss: None,
+            target: None,
         }
     }
 
@@ -111,6 +116,8 @@ fn real_main() -> Result<(), String> {
         client_tick: Tick,
         held: HashSet<KeyCode>,
         pending: Vec<Command>,
+        cache: bridge::StaticLayers,
+        follow: Option<(f32, f32)>,
     }
 
     impl LocalGame {
@@ -124,6 +131,8 @@ fn real_main() -> Result<(), String> {
                 client_tick: 0,
                 held: HashSet::new(),
                 pending: Vec::new(),
+                cache: bridge::StaticLayers::new(),
+                follow: None,
             }
         }
 
@@ -161,11 +170,16 @@ fn real_main() -> Result<(), String> {
                 self.tick_once();
             }
             let snapshot = self.sim.snapshot_for(PLAYER_ID);
-            bridge::scene_from_view_sized(
+            let (scene, bcam) = bridge::scene_from_view_sized_cached(
                 &scene_view_from_snapshot(&snapshot),
                 width as i32,
                 height as i32,
-            )
+                &mut self.cache,
+            );
+            let (next, cam) =
+                glide_camera(self.follow, bcam.x as f32, bcam.y as f32, dt.as_secs_f32());
+            self.follow = Some(next);
+            (scene, cam)
         }
 
         fn key(&mut self, code: KeyCode, pressed: bool) {

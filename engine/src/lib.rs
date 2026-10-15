@@ -43,7 +43,7 @@ pub use compose::{compose, Frame};
 pub use demo::{wave_scene, VIEW_H, VIEW_W};
 pub use layer::{AnimCell, Layer, Shade};
 pub use partition::Partition;
-pub use scene::{Camera, Scene};
+pub use scene::{Camera, Scene, Wash};
 pub use sprite::{parse_frames, sprite_layer, sprite_size, SpriteDraw, FRAME_SEPARATOR};
 
 /// Windowed presenter (real OS window, GPU glyph atlas). Behind the

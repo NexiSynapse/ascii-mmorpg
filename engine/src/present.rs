@@ -32,7 +32,7 @@ impl Default for PresentOptions {
     fn default() -> Self {
         Self {
             title: "ASCII Engine".into(),
-            cell_px: 20.0,
+            cell_px: 16.0,
             width_cells: 0,
             height_cells: 0,
             fps: 60,
@@ -104,6 +104,8 @@ struct GlyphInstance {
     fg_gradient_axis: u32,
     /// Billboard size multiplier (1 = full cell, centered).
     scale: f32,
+    /// 1 = world layer (rides the fractional camera), 0 = pinned UI.
+    world: u32,
 }
 
 #[repr(C)]
@@ -113,6 +115,15 @@ struct Uniforms {
     grid_h: u32,
     surf_w: u32,
     surf_h: u32,
+    /// Fullscreen wash tint (linear 0..1) and strength; warms the void and
+    /// every quad like the reference amber washes.
+    wash_rgb: [f32; 3],
+    wash_strength: f32,
+    /// Sub-cell camera glide offset in grid cells (fractional follow).
+    cam: [f32; 2],
+    /// Explicit pad: WGSL uniform structs round up to a 16-byte multiple
+    /// (40 bytes of fields need a 48-byte buffer).
+    _pad: [f32; 2],
 }
 
 struct Gpu {
@@ -289,7 +300,7 @@ impl App {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -389,6 +400,11 @@ impl App {
                             offset: 52,
                             shader_location: 6,
                         },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Uint32,
+                            offset: 56,
+                            shader_location: 7,
+                        },
                     ],
                 }],
             },
@@ -463,19 +479,45 @@ impl App {
             return Ok(());
         };
         let t = self.started.elapsed().as_secs_f32();
+        let t0 = std::time::Instant::now();
         let (scene, camera) = self.source.scene_at_size(t, gpu.grid_w, gpu.grid_h);
+        let t1 = std::time::Instant::now();
         let frame = compose(&scene, &camera, t);
+        let t2 = std::time::Instant::now();
 
+        let (wash_rgb, wash_strength) = match scene.wash {
+            Some(wash) => (
+                [
+                    f32::from(wash.tint.r) / 255.0,
+                    f32::from(wash.tint.g) / 255.0,
+                    f32::from(wash.tint.b) / 255.0,
+                ],
+                wash.strength.clamp(0.0, 1.0),
+            ),
+            None => ([0.0, 0.0, 0.0], 0.0),
+        };
         let uniforms = Uniforms {
             grid_w: gpu.grid_w,
             grid_h: gpu.grid_h,
             surf_w: gpu.config.width,
             surf_h: gpu.config.height,
+            wash_rgb,
+            wash_strength,
+            cam: [camera.ox, camera.oy],
+            _pad: [0.0, 0.0],
         };
         gpu.queue
             .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
-        let instances = frame_instances(&frame, gpu.grid_w, gpu.grid_h);
+        let instances = {
+            let rects: Vec<(i32, i32, i32, i32)> = scene
+                .partitions
+                .iter()
+                .filter(|p| p.camera)
+                .map(|p| (p.x, p.y, p.w, p.h))
+                .collect();
+            frame_instances(&frame, gpu.grid_w, gpu.grid_h, &rects)
+        };
         let need = instances.len().max(1);
         if need > gpu.instance_cap {
             gpu.instance_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -515,9 +557,11 @@ impl App {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.03,
-                            g: 0.04,
-                            b: 0.08,
+                            // Void must read darkest: below vignetted ground
+                            // so empty blocks sink instead of glowing.
+                            r: 0.005,
+                            g: 0.006,
+                            b: 0.012,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -535,12 +579,49 @@ impl App {
         gpu.queue.submit([encoder.finish()]);
         output.present();
         self.presented += 1;
+        if std::env::var("PRESENT_PROFILE").is_ok() && self.presented % 60 == 0 {
+            eprintln!(
+                "[profile] build={:?} compose={:?}",
+                t1.duration_since(t0),
+                t2.duration_since(t1)
+            );
+        }
         Ok(())
     }
 }
 
+/// Exponential camera follow: eases the float follow-point toward the
+/// integer target and splits it into an integer cell plus a sub-cell glide
+/// fraction (examples feed the result back every frame; `None` snaps).
+/// Returns the new follow-point and the camera to present.
+pub fn glide_camera(
+    current: Option<(f32, f32)>,
+    tx: f32,
+    ty: f32,
+    dt: f32,
+) -> ((f32, f32), crate::Camera) {
+    let (cx, cy) = current.unwrap_or((tx, ty));
+    let k = 1.0 - (-dt.max(0.0) * 6.0).exp();
+    let nx = cx + (tx - cx) * k;
+    let ny = cy + (ty - cy) * k;
+    let cam = crate::Camera {
+        x: nx.floor() as i32,
+        y: ny.floor() as i32,
+        ox: nx - nx.floor(),
+        oy: ny - ny.floor(),
+    };
+    ((nx, ny), cam)
+}
+
 /// Flatten a [`Frame`] into GPU instances, clipped to the live grid.
-fn frame_instances(frame: &Frame, grid_w: u32, grid_h: u32) -> Vec<GlyphInstance> {
+/// `world` carries the camera-following partition rects (frame coords);
+/// those instances ride the fractional glide, pinned UI does not.
+fn frame_instances(
+    frame: &Frame,
+    grid_w: u32,
+    grid_h: u32,
+    world: &[(i32, i32, i32, i32)],
+) -> Vec<GlyphInstance> {
     let mut out = Vec::new();
     for y in 0..grid_h.min(frame.h.max(0) as u32) {
         for x in 0..grid_w.min(frame.w.max(0) as u32) {
@@ -550,6 +631,11 @@ fn frame_instances(frame: &Frame, grid_w: u32, grid_h: u32) -> Vec<GlyphInstance
             if cell.transparent {
                 continue;
             }
+            let xi = x as i32;
+            let yi = y as i32;
+            let in_world = world
+                .iter()
+                .any(|&(px, py, pw, ph)| xi >= px && xi < px + pw && yi >= py && yi < py + ph);
             let bold = if cell.bold { 1.25 } else { 1.0 };
             let f = |c: u8| ((f32::from(c) / 255.0) * bold).min(1.0);
             out.push(GlyphInstance {
@@ -569,6 +655,7 @@ fn frame_instances(frame: &Frame, grid_w: u32, grid_h: u32) -> Vec<GlyphInstance
                     Some(super::Axis::Y) => 2,
                 },
                 scale: cell.scale.clamp(0.25, 2.0),
+                world: in_world as u32,
             });
         }
     }
@@ -584,7 +671,13 @@ fn instance_capacity(grid_w: u32, grid_h: u32) -> u64 {
 }
 
 const SHADER: &str = r#"
-struct U { grid: vec2<u32>, surf: vec2<u32> };
+struct U {
+  grid: vec2<u32>,
+  surf: vec2<u32>,
+  wash_rgb: vec3<f32>,
+  wash_strength: f32,
+  cam: vec2<f32>,
+};
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
@@ -607,7 +700,8 @@ fn vs(@builtin(vertex_index) vi: u32,
        @location(3) fg_end: vec3<f32>,
        @location(4) bg: vec3<f32>,
        @location(5) gradient_axis: u32,
-       @location(6) size: f32) -> VOut {
+       @location(6) size: f32,
+       @location(7) world: u32) -> VOut {
     var c = vec2<f32>(0.0, 0.0);
     if (vi == 1u) { c = vec2<f32>(1.0, 0.0); }
     else if (vi == 2u || vi == 4u) { c = vec2<f32>(1.0, 1.0); }
@@ -616,7 +710,12 @@ fn vs(@builtin(vertex_index) vi: u32,
     // (reference spark particles vary in size); the atlas UV stays full-glyph.
     let c0 = (c - 0.5) * size + 0.5;
     let cell = vec2<f32>(f32(u.surf.x) / f32(u.grid.x), f32(u.surf.y) / f32(u.grid.y));
-    let pix = (vec2<f32>(grid) + c0) * cell;
+    // Fractional follow: the scene composes on integer cells while the
+    // view glides between them (no cell-stepping while walking).
+    // Fractional follow: world instances glide between cells while pinned
+    // UI stays put (no cell-stepping while walking).
+    let shift = select(vec2<f32>(0.0, 0.0), u.cam, world != 0u);
+    let pix = (vec2<f32>(grid) - shift + c0) * cell;
     let ndc = vec2<f32>(pix.x / f32(u.surf.x), 1.0 - pix.y / f32(u.surf.y)) * 2.0 - vec2<f32>(1.0);
     let tile = vec2<f32>(f32(glyph % 32u), f32(glyph / 32u));
     var o: VOut;
@@ -636,7 +735,8 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {
     let position = select(i.glyph_uv.x, i.glyph_uv.y, i.gradient_axis == 2u);
     let blend = select(0.0, position, i.gradient_axis != 0u);
     let fg = mix(i.fg_start, i.fg_end, blend);
-    return vec4<f32>(mix(i.bg, fg, a), 1.0);
+    let col = mix(i.bg, fg, a);
+    return vec4<f32>(mix(col, u.wash_rgb, u.wash_strength), 1.0);
 }
 "#;
 
@@ -762,7 +862,9 @@ impl winit::application::ApplicationHandler for App {
 
 #[cfg(test)]
 mod tests {
-    use super::{frame_instances, grid_for_surface, instance_capacity, GlyphInstance, SHADER};
+    use super::{
+        frame_instances, glide_camera, grid_for_surface, instance_capacity, GlyphInstance, SHADER,
+    };
     use crate::{Axis, Cell, Frame, Rgb};
 
     #[test]
@@ -783,7 +885,7 @@ mod tests {
         let mut frame = Frame::blank(1, 1);
         frame.cells[0] = Cell::new('@', Rgb::new(10, 20, 30), Rgb::new(0, 0, 0))
             .with_fg_gradient(Rgb::new(200, 210, 220), Axis::Y);
-        let instances = frame_instances(&frame, 1, 1);
+        let instances = frame_instances(&frame, 1, 1, &[(0, 0, 1, 1)]);
         assert_eq!(
             instances[0].fg_start,
             [10.0 / 255.0, 20.0 / 255.0, 30.0 / 255.0]
@@ -800,5 +902,39 @@ mod tests {
         assert!(SHADER.contains("mix(i.fg_start, i.fg_end, blend)"));
         assert!(SHADER.contains("i.glyph_uv.y"));
         assert!(SHADER.contains("i.gradient_axis != 0u"));
+    }
+
+    #[test]
+    fn glide_camera_snaps_holds_and_converges() {
+        // No history snaps to the target with zero fraction.
+        let (pos, cam) = glide_camera(None, 10.0, 4.0, 0.016);
+        assert_eq!((pos.0, pos.1), (10.0, 4.0));
+        assert_eq!((cam.x, cam.y), (10, 4));
+        assert_eq!((cam.ox, cam.oy), (0.0, 0.0));
+        // Zero dt holds still.
+        let (pos2, _) = glide_camera(Some(pos), 20.0, 9.0, 0.0);
+        assert_eq!(pos2, pos);
+        // Easing halves the gap repeatedly and keeps cell+fraction coherent.
+        let mut state = Some((0.0f32, 0.0f32));
+        for _ in 0..200 {
+            let (next, _) = glide_camera(state, 8.0, 3.0, 0.016);
+            state = Some(next);
+        }
+        let ((nx, ny), cam) = glide_camera(state, 8.0, 3.0, 0.016);
+        assert!((nx - 8.0).abs() < 0.01 && (ny - 3.0).abs() < 0.01);
+        assert!((cam.x as f32 + cam.ox - nx).abs() < 1e-5);
+        assert!((cam.y as f32 + cam.oy - ny).abs() < 1e-5);
+        assert!((0.0..1.0).contains(&cam.ox) && (0.0..1.0).contains(&cam.oy));
+    }
+
+    #[test]
+    fn world_flag_marks_camera_rects_only() {
+        let mut frame = Frame::blank(4, 1);
+        for cell in frame.cells.iter_mut() {
+            *cell = Cell::new('x', Rgb::new(1, 1, 1), Rgb::new(0, 0, 0));
+        }
+        let instances = frame_instances(&frame, 4, 1, &[(1, 0, 2, 1)]);
+        let flags: Vec<u32> = instances.iter().map(|i| i.world).collect();
+        assert_eq!(flags, vec![0, 1, 1, 0]);
     }
 }

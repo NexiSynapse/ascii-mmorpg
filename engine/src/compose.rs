@@ -1,4 +1,4 @@
-use super::{sample, Camera, Cell, Rgb, Scene};
+use super::{sample, Camera, Cell, Rgb, Scene, Wash};
 
 /// One flattened frame: resolved glyphs + style per grid cell. This is what a
 /// presenter (terminal today, windowed GUI next) draws; the engine itself
@@ -107,8 +107,47 @@ pub fn compose(scene: &Scene, camera: &Camera, t: f32) -> Frame {
         }
     }
     apply_glow(&mut frame);
+    if let Some(wash) = scene.wash {
+        apply_wash(&mut frame, wash);
+    }
     frame
 }
+
+/// Global tint wash, applied after glow (reference amber washes during
+/// bursts/boss phases). Runs after all partitions so the whole frame warms
+/// evenly; writes backgrounds only.
+fn apply_wash(frame: &mut Frame, wash: Wash) {
+    let strength = wash.strength.clamp(0.0, 1.0);
+    if strength <= 0.0 {
+        return;
+    }
+    for y in 0..frame.h {
+        for x in 0..frame.w {
+            if let Some(mut cell) = frame.get(x, y) {
+                if cell.transparent {
+                    continue;
+                }
+                let warm = |bg: u8, tint: u8| {
+                    (f32::from(bg) + strength * f32::from(tint)).clamp(0.0, 255.0) as u8
+                };
+                cell.bg = Rgb::new(
+                    warm(cell.bg.r, wash.tint.r),
+                    warm(cell.bg.g, wash.tint.g),
+                    warm(cell.bg.b, wash.tint.b),
+                );
+                frame.set(x, y, cell);
+            }
+        }
+    }
+}
+
+/// Measured reference curve (burst core, Video-47489 t=10.5 s): halo excess
+/// ≈15 brightness levels at 1 cell out, fading by ~5 cells (~40 px at 8
+/// px/cell), peak in the spark ring rather than the core. Tuned to match:
+/// reach = glow × 5 cells, quadratic falloff, amplitude 0.12 (a glow-1.0
+/// torch washes ≈21 levels at distance 1, ≈9 at 2, ≈4 at 3).
+const GLOW_RADIUS_PER_UNIT: f32 = 5.0;
+const GLOW_AMPLITUDE: f32 = 0.12;
 
 /// Light buffer: every stamped cell with `glow > 0` washes its foreground
 /// color onto neighboring backgrounds with quadratic falloff (reference
@@ -128,7 +167,7 @@ fn apply_glow(frame: &mut Frame) {
         .collect();
     for (sx, sy, mut source) in sources {
         source.glow = source.glow.min(8.0);
-        let radius = (source.glow * 4.0).ceil() as i32;
+        let radius = (source.glow * GLOW_RADIUS_PER_UNIT).ceil() as i32;
         for dy in -radius..=radius {
             for dx in -radius..=radius {
                 let dist = ((dx * dx + dy * dy) as f32).sqrt();
@@ -136,7 +175,7 @@ fn apply_glow(frame: &mut Frame) {
                     continue;
                 }
                 let fall = source.glow * (1.0 - dist / (radius as f32 + 1.0));
-                let fall = fall * fall;
+                let fall = fall * fall * GLOW_AMPLITUDE;
                 if fall <= 0.0 {
                     continue;
                 }
@@ -208,7 +247,12 @@ mod tests {
             .partitions
             .push(Partition::new("hud", 8, 0, 8, 4, vec![0], false));
 
-        let camera = Camera { x: 5, y: 2 };
+        let camera = Camera {
+            x: 5,
+            y: 2,
+            ox: 0.0,
+            oy: 0.0,
+        };
         let frame = compose(&scene, &camera, 0.0);
         // World cell (5,2) appears at the view origin; the hud shows it raw.
         assert_eq!(frame.get(0, 0).unwrap().glyph, 'T');
@@ -332,6 +376,57 @@ mod tests {
             a.cells.iter().map(|c| (c.glyph, c.bg)).collect::<Vec<_>>(),
             b.cells.iter().map(|c| (c.glyph, c.bg)).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn glow_reaches_measured_reference_distance() {
+        // Burst-core forensics: halo gone by ~5 cells. A glow-1.0 source
+        // must tint distance 4 but leave distance 7 black on empty ground.
+        let frame = compose(&glow_scene(), &Camera::default(), 0.0);
+        assert_ne!(
+            frame.get(6 + 4, 3).unwrap().bg,
+            Rgb::new(0, 0, 0),
+            "halo reaches 4 cells"
+        );
+        assert_eq!(
+            frame.get(6 - 6, 0).unwrap().bg,
+            Rgb::new(0, 0, 0),
+            "halo gone by 7 cells"
+        );
+    }
+
+    #[test]
+    fn wash_warms_backgrounds_and_clamps() {
+        // Wash works on stamped opaque cells (blank void stays transparent
+        // and is tinted by the presenter clear color instead).
+        let mut scene = Scene::default();
+        let mut layer = Layer::new("ground", 0);
+        layer.push(AnimCell::still(
+            1,
+            1,
+            Cell::new('.', Rgb::new(10, 10, 10), Rgb::new(0, 0, 0)),
+        ));
+        scene.layers.push(layer);
+        scene
+            .partitions
+            .push(Partition::new("all", 0, 0, 3, 3, vec![0], false));
+        scene.wash = Some(Wash {
+            tint: Rgb::new(100, 50, 0),
+            strength: 0.5,
+        });
+        let frame = compose(&scene, &Camera::default(), 0.0);
+        // Stamped black ground gains exactly half the tint.
+        assert_eq!(frame.get(1, 1).unwrap().bg, Rgb::new(50, 25, 0));
+        // Glyph itself survives the wash.
+        assert_eq!(frame.get(1, 1).unwrap().glyph, '.');
+        // Void stays transparent (presenter clear color handles it).
+        assert!(frame.get(0, 0).unwrap().transparent);
+        scene.wash = Some(Wash {
+            tint: Rgb::new(255, 255, 255),
+            strength: 9.0,
+        });
+        let frame = compose(&scene, &Camera::default(), 0.0);
+        assert_eq!(frame.get(1, 1).unwrap().bg, Rgb::new(255, 255, 255));
     }
 
     #[test]
