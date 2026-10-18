@@ -103,6 +103,19 @@ struct PointerTrack {
 }
 
 impl PointerTrack {
+    /// Drop all physical button state after the window loses focus.  Without
+    /// this, a right-drag can remain logically held after Alt-Tab and the next
+    /// cursor event unexpectedly rotates the camera.
+    fn clear_focus(&mut self) -> PointerEvent {
+        self.held = [false; 2];
+        self.last_pos = None;
+        PointerEvent {
+            held: self.held,
+            delta: (0.0, 0.0),
+            wheel: 0.0,
+        }
+    }
+
     /// Handle a button edge and return the event to forward.
     fn button(&mut self, slot: usize, pressed: bool) -> Option<PointerEvent> {
         self.held[slot] = pressed;
@@ -1208,6 +1221,15 @@ impl winit::application::ApplicationHandler for App {
         use winit::event::WindowEvent;
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Focused(false) => {
+                // Forward synthetic releases so dynamic sources cannot keep
+                // accelerating after the OS consumes a key-up during focus
+                // loss. Pointer state is cleared through the same event path.
+                for code in self.pressed_keys.drain() {
+                    self.source.key(code, false);
+                }
+                self.source.pointer(self.pointer.clear_focus());
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 use winit::event::ElementState;
                 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -1463,6 +1485,9 @@ mod tests {
             (0.0, 0.0),
             "wheel events never carry cursor deltas"
         );
+        let cleared = track.clear_focus();
+        assert_eq!(cleared.held, [false, false]);
+        assert_eq!(track.last_pos, None, "focus reset drops the drag baseline");
     }
 
     #[test]

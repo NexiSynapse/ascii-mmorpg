@@ -74,6 +74,34 @@ pub struct Mesh {
     pub tris: Vec<Tri>,
 }
 
+/// Presentation-only pose for the windowed humanoid model.
+///
+/// The authoritative simulation still owns cells and collision.  These values
+/// only decide how the already-authoritative body is articulated between
+/// snapshots, which keeps animation responsive without changing the wire
+/// protocol or server rules.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HumanoidPose {
+    /// Continuous locomotion phase in radians.  Opposite legs use opposite
+    /// signs so the feet exchange weight instead of translating as one block.
+    pub walk_phase: f32,
+    /// Normalised strike phase, 0..=1.  The useful motion is eased in and out
+    /// by the mesh builder rather than snapping the sword between poses.
+    pub attack_phase: f32,
+    /// Slow idle clock used for a barely-visible breathing/cloth shift.
+    pub idle_phase: f32,
+}
+
+impl HumanoidPose {
+    pub const fn new(walk_phase: f32, attack_phase: f32, idle_phase: f32) -> Self {
+        Self {
+            walk_phase,
+            attack_phase,
+            idle_phase,
+        }
+    }
+}
+
 impl Mesh {
     pub fn new() -> Self {
         Self::default()
@@ -113,6 +141,35 @@ impl Mesh {
         mesh.push_quad(c101, c100, c110, c111, albedo); // right
         mesh.push_quad(c011, c111, c110, c010, albedo); // top
         mesh.push_quad(c000, c100, c101, c001, albedo); // bottom
+        mesh
+    }
+
+    /// Low-poly conical volume for organic silhouettes such as pines and
+    /// canvas tents.  Side triangles are intentionally flat-shaded: the
+    /// rasteriser's face lighting then gives each terminal cell a coherent
+    /// facet instead of a plastic smooth blob.
+    pub fn cone(base: Vec3, radius: f32, height: f32, segments: u32, albedo: Rgb) -> Mesh {
+        let segments = segments.max(3);
+        let apex = Vec3::new(base.x, base.y + height.max(0.0), base.z);
+        let mut mesh = Mesh::new();
+        for i in 0..segments {
+            let a0 = i as f32 / segments as f32 * std::f32::consts::TAU;
+            let a1 = (i + 1) as f32 / segments as f32 * std::f32::consts::TAU;
+            let p0 = Vec3::new(
+                base.x + radius.max(0.0) * a0.cos(),
+                base.y,
+                base.z + radius.max(0.0) * a0.sin(),
+            );
+            let p1 = Vec3::new(
+                base.x + radius.max(0.0) * a1.cos(),
+                base.y,
+                base.z + radius.max(0.0) * a1.sin(),
+            );
+            mesh.tris.push(Tri {
+                v: [p0, p1, apex],
+                albedo,
+            });
+        }
         mesh
     }
 
@@ -187,6 +244,378 @@ impl Mesh {
             Vec3::new(1.25, 2.3, 0.2),
             Vec3::new(0.12, 1.7, 0.12),
             steel,
+        ));
+        mesh
+    }
+
+    /// Articulated humanoid used by the live windowed play path.
+    ///
+    /// This deliberately remains a small box-based model: the raster backend
+    /// has no skinning or skeletal GPU pass.  Joint-pivot transforms still give
+    /// the silhouette believable shoulder, elbow, hip and knee articulation,
+    /// while overlapping armour pieces hide seams at terminal-cell scale.
+    /// `humanoid()` remains the legacy rigid fixture used by older examples and
+    /// tests; new callers should pass a pose here.
+    pub fn humanoid_pose(pose: HumanoidPose) -> Mesh {
+        let cloth = Rgb::new(72, 84, 126);
+        let leather = Rgb::new(150, 96, 52);
+        let skin = Rgb::new(212, 170, 132);
+        let steel = Rgb::new(190, 205, 220);
+        let steel_dark = Rgb::new(120, 135, 160);
+        let gold = Rgb::new(222, 178, 62);
+        let mut mesh = Mesh::new();
+        let mut add = |part: Mesh| mesh.tris.extend(part.tris);
+        let posed_box = |center: Vec3, size: Vec3, albedo: Rgb, pivot: Vec3, pitch: f32| -> Mesh {
+            Mesh::boxed(center, size, albedo).transformed_about(
+                pivot,
+                &Transform {
+                    pitch,
+                    ..Transform::identity()
+                },
+            )
+        };
+
+        let walk = pose.walk_phase;
+        let leg_swing = walk.sin() * 0.28;
+        let arm_swing = (walk + std::f32::consts::PI).sin() * 0.20;
+        let strike = (pose.attack_phase.clamp(0.0, 1.0) * std::f32::consts::PI).sin();
+        let attack_lift = strike * 0.78;
+        let breath = if pose.walk_phase.abs() < 0.01 {
+            pose.idle_phase.sin() * 0.025
+        } else {
+            0.0
+        };
+
+        // Pelvis, torso and neck overlap by a few centimetres.  This is less
+        // brittle than touching boxes and prevents visible holes at the hips.
+        add(Mesh::boxed(
+            Vec3::new(0.0, 0.84 + breath * 0.5, 0.0),
+            Vec3::new(0.82, 0.36, 0.58),
+            leather,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.0, 1.63 + breath, 0.0),
+            Vec3::new(1.28, 1.28, 0.68),
+            cloth,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.0, 2.23 + breath, 0.02),
+            Vec3::new(1.05, 0.18, 0.72),
+            steel,
+        ));
+
+        // Head and helm are kept independent from the torso so the tiny idle
+        // lift reads as breathing instead of a rigid statue.
+        add(Mesh::boxed(
+            Vec3::new(0.0, 3.08 + breath, 0.0),
+            Vec3::new(0.72, 0.72, 0.72),
+            skin,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.0, 3.48 + breath, 0.0),
+            Vec3::new(0.78, 0.18, 0.78),
+            steel,
+        ));
+
+        // Each leg is built as two overlapping segments around a hip and knee
+        // pivot.  The foot boxes stay close to y=0 throughout the gait cycle.
+        add(posed_box(
+            Vec3::new(-0.30, 0.91, leg_swing * 0.16),
+            Vec3::new(0.42, 0.78, 0.48),
+            cloth,
+            Vec3::new(-0.30, 1.27, 0.0),
+            leg_swing * 0.34,
+        ));
+        add(posed_box(
+            Vec3::new(-0.30, 0.36, leg_swing * 0.42),
+            Vec3::new(0.38, 0.68, 0.44),
+            steel_dark,
+            Vec3::new(-0.30, 0.61, leg_swing * 0.16),
+            -leg_swing * 0.20,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(-0.30, 0.13, 0.10 + leg_swing * 0.52),
+            Vec3::new(0.48, 0.24, 0.62),
+            leather,
+        ));
+        add(posed_box(
+            Vec3::new(0.30, 0.91, -leg_swing * 0.16),
+            Vec3::new(0.42, 0.78, 0.48),
+            cloth,
+            Vec3::new(0.30, 1.27, 0.0),
+            -leg_swing * 0.34,
+        ));
+        add(posed_box(
+            Vec3::new(0.30, 0.36, -leg_swing * 0.42),
+            Vec3::new(0.38, 0.68, 0.44),
+            steel_dark,
+            Vec3::new(0.30, 0.61, -leg_swing * 0.16),
+            leg_swing * 0.20,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.30, 0.13, 0.10 - leg_swing * 0.52),
+            Vec3::new(0.48, 0.24, 0.62),
+            leather,
+        ));
+
+        // Shoulder and forearm pieces use the same shoulder pivot.  The
+        // overlap is intentional: it keeps the elbow silhouette connected
+        // while preserving a visibly different upper/lower arm angle.
+        let left_arm = arm_swing * 0.55;
+        let right_arm = -arm_swing * 0.55 - attack_lift;
+        add(posed_box(
+            Vec3::new(-0.76, 1.94, 0.0),
+            Vec3::new(0.34, 0.72, 0.40),
+            skin,
+            Vec3::new(-0.76, 2.28, 0.0),
+            left_arm,
+        ));
+        add(posed_box(
+            Vec3::new(-0.76, 1.48, 0.04),
+            Vec3::new(0.30, 0.62, 0.36),
+            steel_dark,
+            Vec3::new(-0.76, 1.66, 0.04),
+            -left_arm * 0.65,
+        ));
+        add(posed_box(
+            Vec3::new(0.76, 1.94, 0.0),
+            Vec3::new(0.34, 0.72, 0.40),
+            skin,
+            Vec3::new(0.76, 2.28, 0.0),
+            right_arm,
+        ));
+        add(posed_box(
+            Vec3::new(0.76, 1.48, 0.10),
+            Vec3::new(0.30, 0.62, 0.36),
+            steel_dark,
+            Vec3::new(0.76, 1.66, 0.10),
+            -right_arm * 0.72,
+        ));
+        add(posed_box(
+            Vec3::new(0.76, 1.92, 0.42),
+            Vec3::new(0.12, 1.35, 0.14),
+            steel,
+            Vec3::new(0.76, 1.66, 0.10),
+            -right_arm * 0.55,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.76, 1.67, 0.10),
+            Vec3::new(0.48, 0.08, 0.10),
+            gold,
+        ));
+
+        // A final global correction keeps the authored feet grounded even at
+        // the ends of the small gait envelope.  It never changes the relative
+        // pose or the camera-facing anchor.
+        let min_y = mesh
+            .tris
+            .iter()
+            .flat_map(|tri| tri.v.iter())
+            .map(|v| v.y)
+            .fold(f32::INFINITY, f32::min);
+        if min_y < 0.0 {
+            for tri in &mut mesh.tris {
+                for v in &mut tri.v {
+                    v.y -= min_y;
+                }
+            }
+        }
+        mesh
+    }
+
+    /// Low, broad forest creature with a readable head, muzzle, horns, and
+    /// four planted feet.  It intentionally shares the same flat-facet
+    /// language as the humanoid instead of becoming a noisy texture blob.
+    pub fn mossling_pose(pose: HumanoidPose) -> Mesh {
+        let green = Rgb::new(74, 132, 66);
+        let dark = Rgb::new(42, 82, 44);
+        let bark = Rgb::new(104, 74, 48);
+        let eye = Rgb::new(255, 194, 64);
+        let mut mesh = Mesh::new();
+        let breathe = pose.idle_phase.sin() * 0.04;
+        let stride = pose.walk_phase.sin() * 0.15;
+        let lunge = (pose.attack_phase.clamp(0.0, 1.0) * std::f32::consts::PI).sin() * 0.22;
+        let mut add = |part: Mesh| mesh.tris.extend(part.tris);
+        add(Mesh::boxed(
+            Vec3::new(0.0, 0.78 + breathe, 0.0),
+            Vec3::new(1.45, 0.92, 1.05),
+            green,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.0, 1.38 + breathe, 0.22 + lunge),
+            Vec3::new(0.92, 0.56, 0.78),
+            dark,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.0, 1.28 + breathe, 0.67 + lunge),
+            Vec3::new(0.62, 0.24, 0.36),
+            bark,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(-0.20, 1.42 + breathe, 0.62 + lunge),
+            Vec3::new(0.12, 0.12, 0.06),
+            eye,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.20, 1.42 + breathe, 0.62 + lunge),
+            Vec3::new(0.12, 0.12, 0.06),
+            eye,
+        ));
+        for (x, z, phase) in [
+            (-0.48, -0.32, stride),
+            (0.48, -0.32, -stride),
+            (-0.48, 0.32, -stride),
+            (0.48, 0.32, stride),
+        ] {
+            add(Mesh::boxed(
+                Vec3::new(x, 0.32, z + phase),
+                Vec3::new(0.30, 0.60, 0.30),
+                bark,
+            ));
+        }
+        add(Mesh::cone(
+            Vec3::new(-0.32, 1.62 + breathe, 0.10),
+            0.14,
+            0.48,
+            6,
+            bark,
+        ));
+        add(Mesh::cone(
+            Vec3::new(0.32, 1.62 + breathe, 0.10),
+            0.14,
+            0.48,
+            6,
+            bark,
+        ));
+        mesh
+    }
+
+    /// Lean undead silhouette: skull/jaw, ribcage, pelvis, separated limbs,
+    /// and a single rusty blade.  The gaps are deliberate negative space so
+    /// it reads as a skeleton rather than a pale humanoid block.
+    pub fn skeleton_pose(pose: HumanoidPose) -> Mesh {
+        let bone = Rgb::new(202, 196, 174);
+        let shadow = Rgb::new(104, 92, 78);
+        let rust = Rgb::new(136, 72, 48);
+        let ember = Rgb::new(255, 118, 62);
+        let sway = pose.walk_phase.sin() * 0.10;
+        let strike = (pose.attack_phase.clamp(0.0, 1.0) * std::f32::consts::PI).sin() * 0.42;
+        let mut mesh = Mesh::new();
+        let mut add = |part: Mesh| mesh.tris.extend(part.tris);
+        add(Mesh::boxed(
+            Vec3::new(0.0, 1.95, 0.0),
+            Vec3::new(0.62, 0.58, 0.58),
+            bone,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.0, 1.70, 0.25),
+            Vec3::new(0.38, 0.18, 0.18),
+            shadow,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.0, 1.32, 0.0),
+            Vec3::new(0.18, 0.72, 0.18),
+            bone,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(-0.24, 1.42, 0.0),
+            Vec3::new(0.10, 0.48, 0.10),
+            bone,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.24, 1.42, 0.0),
+            Vec3::new(0.10, 0.48, 0.10),
+            bone,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.0, 0.88, 0.0),
+            Vec3::new(0.48, 0.18, 0.28),
+            shadow,
+        ));
+        for (x, z) in [(-0.16, sway), (0.16, -sway)] {
+            add(Mesh::boxed(
+                Vec3::new(x, 0.50, z),
+                Vec3::new(0.10, 0.62, 0.10),
+                bone,
+            ));
+            add(Mesh::boxed(
+                Vec3::new(x, 0.13, z + 0.10),
+                Vec3::new(0.12, 0.14, 0.32),
+                shadow,
+            ));
+        }
+        add(Mesh::boxed(
+            Vec3::new(-0.36, 1.20, 0.0),
+            Vec3::new(0.10, 0.52, 0.10),
+            bone,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.36, 1.20, strike),
+            Vec3::new(0.10, 0.52, 0.10),
+            bone,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.38, 0.85, strike + 0.16),
+            Vec3::new(0.08, 0.34, 0.08),
+            shadow,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.38, 1.30, strike + 0.38),
+            Vec3::new(0.06, 0.96, 0.16),
+            rust,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(-0.13, 2.02, 0.30),
+            Vec3::new(0.08, 0.08, 0.04),
+            ember,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.13, 2.02, 0.30),
+            Vec3::new(0.08, 0.08, 0.04),
+            ember,
+        ));
+        mesh
+    }
+
+    /// Readable robed NPC with hood, staff, and a bright lantern accent.
+    pub fn herbalist_pose(idle_phase: f32) -> Mesh {
+        let robe = Rgb::new(52, 92, 132);
+        let hood = Rgb::new(36, 56, 92);
+        let leather = Rgb::new(124, 72, 46);
+        let brass = Rgb::new(212, 168, 66);
+        let lantern = Rgb::new(255, 198, 72);
+        let flicker = idle_phase.sin() * 0.04;
+        let mut mesh = Mesh::new();
+        let mut add = |part: Mesh| mesh.tris.extend(part.tris);
+        add(Mesh::boxed(
+            Vec3::new(0.0, 0.82, 0.0),
+            Vec3::new(0.82, 1.42, 0.62),
+            robe,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.0, 1.70, 0.0),
+            Vec3::new(0.66, 0.58, 0.66),
+            hood,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.0, 1.64, 0.31),
+            Vec3::new(0.34, 0.22, 0.08),
+            Rgb::new(18, 22, 32),
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.46, 1.04, 0.12),
+            Vec3::new(0.10, 2.08, 0.10),
+            leather,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.46, 1.92, 0.12),
+            Vec3::new(0.28, 0.32, 0.28),
+            brass,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.46, 1.92, 0.12),
+            Vec3::new(0.16 + flicker, 0.20 + flicker, 0.16 + flicker),
+            lantern,
         ));
         mesh
     }
@@ -445,8 +874,8 @@ impl Default for DepthOpts {
         Self {
             near: 0.5,
             far: 40.0,
-            ambient: 0.22,
-            edge_step: 0.3,
+            ambient: 0.28,
+            edge_step: 0.36,
         }
     }
 }
@@ -454,7 +883,7 @@ impl Default for DepthOpts {
 /// Luminance ramp for filled faces (dark → bright).
 const RAMP: &[u8] = b" .:-=+*#%@";
 /// Near-black void the geometry floats in (matches the engine night look).
-const VOID_BG: Rgb = Rgb::new(5, 6, 12);
+const VOID_BG: Rgb = Rgb::new(9, 12, 20);
 
 /// One supersampled fragment: perspective-correct depth, shaded albedo
 /// (0..1 floats), and its luminance. 2x2 of these resolve to one cell.
@@ -754,7 +1183,10 @@ fn resolve_cell(buf: &[Sample], w2: usize, cx: i32, cy: i32, opts: &DepthOpts) -
     let zavg = (zmin + zmax) / 2.0;
     // Distance fog: far geometry sinks toward the void.
     let fog = ((zavg - opts.near) / (opts.far - opts.near)).clamp(0.0, 1.0);
-    let dim = 1.0 - 0.75 * fog;
+    // Keep distant ground readable without flattening the depth cue. The old
+    // 75% reduction turned most of the world into near-black punctuation at
+    // the default orbit distance, so foreground objects lost their context.
+    let dim = 1.0 - 0.52 * fog;
     let to_u8 = |c: f32| (c / n * dim * 255.0).clamp(0.0, 255.0) as u8;
     let fg = Rgb::new(to_u8(r), to_u8(g), to_u8(b));
 
@@ -1042,6 +1474,86 @@ mod tests {
     }
 
     #[test]
+    fn posed_humanoid_articulates_without_losing_ground_contact() {
+        let idle = Mesh::humanoid_pose(HumanoidPose::new(0.0, 0.0, 0.0));
+        let stride = Mesh::humanoid_pose(HumanoidPose::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0));
+        assert_eq!(idle.tris.len(), stride.tris.len());
+        assert!(
+            idle.tris
+                .iter()
+                .zip(stride.tris.iter())
+                .flat_map(|(a, b)| a.v.iter().zip(b.v.iter()))
+                .any(|(a, b)| (*a - *b).dot(*a - *b) > 0.0001),
+            "a stride pose must change articulated vertices"
+        );
+        let min_y = stride
+            .tris
+            .iter()
+            .flat_map(|tri| tri.v.iter())
+            .map(|v| v.y)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            min_y >= -1e-5,
+            "pose must not sink feet below ground: {min_y}"
+        );
+    }
+
+    #[test]
+    fn posed_humanoid_attack_moves_the_weapon_smoothly() {
+        let idle = Mesh::humanoid_pose(HumanoidPose::default());
+        let strike = Mesh::humanoid_pose(HumanoidPose::new(0.0, 0.5, 0.0));
+        assert_eq!(idle.tris.len(), strike.tris.len());
+        assert!(
+            idle.tris
+                .iter()
+                .zip(strike.tris.iter())
+                .flat_map(|(a, b)| a.v.iter().zip(b.v.iter()))
+                .any(|(a, b)| (a.z - b.z).abs() > 0.1),
+            "attack phase must move the arm/weapon chain"
+        );
+    }
+
+    #[test]
+    fn windowed_actor_recipes_have_distinct_grounded_silhouettes() {
+        let humanoid = Mesh::humanoid_pose(HumanoidPose::default());
+        let mossling = Mesh::mossling_pose(HumanoidPose::default());
+        let skeleton = Mesh::skeleton_pose(HumanoidPose::default());
+        let herbalist = Mesh::herbalist_pose(0.0);
+        let signature = |mesh: &Mesh| {
+            let mut min = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+            let mut max = Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+            for v in mesh.tris.iter().flat_map(|tri| tri.v) {
+                min.x = min.x.min(v.x);
+                min.y = min.y.min(v.y);
+                min.z = min.z.min(v.z);
+                max.x = max.x.max(v.x);
+                max.y = max.y.max(v.y);
+                max.z = max.z.max(v.z);
+            }
+            (
+                mesh.tris.len(),
+                (max.x - min.x).round(),
+                (max.y - min.y).round(),
+            )
+        };
+        assert_ne!(signature(&humanoid), signature(&mossling));
+        assert_ne!(signature(&mossling), signature(&skeleton));
+        assert_ne!(signature(&skeleton), signature(&herbalist));
+        for mesh in [&mossling, &skeleton, &herbalist] {
+            let min_y = mesh
+                .tris
+                .iter()
+                .flat_map(|tri| tri.v.iter())
+                .map(|v| v.y)
+                .fold(f32::INFINITY, f32::min);
+            assert!(
+                min_y >= -1e-5,
+                "actor recipe must stay above ground: {min_y}"
+            );
+        }
+    }
+
+    #[test]
     fn quad_y_and_decal_are_two_flat_tris() {
         // Ground sheets and FX decals pay exactly two triangles — the whole
         // point of the builders (a box per dash is 6x, with dead side faces).
@@ -1057,6 +1569,26 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn cone_has_deterministic_facets_and_grounded_base() {
+        let cone = Mesh::cone(Vec3::new(1.0, 0.2, 2.0), 1.5, 3.0, 8, white());
+        assert_eq!(cone.tris.len(), 8);
+        let min_y = cone
+            .tris
+            .iter()
+            .flat_map(|tri| tri.v.iter())
+            .map(|v| v.y)
+            .fold(f32::INFINITY, f32::min);
+        let max_y = cone
+            .tris
+            .iter()
+            .flat_map(|tri| tri.v.iter())
+            .map(|v| v.y)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert_eq!(min_y, 0.2);
+        assert_eq!(max_y, 3.2);
     }
 
     #[test]

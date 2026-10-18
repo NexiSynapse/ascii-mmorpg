@@ -10,7 +10,7 @@ pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 4],
-    pub material_id: f32, // 0=Terrain, 1=Metal, 2=Cloth, 3=Foliage, 4=Glow/Fire, 5=Weather
+    pub material_id: f32, // 0=Terrain, 1=Metal, 2=Cloth, 3=Foliage, 4=Glow/Fire, 5=Weather, 8=Road, 9=Sand, 10=Stone
     pub roughness: f32,
     /// Nonzero frame-local entity identity written to the metadata G-buffer.
     pub entity_id: f32,
@@ -221,9 +221,13 @@ impl SceneBatches {
         time: f32,
         weather_mode: u32,
     ) {
-        let rain_color = [0.65, 0.82, 1.0, 0.85];
+        let rain_color = if weather_mode == 2 {
+            [0.52, 0.70, 1.0, 0.95]
+        } else {
+            [0.65, 0.82, 1.0, 0.85]
+        };
         let snow_color = [0.95, 0.98, 1.0, 0.9];
-        let num_particles = 180;
+        let num_particles = if weather_mode == 2 { 260 } else { 180 };
 
         for i in 0..num_particles {
             let fi = i as f32;
@@ -235,11 +239,15 @@ impl SceneBatches {
 
             match weather_mode {
                 0 | 2 => {
-                    let speed = 14.0;
+                    let speed = if weather_mode == 2 { 20.0 } else { 14.0 };
                     let py = 12.0 - ((time * speed + fi * 0.8) % 12.0);
                     self.particle_instances.push(InstanceRaw::new(
                         [px, py, pz],
-                        [0.04, 0.65, 0.04],
+                        if weather_mode == 2 {
+                            [0.055, 0.9, 0.045]
+                        } else {
+                            [0.04, 0.65, 0.04]
+                        },
                         0.0,
                         rain_color,
                         5.0,
@@ -338,6 +346,33 @@ impl MeshBuffer {
             let nz = vertex.normal[2];
             vertex.normal[0] = nx * cos + nz * sin;
             vertex.normal[2] = -nx * sin + nz * cos;
+        }
+    }
+
+    /// Rotates appended geometry around a transverse (X) joint axis.  The GPU
+    /// model is box-based rather than skinned, so a small pivot rotation gives
+    /// knees, elbows, and attack follow-through a connected silhouette without
+    /// adding a second render pass or a bone buffer.
+    pub fn rotate_pitch_vertices_since(
+        &mut self,
+        first_vertex: usize,
+        anchor: [f32; 3],
+        angle: f32,
+    ) {
+        if !angle.is_finite() || angle.abs() < f32::EPSILON {
+            return;
+        }
+        let (sin, cos) = angle.sin_cos();
+        let first_vertex = first_vertex.min(self.vertices.len());
+        for vertex in &mut self.vertices[first_vertex..] {
+            let dy = vertex.position[1] - anchor[1];
+            let dz = vertex.position[2] - anchor[2];
+            vertex.position[1] = dy * cos - dz * sin + anchor[1];
+            vertex.position[2] = dy * sin + dz * cos + anchor[2];
+            let ny = vertex.normal[1];
+            let nz = vertex.normal[2];
+            vertex.normal[1] = ny * cos - nz * sin;
+            vertex.normal[2] = ny * sin + nz * cos;
         }
     }
 
@@ -461,24 +496,39 @@ impl MeshBuffer {
     }
 
     pub fn add_grass_blade(&mut self, x: f32, z: f32, height: f32, sway: f32) {
+        self.add_grass_blade_grounded(x, z, 0.02, height, sway);
+    }
+
+    /// Adds a crossed grass tuft anchored to a caller-provided terrain height.
+    /// The legacy `add_grass_blade` wrapper keeps flat-ground callers stable,
+    /// while the renderer can keep tufts planted on the meadow's rolling
+    /// height field instead of letting them float or sink at every tile.
+    pub fn add_grass_blade_grounded(
+        &mut self,
+        x: f32,
+        z: f32,
+        ground_y: f32,
+        height: f32,
+        sway: f32,
+    ) {
         let width = 0.07;
         let tip_x = x + sway * height;
         let color = [0.02, 0.105, 0.035, 1.0];
         self.add_quad(
-            [x - width, 0.02, z],
-            [x + width, 0.02, z],
-            [tip_x + width * 0.35, height, z],
-            [tip_x - width * 0.35, height, z],
+            [x - width, ground_y, z],
+            [x + width, ground_y, z],
+            [tip_x + width * 0.35, ground_y + height, z],
+            [tip_x - width * 0.35, ground_y + height, z],
             [0.0, 0.0, 1.0],
             color,
             3.0,
             0.8,
         );
         self.add_quad(
-            [x, 0.02, z - width],
-            [x, 0.02, z + width],
-            [tip_x, height, z + width * 0.35],
-            [tip_x, height, z - width * 0.35],
+            [x, ground_y, z - width],
+            [x, ground_y, z + width],
+            [tip_x, ground_y + height, z + width * 0.35],
+            [tip_x, ground_y + height, z - width * 0.35],
             [1.0, 0.0, 0.0],
             color,
             3.0,
@@ -515,7 +565,15 @@ impl MeshBuffer {
             ];
 
             let mid_theta = (theta1 + theta2) * 0.5;
-            let normal = [mid_theta.cos() * 0.707, 0.707, mid_theta.sin() * 0.707];
+            // Match the actual cone slope instead of assuming a 45° side.
+            // Tall pines should read vertically lit while short horns and
+            // spires retain a broader radial highlight.
+            let slope_len = (height * height + radius * radius).sqrt().max(1e-6);
+            let normal = [
+                mid_theta.cos() * height / slope_len,
+                radius / slope_len,
+                mid_theta.sin() * height / slope_len,
+            ];
 
             let base_idx = self.vertices.len() as u32;
             self.vertices.push(
@@ -551,6 +609,7 @@ impl MeshBuffer {
         attack_phase: f32,
     ) {
         let (x, y, z) = (pos[0], pos[1], pos[2]);
+        let attack_phase = attack_phase.clamp(0.0, 1.0);
         let first_vertex = self.vertices.len();
         let armor_color = [0.84, 0.88, 0.96, 1.0]; // Bright gleaming steel
         let steel_dark = [0.55, 0.60, 0.68, 1.0]; // Shaded joint steel
@@ -703,6 +762,7 @@ impl MeshBuffer {
 
         // --- 5. Articulated Legs & Sabatons ---
         let leg_swing = (walk_phase).sin() * 0.3;
+        let left_leg_start = self.vertices.len();
         // Upper Cuisses & Knee Poleyns
         self.add_box(
             [x - 0.18, y + 0.68, z + leg_swing],
@@ -718,6 +778,7 @@ impl MeshBuffer {
             1.0,
             0.2,
         );
+        let right_leg_start = self.vertices.len();
         self.add_box(
             [x + 0.18, y + 0.68, z - leg_swing],
             [0.22, 0.36, 0.24],
@@ -755,6 +816,7 @@ impl MeshBuffer {
             2.0,
             0.4,
         );
+        self.rotate_pitch_vertices_since(left_leg_start, [x - 0.18, y + 1.02, z], leg_swing * 0.18);
         self.add_box(
             [x + 0.18, y + 0.12, z - leg_swing + 0.06],
             [0.24, 0.22, 0.36],
@@ -762,8 +824,14 @@ impl MeshBuffer {
             2.0,
             0.4,
         );
+        self.rotate_pitch_vertices_since(
+            right_leg_start,
+            [x + 0.18, y + 1.02, z],
+            -leg_swing * 0.18,
+        );
 
         // --- 6. Left Arm & Knight Heater Shield ---
+        let left_arm_start = self.vertices.len();
         self.add_box(
             [x - 0.48, y + 1.10, z],
             [0.18, 0.52, 0.18],
@@ -800,6 +868,11 @@ impl MeshBuffer {
             1.0,
             0.2,
         );
+        self.rotate_pitch_vertices_since(
+            left_arm_start,
+            [x - 0.48, y + 1.38, z],
+            -(walk_phase).sin() * 0.25 * 0.14,
+        );
 
         // --- 7. Right Arm & Crusader Broadsword ---
         let arm_swing = if attack_phase > 0.0 {
@@ -807,6 +880,7 @@ impl MeshBuffer {
         } else {
             -(walk_phase).sin() * 0.25
         };
+        let right_arm_start = self.vertices.len();
         self.add_box(
             [x + 0.48, y + 1.10, z + arm_swing],
             [0.18, 0.52, 0.18],
@@ -853,14 +927,45 @@ impl MeshBuffer {
             0.2,
         );
 
+        self.rotate_pitch_vertices_since(
+            right_arm_start,
+            [x + 0.48, y + 1.38, z],
+            -arm_swing * 0.16,
+        );
+
         // Rotate the authored +Z-facing figure about its foot anchor so the
         // head and body follow the orbit camera (see facing_angle docs).
+        let min_y = self.vertices[first_vertex..]
+            .iter()
+            .map(|vertex| vertex.position[1])
+            .fold(f32::INFINITY, f32::min);
+        if min_y < y {
+            let correction = y - min_y;
+            for vertex in &mut self.vertices[first_vertex..] {
+                vertex.position[1] += correction;
+            }
+        }
         self.rotate_vertices_since(first_vertex, pos, facing_angle);
     }
 
     /// Procedural 3D Skeletal Undead (Path C).
     pub fn add_skeleton(&mut self, pos: [f32; 3], anim_phase: f32, attack_phase: f32) {
+        self.add_skeleton_internal(pos, anim_phase, attack_phase, true);
+    }
+
+    /// Shared skeleton body used by both the unarmored undead and the armored
+    /// champion.  The champion supplies its own two-handed weapon, so keeping
+    /// the base scimitar optional prevents a visually confusing double-blade
+    /// overlap at small terminal scales.
+    fn add_skeleton_internal(
+        &mut self,
+        pos: [f32; 3],
+        anim_phase: f32,
+        attack_phase: f32,
+        include_weapon: bool,
+    ) {
         let (x, y, z) = (pos[0], pos[1], pos[2]);
+        let attack_phase = attack_phase.clamp(0.0, 1.0);
         let bone_white = [0.84, 0.82, 0.76, 1.0];
         let bone_shadow = [0.52, 0.48, 0.42, 1.0];
         let eye_glow = [1.0, 0.35, 0.15, 1.0]; // Eerie ember soul glint
@@ -973,7 +1078,7 @@ impl MeshBuffer {
             0.6,
         );
 
-        // --- Right Arm & Rusted Blade ---
+        // --- Right Arm & optional rusted blade ---
         let strike = if attack_phase > 0.0 {
             (attack_phase * PI).sin() * 0.9
         } else {
@@ -993,21 +1098,23 @@ impl MeshBuffer {
             3.0,
             0.6,
         );
-        // Notched Rusted Scimitar
-        self.add_box(
-            [x + 0.38, y + 1.18, z + strike + 0.38],
-            [0.05, 0.92, 0.14],
-            rust_steel,
-            2.0,
-            0.4,
-        );
-        self.add_box(
-            [x + 0.38, y + 0.76, z + strike + 0.22],
-            [0.24, 0.06, 0.08],
-            rust_steel,
-            2.0,
-            0.5,
-        );
+        if include_weapon {
+            // Notched Rusted Scimitar
+            self.add_box(
+                [x + 0.38, y + 1.18, z + strike + 0.38],
+                [0.05, 0.92, 0.14],
+                rust_steel,
+                2.0,
+                0.4,
+            );
+            self.add_box(
+                [x + 0.38, y + 0.76, z + strike + 0.22],
+                [0.24, 0.06, 0.08],
+                rust_steel,
+                2.0,
+                0.5,
+            );
+        }
     }
 
     /// Procedural 3D Skeletal Champion Warrior with armor, tower shield, and broadsword (Path C).
@@ -1020,7 +1127,7 @@ impl MeshBuffer {
         let shamble = (anim_phase * 3.0).sin() * 0.25;
 
         // Base skeleton geometry
-        self.add_skeleton(pos, anim_phase, attack_phase);
+        self.add_skeleton_internal(pos, anim_phase, attack_phase, false);
 
         // --- Horned Iron Spangenhelm ---
         self.add_box([x, y + 1.84, z], [0.42, 0.20, 0.42], iron_plate, 1.0, 0.3);
@@ -1141,7 +1248,14 @@ impl MeshBuffer {
 
     /// Procedural 3D Mossling Forest Lurker
     pub fn add_mossling(&mut self, pos: [f32; 3], anim_phase: f32) {
+        self.add_mossling_with_attack(pos, anim_phase, 0.0);
+    }
+
+    /// Mossling variant with the shared presentation attack phase. The legacy
+    /// wrapper above keeps non-combat callers on the idle pose.
+    pub fn add_mossling_with_attack(&mut self, pos: [f32; 3], anim_phase: f32, attack_phase: f32) {
         let (x, y, z) = (pos[0], pos[1], pos[2]);
+        let attack_lunge = (attack_phase.clamp(0.0, 1.0) * PI).sin() * 0.18;
         let breathe = (anim_phase * 2.0).sin() * 0.06;
         let moss_green = [0.26, 0.58, 0.24, 1.0];
         let moss_dark = [0.14, 0.36, 0.12, 1.0];
@@ -1191,14 +1305,14 @@ impl MeshBuffer {
             0.8,
         );
         self.add_box(
-            [x - 0.38, y + 0.24, z + 0.22 - stride],
+            [x - 0.38, y + 0.24, z + 0.22 - stride + attack_lunge],
             [0.30, 0.46, 0.30],
             moss_dark,
             3.0,
             0.8,
         );
         self.add_box(
-            [x + 0.38, y + 0.24, z + 0.22 + stride],
+            [x + 0.38, y + 0.24, z + 0.22 + stride + attack_lunge],
             [0.30, 0.46, 0.30],
             moss_dark,
             3.0,
@@ -1236,21 +1350,21 @@ impl MeshBuffer {
 
         // --- Fanged Maw & Mandibles ---
         self.add_box(
-            [x, y + 0.58 + breathe, z + 0.42],
+            [x, y + 0.58 + breathe, z + 0.42 + attack_lunge],
             [0.55, 0.28, 0.22],
             moss_dark,
             3.0,
             0.7,
         );
         self.add_box(
-            [x - 0.18, y + 0.50 + breathe, z + 0.48],
+            [x - 0.18, y + 0.50 + breathe, z + 0.48 + attack_lunge],
             [0.08, 0.16, 0.12],
             [0.95, 0.95, 0.90, 1.0],
             2.0,
             0.3,
         );
         self.add_box(
-            [x + 0.18, y + 0.50 + breathe, z + 0.48],
+            [x + 0.18, y + 0.50 + breathe, z + 0.48 + attack_lunge],
             [0.08, 0.16, 0.12],
             [0.95, 0.95, 0.90, 1.0],
             2.0,
@@ -1667,7 +1781,9 @@ impl MeshBuffer {
                     } else {
                         [0.78, 0.71, 0.54, 1.0] // dry sand
                     };
-                    (sand, 0.0, 0.55, [0.04; 4])
+                    // Material 9 keeps beach glyphs sparse and granular,
+                    // distinct from both the meadow and the water ramp.
+                    (sand, 9.0, 0.55, [0.04; 4])
                 } else if dist_from_road < road_width {
                     // Cobblestone Highway
                     let tile_pattern =
@@ -1678,10 +1794,12 @@ impl MeshBuffer {
                     } else {
                         [0.13, 0.145, 0.20, 1.0]
                     };
-                    (c, 0.0, 0.45, [0.0; 4])
+                    // Material 8 gets a restrained cobble glyph language in
+                    // the compute pass instead of inheriting meadow texture.
+                    (c, 8.0, 0.45, [0.0; 4])
                 } else if dist_from_road < road_width + 0.6 {
                     // Stone Road Border
-                    ([0.235, 0.205, 0.145, 1.0], 0.0, 0.5, [0.08; 4])
+                    ([0.235, 0.205, 0.145, 1.0], 10.0, 0.5, [0.08; 4])
                 } else {
                     // Lush Meadow with natural elevation roll. Base kept dim
                     // (quiet-ground contract, video-tools REPORT #1): lit
@@ -1710,7 +1828,14 @@ impl MeshBuffer {
                     [x, heights[1], z + step],
                     [x + step, heights[2], z + step],
                     [x + step, heights[3], z],
-                    [0.0, 1.0, 0.0],
+                    {
+                        let dx =
+                            ((heights[2] + heights[3]) - (heights[0] + heights[1])) / (2.0 * step);
+                        let dz =
+                            ((heights[1] + heights[2]) - (heights[0] + heights[3])) / (2.0 * step);
+                        let len = (dx * dx + 1.0 + dz * dz).sqrt();
+                        [-dx / len, 1.0 / len, -dz / len]
+                    },
                     color,
                     mat,
                     rough,
@@ -2052,6 +2177,52 @@ mod tests {
     }
 
     #[test]
+    fn cone_normals_follow_the_actual_slope() {
+        let mut mb = MeshBuffer::new();
+        mb.add_cone([0.0, 0.0, 0.0], 2.0, 4.0, 8, [0.2, 0.4, 0.2, 1.0], 3.0, 0.7);
+        let n = mb.vertices[2].normal;
+        let expected_y = 2.0 / (2.0f32 * 2.0 + 4.0 * 4.0).sqrt();
+        assert!((n[1] - expected_y).abs() < 1e-5);
+        assert!((n[0] * n[0] + n[1] * n[1] + n[2] * n[2] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn terrain_uses_materials_and_normals_for_surface_identity() {
+        let mut inland = MeshBuffer::new();
+        inland.add_terrain(0.0, 0.0, 20.0);
+        assert!(inland.vertices.iter().any(|v| v.material_id == 8.0));
+        assert!(inland.vertices.iter().any(|v| v.material_id == 10.0));
+        assert!(
+            inland
+                .vertices
+                .iter()
+                .filter(|v| v.material_id == 3.0)
+                .any(|v| (v.normal[0].abs() + v.normal[2].abs()) > 0.001),
+            "rolling meadow vertices need slope-aware normals"
+        );
+
+        let mut shore = MeshBuffer::new();
+        shore.add_terrain(0.0, WORLD_BOUNDS.max_y as f32 * 0.8 - 5.0, 12.0);
+        assert!(shore.vertices.iter().any(|v| v.material_id == 9.0));
+    }
+
+    #[test]
+    fn storm_weather_is_denser_faster_and_brighter_than_rain() {
+        let mut rain = SceneBatches::new();
+        rain.add_weather_particles(0.0, 0.0, 0.0, 0);
+        let mut storm = SceneBatches::new();
+        storm.add_weather_particles(0.0, 0.0, 0.0, 2);
+        assert!(storm.particle_instances.len() > rain.particle_instances.len());
+        assert!(
+            storm.particle_instances[0].model_matrix[1][1]
+                > rain.particle_instances[0].model_matrix[1][1]
+        );
+        assert!(
+            storm.particle_instances[0].color_tint[3] > rain.particle_instances[0].color_tint[3]
+        );
+    }
+
+    #[test]
     fn zero_entity_context_maps_to_metadata_zero() {
         // The "no entity" stamp (terrain, props, water) must stay exactly
         // zero: the 1-based id wrap previously folded entity 0 forward to
@@ -2080,6 +2251,24 @@ mod tests {
         assert_eq!(mb.entity_id, 42);
         mb.set_entity_context(256, 2);
         assert_eq!(mb.entity_id, 1, "ids wrap modulo 255 into 1..=255");
+    }
+
+    #[test]
+    fn grounded_grass_blade_keeps_its_base_on_the_terrain() {
+        let mut mb = MeshBuffer::new();
+        mb.add_grass_blade_grounded(2.0, 3.0, 0.17, 0.4, 0.1);
+        let min_y = mb
+            .vertices
+            .iter()
+            .map(|vertex| vertex.position[1])
+            .fold(f32::INFINITY, f32::min);
+        assert_eq!(min_y, 0.17, "grass bases must be anchored at ground_y");
+        assert!(
+            mb.vertices
+                .iter()
+                .any(|vertex| (vertex.position[1] - 0.57).abs() < 1e-6),
+            "blade tips must rise from the supplied ground height"
+        );
     }
 
     #[test]
@@ -2176,6 +2365,15 @@ mod tests {
         front.add_humanoid([2.0, 0.0, -3.0], 0.0, 0.35, 0.0);
         let count = front.vertices.len();
         assert!(count > 0, "humanoid must generate geometry");
+        let min_y = front
+            .vertices
+            .iter()
+            .map(|vertex| vertex.position[1])
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            min_y >= -1e-5,
+            "walking pose must keep boots grounded: {min_y}"
+        );
 
         let quarter = std::f32::consts::FRAC_PI_2;
         let mut turned = MeshBuffer::new();
@@ -2211,5 +2409,35 @@ mod tests {
             assert_eq!(a.position, b.position);
             assert_eq!(a.normal, b.normal);
         }
+    }
+
+    #[test]
+    fn mossling_attack_phase_lunges_front_geometry() {
+        let mut idle = MeshBuffer::new();
+        idle.add_mossling_with_attack([0.0, 0.0, 0.0], 0.0, 0.0);
+        let mut striking = MeshBuffer::new();
+        striking.add_mossling_with_attack([0.0, 0.0, 0.0], 0.0, 0.5);
+        assert_eq!(idle.vertices.len(), striking.vertices.len());
+        assert!(
+            idle.vertices
+                .iter()
+                .zip(striking.vertices.iter())
+                .any(|(a, b)| (a.position[2] - b.position[2]).abs() > 0.1),
+            "the shared attack phase must move the mossling's front geometry"
+        );
+    }
+
+    #[test]
+    fn armored_skeleton_replaces_not_duplicates_the_rusted_blade() {
+        let mut skeleton = MeshBuffer::new();
+        skeleton.add_skeleton([0.0, 0.0, 0.0], 0.0, 0.0);
+        let mut champion = MeshBuffer::new();
+        champion.add_skeleton_warrior([0.0, 0.0, 0.0], 0.0, 0.0);
+        let rusted = [0.42, 0.38, 0.34, 1.0];
+        assert!(skeleton.vertices.iter().any(|v| v.color == rusted));
+        assert!(
+            champion.vertices.iter().all(|v| v.color != rusted),
+            "armored champion should only carry its authored executioner weapon"
+        );
     }
 }

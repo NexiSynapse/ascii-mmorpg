@@ -36,10 +36,14 @@ fn main() {
 
 #[cfg(feature = "present")]
 fn real_main() -> Result<(), String> {
-    use ascii_mmorpg_engine::motion::KinematicMotion;
+    use ascii_mmorpg_engine::motion::{smooth_angle, KinematicMotion};
     use ascii_mmorpg_engine::present::{PointerEvent, PresentOptions, SceneSource};
-    use ascii_mmorpg_engine::raster::{self, Camera3, DepthOpts, Mesh, Transform, Vec3};
-    use ascii_mmorpg_engine::{bridge, Camera, Cell, Layer, Partition, Rgb, Scene};
+    use ascii_mmorpg_engine::raster::{
+        self, Camera3, DepthOpts, HumanoidPose, Mesh, Transform, Vec3,
+    };
+    use ascii_mmorpg_engine::{
+        bridge, overlay::TextRun, Camera, Cell, Layer, Partition, Rgb, Scene,
+    };
     use std::collections::{HashMap, HashSet};
     use std::time::Duration;
     use winit::keyboard::KeyCode;
@@ -57,40 +61,43 @@ fn real_main() -> Result<(), String> {
 
     /// Frame grid: HUD band on top, 3D world in the middle, log strip below
     /// (cell_px 8 → a 1536x560 window, same shape as the bridge layout).
-    const GRID_W: u32 = 192;
-    const GRID_H: u32 = 70;
-    const HUD_H: i32 = 6;
-    const LOG_H: i32 = 4;
+    const GRID_W: u32 = 160;
+    const GRID_H: u32 = 56;
+    const HUD_H: i32 = 7;
+    const LOG_H: i32 = 5;
 
     /// Camera defaults: OSRS-mid pull-back looking down at the player.
-    const CAM_DIST: f32 = 17.0;
-    const CAM_PITCH: f32 = -0.62; // ~35° OSRS mid; tilt via right-drag
-    const CAM_PITCH_MIN: f32 = -1.05;
-    const CAM_PITCH_MAX: f32 = -0.3;
-    const CAM_DIST_MIN: f32 = 9.0;
-    const CAM_DIST_MAX: f32 = 30.0;
+    const CAM_DIST: f32 = 13.5;
+    const CAM_PITCH: f32 = -0.68; // close readable OSRS gameplay framing
+    const CAM_PITCH_MIN: f32 = -1.12;
+    const CAM_PITCH_MAX: f32 = -0.35;
+    const CAM_DIST_MIN: f32 = 7.0;
+    const CAM_DIST_MAX: f32 = 24.0;
     /// Focal (cell units): at the 17-unit pull-back one world unit spans
     /// ~2 cells, so the 192-column view covers ~96 world cells — the same
     /// wing as the bridge camera.
-    const CAM_FOCAL: f32 = 34.0;
+    const CAM_FOCAL: f32 = 48.0;
+    const ATTACK_PHASE_SECONDS: f32 = 0.42;
+    const FACING_RESPONSE: f32 = 18.0;
 
     // Panel palette (dark slate HUD, gold accents — the TUI modal's tones).
-    const PANEL_BG: Rgb = Rgb::new(12, 11, 16);
+    const PANEL_BG: Rgb = Rgb::new(10, 14, 24);
     const PANEL_EDGE: Rgb = Rgb::new(215, 175, 95);
-    const HUD_TEXT: Rgb = Rgb::new(216, 208, 190);
-    const HUD_DIM: Rgb = Rgb::new(110, 120, 135);
+    const HUD_TEXT: Rgb = Rgb::new(238, 232, 216);
+    const HUD_DIM: Rgb = Rgb::new(164, 180, 202);
     const HP_FILL: Rgb = Rgb::new(220, 60, 50);
     const HP_EMPTY: Rgb = Rgb::new(90, 30, 26);
     const LABEL_BG: Rgb = Rgb::new(10, 10, 14);
     const DIGIT_GOLD: Rgb = Rgb::new(255, 230, 160);
+    const TARGET_ORANGE: Rgb = Rgb::new(255, 170, 58);
 
     // Meadow palette: dim saturated greens so actors/light FX pop (quiet-
     // carpet contract from the video study, factored for the 3D zones).
     const MEADOW: [Rgb; 4] = [
-        Rgb::new(18, 46, 28),
-        Rgb::new(14, 40, 24),
-        Rgb::new(22, 54, 30),
-        Rgb::new(12, 34, 22),
+        Rgb::new(30, 72, 42),
+        Rgb::new(24, 60, 36),
+        Rgb::new(38, 88, 50),
+        Rgb::new(22, 54, 34),
     ];
 
     /// Deterministic scenery list (hand-placed so the highway corridor and
@@ -239,6 +246,10 @@ fn real_main() -> Result<(), String> {
         inv_open: bool,
         /// Mesh facing angle (yaw radians); starts facing east like the TUI.
         facing: f32,
+        facing_target: f32,
+        gait_phase: f32,
+        attack_started_at: Option<f32>,
+        attack_queued: bool,
     }
 
     impl LocalGame {
@@ -261,7 +272,11 @@ fn real_main() -> Result<(), String> {
                 combat_fx: Vec::new(),
                 seen_combat_events: Vec::new(),
                 inv_open: false,
-                facing: std::f32::consts::FRAC_PI_2,
+                facing: std::f32::consts::PI,
+                facing_target: std::f32::consts::PI,
+                gait_phase: 0.0,
+                attack_started_at: None,
+                attack_queued: false,
             }
         }
 
@@ -307,8 +322,13 @@ fn real_main() -> Result<(), String> {
         fn advance(&mut self, t: f32) -> (f32, WorldSnapshot) {
             let dt = (t - self.last_t).max(0.0);
             self.last_t = t;
-            if let Some((dx, dy)) = self.motion.update(self.camera_axes(), dt) {
-                self.facing = f32::atan2(f32::from(dx), f32::from(dy));
+            let input = self.camera_axes();
+            let input_len = input.0.hypot(input.1);
+            if input_len > 0.01 {
+                self.facing_target = f32::atan2(input.0, input.1);
+            }
+            self.facing = smooth_angle(self.facing, self.facing_target, FACING_RESPONSE, dt);
+            if let Some((dx, dy)) = self.motion.update(input, dt) {
                 self.pending.push(Command::Move(match (dx, dy) {
                     (0, -1) => Direction::North,
                     (0, 1) => Direction::South,
@@ -321,6 +341,22 @@ fn real_main() -> Result<(), String> {
                     _ => Direction::East,
                 }));
             }
+            let speed = self.motion.velocity().0.hypot(self.motion.velocity().1);
+            let phase_dt = dt.clamp(0.0, 0.1);
+            if input_len > 0.01 || speed > 0.12 {
+                // Faster motion produces a quicker, but still bounded, stride.
+                self.gait_phase = (self.gait_phase + phase_dt * (5.5 + speed * 2.2))
+                    .rem_euclid(std::f32::consts::TAU);
+            } else {
+                self.gait_phase *= (-phase_dt * 5.0).exp();
+                if self.gait_phase.abs() < 0.01 {
+                    self.gait_phase = 0.0;
+                }
+            }
+            if self.attack_queued {
+                self.attack_started_at = Some(t);
+                self.attack_queued = false;
+            }
             for _ in 0..self
                 .clock
                 .advance(Duration::from_secs_f32(dt))
@@ -331,6 +367,13 @@ fn real_main() -> Result<(), String> {
             let snapshot = self.sim.snapshot_for(PLAYER_ID);
             self.observe_combat_fx(&snapshot, t);
             (dt, snapshot)
+        }
+
+        fn attack_phase(&self, t: f32) -> f32 {
+            self.attack_started_at
+                .map(|born| ((t - born) / ATTACK_PHASE_SECONDS).clamp(0.0, 1.0))
+                .filter(|phase| *phase < 1.0)
+                .unwrap_or(0.0)
         }
 
         /// Smoothed render position for one entity: glide toward the real
@@ -379,7 +422,20 @@ fn real_main() -> Result<(), String> {
                 aim.y - fwd.y * self.cam_dist,
                 aim.z - fwd.z * self.cam_dist,
             );
-            Camera3::new(eye, self.cam_yaw, self.cam_pitch, CAM_FOCAL, w, world_h)
+            // Preserve gameplay scale across resizes: a wider/taller window
+            // should reveal more context without shrinking the controlled
+            // character into a few cells.
+            let width_scale = w as f32 / GRID_W as f32;
+            let height_scale = world_h as f32 / (GRID_H as i32 - HUD_H - LOG_H) as f32;
+            let focal_scale = width_scale.min(height_scale).clamp(0.82, 1.28);
+            Camera3::new(
+                eye,
+                self.cam_yaw,
+                self.cam_pitch,
+                CAM_FOCAL * focal_scale,
+                w,
+                world_h,
+            )
         }
 
         /// Presentation-side combat FX: watch the sim's message log the
@@ -392,7 +448,11 @@ fn real_main() -> Result<(), String> {
                 if self.seen_combat_events.iter().any(|seen| seen == message) {
                     continue;
                 }
-                if let Some(event) = combat_fx_from_message(message, snapshot) {
+                if let Some(mut event) = combat_fx_from_message(message, snapshot) {
+                    // The translator is intentionally pure; stamp the actual
+                    // observation time here so a delayed snapshot cannot make
+                    // a fresh hit appear half-expired.
+                    event.born_s = t;
                     self.combat_fx.push(event);
                 }
                 self.seen_combat_events.push(message.clone());
@@ -444,6 +504,28 @@ fn real_main() -> Result<(), String> {
                     ));
                 }
             }
+            // A stable road ribbon gives the meadow a readable landmark and
+            // makes movement direction legible from the orbit camera.  It is
+            // deliberately a separate, slightly raised surface so the quiet
+            // meadow remains the dominant material rather than a checkerboard.
+            meshes.push(Mesh::quad_y(
+                Vec3::new(0.0, 0.035, -0.5),
+                3.0,
+                35.5,
+                Rgb::new(46, 50, 62),
+            ));
+            meshes.push(Mesh::quad_y(
+                Vec3::new(-3.35, 0.045, -0.5),
+                0.16,
+                35.5,
+                Rgb::new(112, 92, 61),
+            ));
+            meshes.push(Mesh::quad_y(
+                Vec3::new(3.35, 0.045, -0.5),
+                0.16,
+                35.5,
+                Rgb::new(112, 92, 61),
+            ));
             // Southern ocean + dry-then-wet sand beach south of the world
             // bound (35): same quiet sea language as the TUI, flat sheets.
             meshes.push(Mesh::quad_y(
@@ -465,12 +547,21 @@ fn real_main() -> Result<(), String> {
                 meshes.push(Mesh::boxed(
                     Vec3::new(tx, h / 2.0, tz),
                     Vec3::new(0.35, h, 0.35),
-                    Rgb::new(74, 58, 40),
+                    Rgb::new(106, 72, 42),
                 ));
-                meshes.push(Mesh::boxed(
-                    Vec3::new(tx, h + 1.3, tz),
-                    Vec3::new(1.7, 2.6, 1.7),
-                    Rgb::new(26, 66, 40),
+                meshes.push(Mesh::cone(
+                    Vec3::new(tx, h - 0.05, tz),
+                    1.45,
+                    2.5,
+                    8,
+                    Rgb::new(38, 92, 52),
+                ));
+                meshes.push(Mesh::cone(
+                    Vec3::new(tx, h + 0.95, tz),
+                    1.05,
+                    1.8,
+                    8,
+                    Rgb::new(52, 116, 62),
                 ));
             }
 
@@ -490,15 +581,55 @@ fn real_main() -> Result<(), String> {
                 );
                 meshes.push(Mesh::boxed(
                     Vec3::new(gx, 0.18, gy),
-                    Vec3::new(0.3, 0.36, 0.3),
-                    Rgb::new(230, 200, 90),
+                    Vec3::new(0.52, 0.52, 0.52),
+                    Rgb::new(246, 212, 92),
+                ));
+                meshes.push(Mesh::decal_y(
+                    Vec3::new(gx, 0.025, gy),
+                    0.0,
+                    0.48,
+                    0.18,
+                    Rgb::new(112, 88, 36),
+                ));
+            }
+
+            // Readable environmental anchors: broad, low-contrast clearings
+            // break up the meadow without reverting to a dotted tile carpet.
+            for (x, z, sx, sz, color) in [
+                (-6.0, 4.0, 3.8, 2.4, Rgb::new(42, 86, 46)),
+                (7.0, 6.5, 3.2, 2.0, Rgb::new(50, 76, 42)),
+                (-8.5, -7.0, 2.8, 2.2, Rgb::new(46, 66, 44)),
+                (8.0, -9.0, 3.6, 2.5, Rgb::new(38, 76, 46)),
+            ] {
+                meshes.push(Mesh::quad_y(Vec3::new(x, 0.018, z), sx, sz, color));
+            }
+
+            // Near-field stone clusters provide scale and a clear foreground
+            // silhouette. They stay low so the player and nameplates remain
+            // the primary read.
+            for (x, z, scale) in [
+                (-4.5, 3.4, 1.0),
+                (4.3, 4.8, 0.8),
+                (-5.8, -3.6, 0.72),
+                (6.2, -5.0, 0.92),
+            ] {
+                meshes.push(Mesh::boxed(
+                    Vec3::new(x, 0.22 * scale, z),
+                    Vec3::new(0.9 * scale, 0.44 * scale, 0.72 * scale),
+                    Rgb::new(82, 92, 104),
+                ));
+                meshes.push(Mesh::boxed(
+                    Vec3::new(x - 0.18 * scale, 0.48 * scale, z + 0.12 * scale),
+                    Vec3::new(0.45 * scale, 0.18 * scale, 0.38 * scale),
+                    Rgb::new(112, 122, 132),
                 ));
             }
 
             // Actors: humanoid meshes from the foot anchor, yawed to face.
             let facing = self.facing;
-            let stick = |x: f32, z: f32, yaw: f32, scale: f32| {
-                Mesh::humanoid().transformed_about(
+            let attack_phase = self.attack_phase(t);
+            let place = |mesh: Mesh, x: f32, z: f32, yaw: f32, scale: f32| {
+                mesh.transformed_about(
                     Vec3::new(0.0, 0.0, 0.0),
                     &Transform {
                         translation: Vec3::new(x, 0.0, z),
@@ -508,8 +639,21 @@ fn real_main() -> Result<(), String> {
                     },
                 )
             };
-            let player_scale = 0.62;
-            meshes.push(stick(player.0, player.1, facing, player_scale));
+            let player_scale = 0.96;
+            meshes.push(Mesh::decal_y(
+                Vec3::new(player.0, 0.018, player.1),
+                facing,
+                0.82,
+                0.30,
+                Rgb::new(14, 20, 26),
+            ));
+            meshes.push(place(
+                Mesh::humanoid_pose(HumanoidPose::new(self.gait_phase, attack_phase, t * 1.7)),
+                player.0,
+                player.1,
+                facing,
+                player_scale,
+            ));
             for entity in &snapshot.entities {
                 if entity.kind == EntityKind::Item {
                     continue;
@@ -519,21 +663,76 @@ fn real_main() -> Result<(), String> {
                     (entity.position.x as f32, entity.position.y as f32),
                     dt,
                 );
-                // Moss-tinted mob palette; the merchant wears rust-red cloth.
-                let remaps: &[(&str, Rgb)] = match entity.kind {
-                    EntityKind::Npc => &[("cloth", Rgb::new(122, 52, 44))],
-                    _ => &[
-                        ("leather", Rgb::new(46, 92, 44)),
-                        ("cloth", Rgb::new(30, 64, 38)),
-                        ("steel", Rgb::new(96, 128, 96)),
-                    ],
+                let idle_phase = t * 1.35 + entity.id as f32 * 0.37;
+                let label = entity.name.to_ascii_lowercase();
+                let actor = match entity.kind {
+                    EntityKind::Npc => Mesh::herbalist_pose(idle_phase),
+                    EntityKind::Monster if label.contains("skeleton") => {
+                        Mesh::skeleton_pose(HumanoidPose::new(idle_phase, attack_phase, idle_phase))
+                    }
+                    EntityKind::Monster => {
+                        Mesh::mossling_pose(HumanoidPose::new(idle_phase, attack_phase, idle_phase))
+                    }
+                    EntityKind::Player => {
+                        Mesh::humanoid_pose(HumanoidPose::new(idle_phase, attack_phase, idle_phase))
+                    }
+                    EntityKind::Item => continue,
                 };
-                let mut mob = stick(gx, gy, facing, 0.55);
-                for (part, color) in remaps {
-                    let (from, to) = part_tint(part, *color);
-                    mob = mob.retinted(from, to);
+                let scale = match entity.kind {
+                    EntityKind::Npc => 0.96,
+                    EntityKind::Monster if label.contains("skeleton") => 0.95,
+                    EntityKind::Monster => 1.02,
+                    EntityKind::Player => 0.96,
+                    EntityKind::Item => 1.0,
+                };
+                meshes.push(Mesh::decal_y(
+                    Vec3::new(gx, 0.018, gy),
+                    facing,
+                    if entity.kind == EntityKind::Monster {
+                        0.78
+                    } else {
+                        0.68
+                    },
+                    0.26,
+                    Rgb::new(14, 20, 26),
+                ));
+                meshes.push(place(actor, gx, gy, facing, scale));
+            }
+
+            // Target marker is a world-space object, not only a label. This
+            // keeps combat readability intact when the target is moving or
+            // partially overlaps the player silhouette.
+            if let Some(target) = snapshot
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.kind == EntityKind::Monster
+                        && entity.stats.is_alive()
+                        && (entity.position.x - snapshot.player.position.x).abs()
+                            + (entity.position.y - snapshot.player.position.y).abs()
+                            <= 6
+                })
+                .min_by_key(|entity| {
+                    (entity.position.x - snapshot.player.position.x).abs()
+                        + (entity.position.y - snapshot.player.position.y).abs()
+                })
+            {
+                let (tx, tz) = self.smooth_pos(
+                    target.id,
+                    (target.position.x as f32, target.position.y as f32),
+                    dt,
+                );
+                for i in 0..12 {
+                    let angle = i as f32 * std::f32::consts::TAU / 12.0;
+                    let point = Vec3::new(tx + angle.sin() * 2.15, 0.075, tz + angle.cos() * 1.35);
+                    meshes.push(Mesh::decal_y(
+                        point,
+                        angle + std::f32::consts::FRAC_PI_2,
+                        0.22,
+                        0.09,
+                        TARGET_ORANGE,
+                    ));
                 }
-                meshes.push(mob);
             }
 
             // Combat FX: telegraph decal ring → core/ring burst → embers,
@@ -611,14 +810,6 @@ fn real_main() -> Result<(), String> {
         }
     }
 
-    fn part_tint(part: &str, color: Rgb) -> (Rgb, Rgb) {
-        match part {
-            "leather" => (Rgb::new(122, 86, 52), color),
-            "cloth" => (Rgb::new(52, 58, 92), color),
-            _ => (Rgb::new(150, 170, 190), color),
-        }
-    }
-
     fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
         let ch = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t) as u8;
         Rgb::new(ch(a.r, b.r), ch(a.g, b.g), ch(a.b, b.b))
@@ -633,12 +824,24 @@ fn real_main() -> Result<(), String> {
             let (w, h) = (width as i32, height as i32);
             let world_h = (h - HUD_H - LOG_H).max(4);
             let (dt, snapshot) = self.advance(t);
+            // Resolve the player's presentation anchor before building the
+            // camera.  The world mesh and camera therefore follow the same
+            // interpolated point instead of alternating one frame apart.
+            self.smooth_pos(
+                snapshot.player.id,
+                (
+                    snapshot.player.position.x as f32,
+                    snapshot.player.position.y as f32,
+                ),
+                dt,
+            );
             let camera = self.camera3(w, world_h, dt, &snapshot);
             let mut scene = Scene::default();
 
             // ---- HUD band ----
             let mut hud = Layer::new("hud", 0);
             hud.fill_rect(0, 0, w, HUD_H, Cell::new(' ', HUD_TEXT, PANEL_BG));
+            hud.border_rect(0, 0, w, HUD_H, PANEL_EDGE, PANEL_BG);
             let zone_line = format!(
                 "{}  HP {}/{}  Tick {}",
                 scene_zone(&snapshot),
@@ -646,11 +849,11 @@ fn real_main() -> Result<(), String> {
                 snapshot.player.stats.max_hp,
                 snapshot.tick
             );
-            hud.push_text(2, 1, &zone_line, HUD_TEXT, PANEL_BG);
+            hud.push_text(2, 5, &zone_line, HUD_DIM, PANEL_BG);
             hud.push_text(
                 2,
-                2,
-                "[WASD] move  [F] attack  [1-3] cast  [I] inventory  [R] rest  [Right-drag] orbit  [Wheel] zoom  [Q] quit",
+                4,
+                "WASD move   F attack   1-3 cast   I inventory   R rest   Right-drag orbit   Wheel zoom   Q quit",
                 HUD_DIM,
                 PANEL_BG,
             );
@@ -670,14 +873,36 @@ fn real_main() -> Result<(), String> {
             );
             let hud_idx = scene.layers.len();
             scene.layers.push(hud);
+            scene.overlay_text.push(TextRun {
+                x: 12.0,
+                y: 0.35,
+                text: "WHISPERING FOREST".into(),
+                size: 1.35,
+                fg: [0.92, 0.84, 0.58],
+                bg: [0.02, 0.03, 0.06],
+            });
+            scene.overlay_text.push(TextRun {
+                x: 12.0,
+                y: 1.8,
+                text: format!(
+                    "{}   HP {}/{}   TICK {}",
+                    scene_zone(&snapshot),
+                    snapshot.player.stats.hp,
+                    snapshot.player.stats.max_hp,
+                    snapshot.tick
+                ),
+                size: 1.0,
+                fg: [0.82, 0.90, 0.98],
+                bg: [0.02, 0.03, 0.06],
+            });
 
             // ---- World partition: one raster pass + screen labels ----
             let meshes = self.world_meshes(&snapshot, t, dt);
             let opts = DepthOpts {
                 near: 0.5,
-                far: 44.0,
-                ambient: 0.3,
-                edge_step: 0.28,
+                far: 64.0,
+                ambient: 0.46,
+                edge_step: 0.48,
             };
             // Sun tilts out of the south-west so actor verticals stay lit
             // while ground zones keep their dark meadow tone.
@@ -701,20 +926,30 @@ fn real_main() -> Result<(), String> {
                     .smoothed
                     .get(&entity.id)
                     .unwrap_or(&(entity.position.x as f32, entity.position.y as f32));
-                if let Some((sx, sy)) = project(Vec3::new(gx, 3.2, gy), &camera) {
-                    let fg = if entity.kind == EntityKind::Player {
-                        HUD_TEXT
-                    } else {
-                        Rgb::new(220, 220, 220)
+                let entity_label = entity.name.to_ascii_lowercase();
+                let head_y = match entity.kind {
+                    EntityKind::Monster if entity_label.contains("skeleton") => 2.35,
+                    EntityKind::Monster => 2.05,
+                    EntityKind::Npc => 2.85,
+                    EntityKind::Player => 3.45,
+                    EntityKind::Item => 0.8,
+                };
+                if let Some((sx, sy)) = project(Vec3::new(gx, head_y, gy), &camera) {
+                    let fg = match entity.kind {
+                        EntityKind::Player => Rgb::new(255, 235, 160),
+                        EntityKind::Npc => Rgb::new(150, 220, 255),
+                        _ => Rgb::new(255, 230, 220),
                     };
                     let name = format!(" {} ", entity.name);
-                    labels.push_text(
-                        sx - name.chars().count() as i32 / 2,
-                        sy,
-                        &name,
-                        fg,
-                        LABEL_BG,
+                    let name_x = sx - name.chars().count() as i32 / 2;
+                    labels.fill_rect(
+                        name_x - 1,
+                        sy - 1,
+                        name.chars().count() as i32 + 2,
+                        3,
+                        Cell::new(' ', fg, LABEL_BG),
                     );
+                    labels.push_text(name_x, sy, &name, fg, LABEL_BG);
                     // HP mini-bar: 8 gutters, filled proportionally.
                     let hp_ratio =
                         entity.stats.hp.max(0) as f32 / entity.stats.max_hp.max(1) as f32;
@@ -758,6 +993,7 @@ fn real_main() -> Result<(), String> {
             // ---- Log strip ----
             let mut log = Layer::new("log", 0);
             log.fill_rect(0, 0, w, LOG_H, Cell::new(' ', HUD_TEXT, PANEL_BG));
+            log.border_rect(0, 0, w, LOG_H, Rgb::new(90, 108, 132), PANEL_BG);
             for (i, message) in snapshot
                 .messages
                 .iter()
@@ -880,7 +1116,10 @@ fn real_main() -> Result<(), String> {
                 }
             }
             match code {
-                KeyCode::KeyF if pressed => self.pending.push(Command::Attack),
+                KeyCode::KeyF if pressed => {
+                    self.pending.push(Command::Attack);
+                    self.attack_queued = true;
+                }
                 KeyCode::KeyR if pressed => self.pending.push(Command::Rest),
                 KeyCode::KeyW
                 | KeyCode::KeyA
@@ -955,6 +1194,9 @@ fn real_main() -> Result<(), String> {
                 scene.partitions.len()
             ));
         }
+        if scene.overlay_text.len() < 2 {
+            return Err("check: readable title/status overlays missing".into());
+        }
 
         // Movement path: default camera looks north, so screen-right (D)
         // walks the world-west step that the raster projects back screen-
@@ -1011,7 +1253,7 @@ fn real_main() -> Result<(), String> {
         LocalGame::new(),
         PresentOptions {
             title: "ASCII MMORPG — 3D orbit camera (OSRS controls)".into(),
-            cell_px: 8.0,
+            cell_px: 10.0,
             width_cells: GRID_W,
             height_cells: GRID_H,
             max_frames: frames,

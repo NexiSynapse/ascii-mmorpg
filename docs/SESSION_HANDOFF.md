@@ -4,8 +4,8 @@ Updated: 2026-10-18. This is the resumable engineering record, not a full transc
 
 ## Start here
 
-Workspace: `ASCII-Game/`; application repository: `ascii-mmorpg/`. Read the parent and repository `AGENTS.md` files. Latest turn: "3D OSRS-mode windowed game (depth raster + orbit camera + inventory)" section below — `examples/play.rs` now renders the world through the depth-buffered 3D raster backend behind an OSRS-style orbit camera (right-drag yaw/pitch, wheel zoom, camera-relative WASD), with mesh-expressed combat FX, nameplates/digits, and an inventory modal. Awaiting the user's live verdict on the new 3D window (`cargo run -p ascii-mmorpg-engine --features present --example play`), plus the still-pending terminal verdict for the TUI FX slice.
-Repository status (verified 2026-10-17, Windows): HEAD `1692003` (local `main`, ahead of `origin/main` by 5 — NOT pushed, do not push unless asked). Modified (tracked): `AGENTS.md`, `client/src/{camera,lib,main,ui}.rs`, `client/src/gpu/{pipeline,renderer,shaders}.rs`, `docs/SESSION_HANDOFF.md`, `engine/src/{anim,bridge,compose,lib,present,scene,sprite}.rs`, `engine/src/present/atlas.rs` (also `client/src/gpu/mesh.rs`, `client/src/term.rs`, `client/src/main.rs` in some sessions). New (untracked, do not delete): `client/src/camera.rs`, `engine/src/{overlay,raster}.rs`, `engine/examples/{depth,hero,model,viewer}.rs`, `engine/assets/{actors/hero.txt,meshes/sword.obj}`. The `main` branch merged `origin/rendering_gra_update` earlier (`1692003`). CRLF-vs-LF noise is historical (resolved take-theirs at merge); current diffs are real content.
+Workspace: `ASCII-Game/`; application repository: `ascii-mmorpg/`. Read the parent and repository `AGENTS.md` files. Latest turn: "Game feel, character animation & visual fidelity refinement" section at the end — the 3D play path now uses joint-pivot humanoid poses, responsive facing/gait/attack presentation state, focus-safe input, faceted cones/road landmarks, and improved actor labels; the terminal GPU path now has attack-driven poses, grounded limbs/grass, distinct road/sand/stone materials, slope normals, static non-foliage organic surfaces, and differentiated storm weather. The next human check remains the live 3D window plus the 156x44 TUI.
+Repository status (verified 2026-10-18, Windows): `origin/main` and the checked-out `rendering_gra_update` ref are at `91bea97`; do not commit or push unless asked. Current intentional worktree changes include the refinement slices in `client/src/gpu/{mesh,renderer,shaders}.rs`, `engine/examples/play.rs`, `engine/src/{motion,present,raster}.rs`; the pre-existing user modification to `play_ansi.bat` is preserved untouched. CRLF-vs-LF warnings are historical; current diffs are real content.
 
 Current slices completed:
 - Pine tree trunk visibility: elevated lowest canopy cone to Y = 3.60, assigned trunk and root flares dedicated Wood/Timber material (7.0) with vertical bark striations, cleared highway collision corridor (|x| <= 4), and synchronized procedural tree rendering on GPU.
@@ -117,6 +117,8 @@ The latest read-only GPU review identified the smallest high-value slice:
 
 ## Active TODO checklist
 
+- [x] NEW 2026-10-18 (game-feel refinement): completed 12 bounded refinement passes across the depth-raster play path and terminal GPU path — articulated pose/gait/attack timing, shortest-path facing, focus-safe input, actor grounding/label anchors, faceted environment silhouettes, distinct surface materials, slope-aware terrain lighting, foliage/static-organic separation, storm differentiation, and defensive lighting cleanup. See "Game feel, character animation & visual fidelity refinement" at the end.
+- [x] NEW 2026-10-18 (critical visual overhaul): completed 15 visibility/readability passes in the windowed 3D play path — close camera framing, larger cell pitch and actors, reduced fog/edge noise, brighter hierarchy, clear terrain patches/road/rocks/trees, distinct player/mossling/skeleton/herbalist silhouettes, grounded shadows, target ring, backed nameplates, and crisp title/status HUD overlays. See "Critical visual overhaul — visibility, world detail, and readability" at the end.
 - [x] NEW 2026-10-18 (fifteenth slice): 3D OSRS-mode windowed game — `examples/play.rs` renders through the depth raster backend (`raster::`) with an orbit camera (right-drag yaw/pitch + wheel zoom, camera-relative WASD via the camera basis), mesh-expressed combat FX (telegraph dashes / core / ring / embers as decals + boxes), screen-space nameplates + rising damage digits, HUD/log bands, and an `I` inventory modal. Engine additions: `Vec3` pub ops + `ops::Sub`, `Mesh::quad_y`/`decal_y`/`retinted`, `SceneSource::pointer(PointerEvent)` mouse wiring. Verified: fmt 0; workspace tests 0 failed (engine 100, +3/raster +1/present with `--features present` lib 112 all pass); tools content ok; clippy `-D warnings` workspace + present; `play -- --check` green; `play -- --frames 30` window clean. See "3D OSRS-mode windowed game".
 - [ ] User live verdict on the 3D window: orbit drag feel (and only then the drag-sign check), wheel zoom, camera-relative walk, smacking the mossling with `F` (burst + digit), `1/2/3` telegraphs, `I` panel, whether the depth read is like the reference captures. Plus the carried TUI verdict at 156x44 for the FX/clarity packs.
 
@@ -1353,3 +1355,90 @@ Verification (2026-10-16, Windows): fmt clean; workspace all pass (client 80, en
 User asked for: (1) GPU by default - already default features = ["gpu"], no flag needed; only --cpu forces CPU. (2) transient sub-ms black line - fixed at the output layer: removed \r\n chaining in both PlainTerminal::draw_into and SpanDiffEncoder; full-width rows auto-wrap the cursor, so "\r\n" landed one row too far down and left stale cells. Now absolute cursor jumps only. (3) whole canvas without HUD overlay - the GPU renderer now renders at the scene area dimensions (terminal minus top bar/log/legend) by computing scene dims in format_frame_with_hud and resizing only when they change, tracking last scene dims. HUD is drawn by Ratatui in its own regions, so the 3D scene fills exactly its canvas and never spills into log/sidebar. Dead-variable warnings cleaned up.
 
 Verification (2026-10-17, Windows): fmt clean; workspace all pass (client 80, engine 91); tools content ok; both clippy orders clean; client --demo exit 0; viewer/play/fx/hero checks ok. Not committed/pushed.
+
+## Game feel, character animation & visual fidelity refinement (2026-10-18)
+
+Request: perform iterative refinement of textures/materials, character construction, animation smoothness, movement response, and overall gameplay feel without changing authority, mechanics, or the existing renderer architecture.
+
+The audit found two different presentation paths. The terminal GPU path already had procedural character meshes and server-authoritative snapshots, but had several material/animation inconsistencies. The windowed 3D `play` example was more severe: it rebuilt a static `Mesh::humanoid()` every frame, used fixed glide smoothing, updated facing only on whole-cell steps, and rendered boxed tree canopies. The following twelve bounded passes were implemented and checked incrementally:
+
+1. **Baseline architecture audit.** Confirmed the protocol/server boundary remains authoritative; identified the static windowed humanoid, integer-cell raster output, material-3 wind leakage, missing GPU attack phase, duplicate champion weapon, label-height mismatch, flat terrain normals, and indistinct road/sand/stone glyph families.
+2. **Shared GPU gait timing.** Replaced mixed wall-clock/fixed-step cadence with one frame-rate-independent gait rate and exponential idle fade. Initial stationary actors now start with planted feet instead of entering a walk cycle.
+3. **Foliage/static-organic separation.** Material-3 wind displacement and glyph-time animation are now gated to non-entity foliage. Skeleton bones, mossling surfaces, and the herbalist staff no longer sway as if they were grass.
+4. **Presentation attack motion.** Existing combat log messages now drive a short presentation-only attack phase for the player and identified remote attackers; humanoid, skeleton, champion, and mossling geometry receive the phase while server combat remains unchanged.
+5. **Grounding and light robustness.** Grass blades use the same rolling meadow height field as the terrain, point-light normalization rejects zero distance/radius, and dead actors stop contributing creature light pools.
+6. **Windowed articulated humanoid pose.** Added `raster::HumanoidPose` and `Mesh::humanoid_pose`: overlapping torso/hip pieces plus joint-pivot legs, arms, shield, and weapon with gait, attack, breathing, foot-contact correction, and deterministic tests. Legacy `Mesh::humanoid()` remains intact for older examples.
+7. **Responsive windowed movement/facing.** Added shortest-angle helpers and exponential facing response. `play` derives target facing from live camera-relative input before a discrete server step, advances gait from bounded velocity, and keeps the camera and player on the same smoothed presentation anchor.
+8. **Input safety and combat timing.** Window focus loss now releases tracked keys/buttons and clears the pointer drag baseline. Freshly observed windowed combat FX are stamped with the actual observation time instead of appearing pre-expired.
+9. **Environment silhouette pass.** Added deterministic low-poly `raster::Mesh::cone` facets and replaced flat boxed tree canopies in `play` with layered cones; added a restrained raised road ribbon and curb landmarks so movement/depth have a stronger visual reference.
+10. **Surface-material pass.** GPU road, beach, and stone curb vertices now use dedicated material ids and glyph languages. Meadow quads calculate slope-aware normals from their shared corner height field, improving depth/lighting agreement without a new pass.
+11. **Character cohesion pass.** Armored skeletons no longer inherit the base rusted blade when they add their authored executioner sword. GPU remote actors rotate toward the orbit camera, projected label anchors were brought closer to each model's scaled head, humanoid arms/legs use small pitch-pivot articulation, and grounded correction prevents walking boots from dipping below y=0.
+12. **Weather and regression pass.** Storm now has denser, faster, longer, brighter rain than ordinary rain. Added tests for cone slope normals, terrain materials/normals, storm differentiation, pose articulation/attack/grounding, duplicate weapon removal, focus clearing, angle wrapping, and attack message parsing.
+
+Changed files in this refinement: `engine/src/raster.rs`, `engine/src/motion.rs`, `engine/src/present.rs`, `engine/examples/play.rs`, `client/src/gpu/mesh.rs`, `client/src/gpu/renderer.rs`, and `client/src/gpu/shaders.rs`. The pre-existing local `play_ansi.bat` modification was preserved and not edited.
+
+Verification (2026-10-18, Windows):
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo test --workspace --locked`: passed on the sequential rerun; 105 client, 105 engine, 8+3 server, 14 shared, 2 tools, and 1 bot tests passed, with doc tests clean. A concurrent first attempt hit the known Windows `LNK1104` collision on `target\\debug\\examples\\play.exe` while a window proof was linking; the sequential rerun passed.
+- `cargo run --locked -p ascii-mmorpg-tools -- content`: passed, `content ok: 11 definitions`.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: passed.
+- Targeted engine/client GPU tests and both present/gpu clippy checks passed.
+- `cargo run -p ascii-mmorpg-engine --locked --features present --example play -- --check`: passed.
+- `cargo run -p ascii-mmorpg-engine --locked --features present --example play -- --frames 60`: presented 60 Vulkan frames successfully on the available NVIDIA MX230.
+- `cargo run -p ascii-mmorpg-client --features gpu -- --wgpu-demo 5 96x28`: rendered 5 GPU frames successfully; the debug run measured 77.35 ms/frame, so this is a correctness smoke rather than a release performance claim.
+- `git diff --check`: passed; only line-ending conversion warnings were reported by Git.
+
+Honest remaining limitations: the depth rasterizer is still CPU-side and resolves to one terminal cell after a combined world pass, so it does not yet provide true sub-cell actor interpolation or skeletal skinning. The windowed scene still lacks rain/weather overlays and TCP authority. The terminal GPU path still uses procedural meshes rather than the authored multi-frame ASCII sheets. Human live judgment remains needed for orbit drag feel, foot sliding at different zooms, the new road/tree silhouettes, and the 156x44 TUI material/attack presentation.
+
+Next action: run the live windowed play command and `play_ansi.bat` at 156x44, then choose whether to tune visual timings from that verdict or continue the remaining visual queue. Do not commit or push unless explicitly requested.
+
+## Critical visual overhaul — visibility, world detail, and readability (2026-10-18)
+
+Request: overhaul the difficult-to-see 3D MMORPG presentation from the supplied screenshot baseline: dark flat field, tiny actors, weak terrain hierarchy, and unreadable HUD. The windowed `engine/examples/play.rs` path is the affected target; the terminal GPU client remains a separate renderer.
+
+### Root causes found
+
+- The default window was a 192×70 grid at 8px cells, with `CAM_DIST=17`, `CAM_FOCAL=34`, and a world width of roughly 96 units. The player model was scaled to 0.62, so the game showed a strategic-sized field while gameplay actors occupied only a few rows.
+- Raster fog reduced distant geometry by 75%, the void/background was near-black, and the play scene used low-luminance meadow blocks. This compounded into punctuation-like terrain with little midground context.
+- `DepthOpts.edge_step=0.28` caused small terrain depth differences to resolve as many horizontal/diagonal edge glyphs, producing visual noise instead of coherent ground masses.
+- Every non-item entity in the windowed example used the same humanoid recipe with recolours. Mosslings, skeletons, and NPCs therefore lacked distinct silhouettes.
+- Labels were one-cell text with sparse backing, and the HUD was composed entirely from one-cell layer text. The presenter already supported crisp overlay text, but `play` did not use it.
+
+### Fifteen refinement passes completed
+
+1. **Baseline audit:** traced camera → raster projection → cell resolution → presenter composition and identified the visibility bottlenecks above.
+2. **Gameplay framing:** changed the default window to 160×56 at 10px cells, reducing the excessive strategic field while keeping a substantial world view.
+3. **Camera scale:** moved the default orbit from 17 to 13.5 units, raised focal length from 34 to 48, kept orbit bounds predictable, and retained the elevated OSRS pitch.
+4. **Resize stability:** camera focal scales with the smaller width/height resize ratio so larger windows reveal context without shrinking the controlled character.
+5. **Raster visibility:** lifted the near-black void from (5,6,12) to (9,12,20), raised default ambient lighting, reduced fog dimming from 75% to 52%, and increased the play far plane to 64.
+6. **Edge-noise control:** raised the play depth-edge threshold to 0.48 so smooth ground does not become a field of repeated dash rules.
+7. **Ground hierarchy:** brightened and diversified meadow blocks, retained a clearly raised road ribbon/curbs, and added broad clearing patches instead of increasing per-cell stippling.
+8. **Foreground landmarks:** added low two-tier stone clusters near the play area and brighter faceted trunks/canopies so foreground scale is legible.
+9. **Player prominence:** increased the player scale from 0.62 to 0.96 and raised humanoid material values for readable steel, cloth, leather, and gold separation.
+10. **Distinct actor recipes:** added grounded raster meshes for mosslings, skeletons, and herbalists with separate silhouettes, muzzle/horns, rib gaps/weapon, hood/staff/lantern respectively. The player keeps the articulated humanoid pose system.
+11. **Entity scale/grounding:** tuned monster/NPC scales, added contact-shadow decals under actors, enlarged loot boxes, and added loot ground accents.
+12. **Combat readability:** added a world-space orange dashed target ring in addition to the label/HP treatment; target selection follows the existing melee-range rule.
+13. **Nameplate readability:** moved labels to the actual model head heights, added opaque backing rectangles, role-aware colors, and preserved HP bars/digits.
+14. **HUD hierarchy:** added a large crisp `WHISPERING FOREST` title and large zone/HP/tick overlay text using the presenter's existing `TextRun` path; added HUD/log borders and less cramped secondary controls.
+15. **Integration pass:** validated combat, movement, inventory, resize-aware framing, actor recipe grounding, full workspace behavior, content, clippy, and a 60-frame Vulkan presentation run.
+
+### Changed files
+
+- `engine/examples/play.rs`: camera/framing, palette, terrain patches/landmarks, actor dispatch/scales, target/shadow/loot markers, readable HUD overlays, label backing, resize focal scaling, and presentation proof.
+- `engine/src/raster.rs`: visibility/fog defaults, brighter void, articulated/grounded mossling/skeleton/herbalist mesh recipes, and distinct-silhouette tests.
+- `docs/SESSION_HANDOFF.md`: this record.
+
+### Verification (2026-10-18, Windows)
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo test --workspace --locked`: passed — 105 client tests, 106 engine tests, 8+3 server tests, 14 shared tests, 2 tools tests, 1 bot test, and doc tests clean.
+- `cargo run --locked -p ascii-mmorpg-tools -- content`: passed, `content ok: 11 definitions`.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: passed.
+- `cargo clippy -p ascii-mmorpg-engine --features present --all-targets -- -D warnings`: passed.
+- `cargo run -p ascii-mmorpg-engine --features present --example play -- --check`: passed.
+- `cargo run -p ascii-mmorpg-engine --locked --features present --example play -- --frames 60`: presented 60 Vulkan frames on the NVIDIA MX230.
+
+### Remaining limits and live review
+
+The windowed raster path is still a CPU depth-to-cell renderer rather than a true GPU 3D scene with skeletal skinning. The available automated proof confirms geometry, labels, controls, resize math, and Vulkan presentation, but cannot replace a human comparison of the supplied screenshot. A fresh live run should check the close gameplay view, right-drag orbit, wheel zoom, resize, `F`/`1-3` combat readability, and whether the larger silhouettes now dominate the terrain as intended. No commit or push was made.

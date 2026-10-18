@@ -3,6 +3,18 @@
 //! It produces movement intents only. World position and collision remain
 //! owned by the server simulation.
 
+/// Shortest signed angular distance from `from` to `to` in radians.
+pub fn shortest_angle_delta(from: f32, to: f32) -> f32 {
+    let tau = std::f32::consts::TAU;
+    (to - from + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI
+}
+
+/// Frame-rate independent shortest-path angle smoothing.
+pub fn smooth_angle(current: f32, target: f32, rate: f32, dt: f32) -> f32 {
+    let blend = 1.0 - (-rate.max(0.0) * dt.max(0.0)).exp();
+    current + shortest_angle_delta(current, target) * blend
+}
+
 /// Ground-plane velocity with acceleration, diagonal normalization, and drag.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct KinematicMotion {
@@ -73,7 +85,7 @@ impl KinematicMotion {
 
 #[cfg(test)]
 mod tests {
-    use super::KinematicMotion;
+    use super::{shortest_angle_delta, smooth_angle, KinematicMotion};
 
     #[test]
     fn starts_slowly_and_accelerates_to_a_bounded_speed() {
@@ -108,5 +120,25 @@ mod tests {
         let mut motion = KinematicMotion::default();
         assert_eq!(motion.update((1.0, 0.0), 5.0), None);
         assert!(motion.velocity().0 <= 0.901);
+    }
+
+    #[test]
+    fn angle_smoothing_takes_the_short_way_across_pi() {
+        let current = std::f32::consts::PI - 0.08;
+        let target = -std::f32::consts::PI + 0.08;
+        let delta = shortest_angle_delta(current, target);
+        assert!(
+            delta > 0.0 && delta < 0.2,
+            "unexpected wrapped delta {delta}"
+        );
+        let next = smooth_angle(current, target, 20.0, 0.05);
+        assert!(next > current, "wrapped turn should advance through +pi");
+    }
+
+    #[test]
+    fn angle_smoothing_is_stable_for_zero_delta_and_bad_time() {
+        let angle = 0.7;
+        assert_eq!(smooth_angle(angle, angle, 20.0, 0.5), angle);
+        assert_eq!(smooth_angle(angle, 1.2, 20.0, -1.0), angle);
     }
 }

@@ -76,9 +76,12 @@ fn vs_main(in: VertexInput, inst: InstanceInput) -> VertexOutput {
     let entity_id = select(in.entity_id, inst.instance_material.z, inst.instance_material.z >= 0.0);
     let entity_class = select(in.entity_class, inst.instance_material.w, inst.instance_material.z >= 0.0);
 
-    // Only elevated foliage receives vertex displacement. Meadow terrain uses material 3
-    // for glyph-level grass animation in the compute pass, but must remain stationary.
-    if (mat_id >= 2.8 && mat_id <= 3.2 && world_pos4.y > 1.2) {
+    // Only elevated, non-entity foliage receives vertex displacement. Material 3 is
+    // also used by static actor surfaces (mossling shell, bone, and the herbalist's
+    // staff); those must not inherit the scenery wind just because they share a
+    // material palette. Meadow terrain uses material 3 for glyph-level animation,
+    // but remains stationary in world space.
+    if (mat_id >= 2.8 && mat_id <= 3.2 && entity_id < 0.5 && world_pos4.y > 1.2) {
         let wind_intensity = min((world_pos4.y - 1.2) * 0.045, 0.22);
         let sway = sin(camera.time * 1.5 + world_pos4.x * 0.45 + world_pos4.z * 0.35) * wind_intensity;
         world_pos4.x += sway;
@@ -215,7 +218,10 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
         let dist = length(light_vec);
         let radius = light.position.w;
 
-        if (dist < radius) {
+        // A point light can coincide with a fragment (the player lantern is
+        // intentionally close to the body). Avoid a zero-length normalization
+        // and reject malformed zero-radius lights before dividing.
+        if (radius > 0.0001 && dist > 0.0001 && dist < radius) {
             let L_point = light_vec / dist;
             let atten = clamp(1.0 - (dist / radius), 0.0, 1.0);
             let atten_sq = atten * atten * light.color.w;
@@ -311,7 +317,7 @@ fn qid(v: f32) -> u32 {
     return u32(floor(v + 0.25));
 }
 
-fn material_glyph(material: u32, band: u32, x: u32, y: u32) -> u32 {
+fn material_glyph(material: u32, band: u32, x: u32, y: u32, foliage: bool) -> u32 {
     let v = hash2(x, y) % 4u;
     if (material == 0u) { // terrain: keep the ground readable without a solid block of '@'
         if (band == 0u) { return 32u; }  // ' '
@@ -366,6 +372,57 @@ fn material_glyph(material: u32, band: u32, x: u32, y: u32) -> u32 {
             return 9608u;                  // 'â–ˆ'
         }
         return 9608u;                     // 'â–ˆ' torch-core ground
+    }
+    if (material == 8u) { // cobblestone road: sparse broken marks
+        if (band == 0u) { return 32u; }
+        if (band == 1u) {
+            if (v == 0u) { return 46u; }
+            if (v == 1u) { return 58u; }
+            return 45u;
+        }
+        if (band == 2u) {
+            if (v == 0u) { return 61u; }
+            if (v == 1u) { return 43u; }
+            if (v == 2u) { return 111u; }
+            return 45u;
+        }
+        if (band == 3u) {
+            if (v == 0u) { return 35u; }
+            if (v == 1u) { return 43u; }
+            return 61u;
+        }
+        if (band < 6u) { return select(43u, 35u, v == 0u); }
+        return 9619u;
+    }
+    if (material == 9u) { // beach: granular, low-contrast, wave-adjacent
+        if (band == 0u) { return 32u; }
+        if (band == 1u) {
+            if (v == 0u) { return 46u; }
+            if (v == 1u) { return 44u; }
+            return 39u;
+        }
+        if (band == 2u) {
+            if (v == 0u) { return 58u; }
+            if (v == 1u) { return 45u; }
+            return 126u;
+        }
+        if (band == 3u) { return select(45u, 61u, v < 2u); }
+        return select(9617u, 9618u, (v & 1u) == 1u);
+    }
+    if (material == 10u) { // stone curb/masonry: hard seams and block faces
+        if (band == 0u) { return 32u; }
+        if (band == 1u) { return select(46u, 58u, v == 0u); }
+        if (band == 2u) {
+            if (v == 0u) { return 43u; }
+            if (v == 1u) { return 45u; }
+            return 124u;
+        }
+        if (band < 6u) {
+            if (v == 0u) { return 35u; }
+            if (v == 1u) { return 43u; }
+            return 61u;
+        }
+        return 9608u;
     }
     if (material == 1u) { // metal: hard creases, rivets, and burnished plate
         if (band == 0u) { return 32u; }
@@ -453,9 +510,11 @@ fn material_glyph(material: u32, band: u32, x: u32, y: u32) -> u32 {
         if (v == 2u) { return 37u; }      // '%'
         return 87u;                       // 'W'
     }
-    if (material == 3u) { // foliage & meadow grass: animated wind sway, organic blades, leaves
-        // Wind current phase across the terrain: slow rolling wave left and right
-        let wind_val = sin(config.time * 0.95 + f32(x) * 0.08 + f32(y) * 0.05);
+    if (material == 3u) { // foliage & meadow grass: wind only for non-entity scenery
+        // Actor material-3 surfaces keep the same organic glyph family, but their
+        // wind phase is pinned to zero. This separates foliage animation from
+        // static character/staff surfaces without adding another material pass.
+        let wind_val = select(0.0, sin(config.time * 0.95 + f32(x) * 0.08 + f32(y) * 0.05), foliage);
         if (band == 0u) { return 32u; }  // ' '
         if (band == 1u) {
             if (wind_val > 0.35) {
@@ -1104,7 +1163,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
             band = 9u;
         }
 
-        let volumetric_glyph = material_glyph(material_id, band, x, y);
+        let volumetric_glyph = material_glyph(material_id, band, x, y, entity_id == 0u);
         if (far_void && sharpened_luma < 0.08) {
             glyph = 32u;
         } else if (sharpened_luma >= 0.04) {
@@ -1265,8 +1324,33 @@ mod tests {
 
     #[test]
     fn terrain_material_keeps_vertex_position_stationary() {
-        assert!(SCENE_3D_WGSL.contains("mat_id >= 2.8 && mat_id <= 3.2 && world_pos4.y > 1.2"));
+        assert!(SCENE_3D_WGSL
+            .contains("mat_id >= 2.8 && mat_id <= 3.2 && entity_id < 0.5 && world_pos4.y > 1.2"));
         assert!(!SCENE_3D_WGSL.contains("Meadow grass slow synchronized wind"));
+    }
+
+    #[test]
+    fn foliage_animation_does_not_move_or_retime_actor_material_three() {
+        assert!(SCENE_3D_WGSL.contains("entity_id < 0.5 && world_pos4.y > 1.2"));
+        assert!(ASCII_POST_WGSL.contains(
+            "fn material_glyph(material: u32, band: u32, x: u32, y: u32, foliage: bool)"
+        ));
+        assert!(ASCII_POST_WGSL.contains("entity_id == 0u"));
+        assert!(ASCII_POST_WGSL.contains("select(0.0, sin(config.time * 0.95"));
+    }
+
+    #[test]
+    fn point_lighting_guards_zero_distance_and_radius() {
+        assert!(SCENE_3D_WGSL.contains("if (radius > 0.0001 && dist > 0.0001 && dist < radius)"));
+    }
+
+    #[test]
+    fn terrain_materials_have_distinct_glyph_languages() {
+        assert!(ASCII_POST_WGSL.contains("if (material == 8u)"));
+        assert!(ASCII_POST_WGSL.contains("if (material == 9u)"));
+        assert!(ASCII_POST_WGSL.contains("if (material == 10u)"));
+        assert!(ASCII_POST_WGSL.contains("cobblestone road"));
+        assert!(ASCII_POST_WGSL.contains("beach: granular"));
     }
 
     #[test]

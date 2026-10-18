@@ -35,7 +35,6 @@ pub struct GpuRenderer {
     pub weather: WeatherMode,
     pub active_modal: crate::ui::ActiveModal,
     pub last_player_pos: Option<Point>,
-    pub last_move_instant: Option<Instant>,
     actor_walk_states: HashMap<EntityId, ActorWalkState>,
     pub player_walk_phase: f32,
     pub smooth_cam_pos: Option<Vec2>,
@@ -49,6 +48,7 @@ pub struct GpuRenderer {
     /// server authority is never touched.
     combat_fx: Vec<CombatFx>,
     seen_combat_events: Vec<String>,
+    attack_started_at: HashMap<EntityId, f32>,
 }
 
 /// Reserved entity id stamped on FX geometry so compute-pass gates treat
@@ -62,6 +62,17 @@ const FX_BURST_SECONDS: f32 = 0.45;
 /// Seconds the telegraph ring sweeps before a queued cast resolves into
 /// its burst (reference: dashes are drawn pre-hit).
 const FX_TELEGRAPH_SECONDS: f32 = 0.9;
+
+/// Shared gait timing for realtime, fixed-tick, and batched presentation.
+/// The phase is expressed in radians and wraps once per stride.
+const WALK_PHASE_RATE: f32 = 21.0;
+const WALK_IDLE_FADE_RATE: f32 = 12.0;
+const WALK_MOVEMENT_GRACE_SECONDS: f32 = 0.28;
+const FIXED_PRESENTATION_STEP_SECONDS: f32 = 0.05;
+
+/// Short presentation-only melee swing. Server combat remains authoritative;
+/// this timer only gives the already-observed event a readable local motion.
+const ATTACK_PHASE_SECONDS: f32 = 0.42;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CombatFx {
@@ -109,7 +120,6 @@ impl GpuRenderer {
             weather,
             active_modal: crate::ui::ActiveModal::None,
             last_player_pos: None,
-            last_move_instant: None,
             actor_walk_states: HashMap::new(),
             player_walk_phase: 0.0,
             smooth_cam_pos: None,
@@ -119,6 +129,7 @@ impl GpuRenderer {
             camera: CameraState::default(),
             combat_fx: Vec::new(),
             seen_combat_events: Vec::new(),
+            attack_started_at: HashMap::new(),
         })
     }
 
@@ -204,44 +215,10 @@ impl GpuRenderer {
     }
 
     /// Evaluates whether the player is currently walking based on position changes
-    /// within a 280ms stride window, returning the active walk cycle phase.
+    /// within the shared stride window, returning the active walk cycle phase.
     ///
     /// When the player is stationary, returns 0.0 so feet remain planted on the ground.
     pub fn update_walk_phase(&mut self, world: &WorldSnapshot) -> f32 {
-        if !world.player.stats.is_alive() {
-            self.player_walk_phase = 0.0;
-            return 0.0;
-        }
-
-        let current_pos = world.player.position;
-        let now = Instant::now();
-
-        let moved = match self.last_player_pos {
-            Some(last_pos) => last_pos != current_pos,
-            None => false,
-        };
-
-        if moved {
-            self.last_player_pos = Some(current_pos);
-            self.last_move_instant = Some(now);
-        } else if self.last_player_pos.is_none() {
-            self.last_player_pos = Some(current_pos);
-        }
-
-        let is_walking = self
-            .last_move_instant
-            .is_some_and(|t| now.duration_since(t).as_millis() < 280);
-
-        if is_walking {
-            self.player_walk_phase += 0.35;
-            self.player_walk_phase
-        } else {
-            self.player_walk_phase = 0.0;
-            0.0
-        }
-    }
-
-    fn update_walk_phase_delta(&mut self, world: &WorldSnapshot, delta_seconds: f32) -> f32 {
         if !world.player.stats.is_alive() {
             self.player_walk_phase = 0.0;
             return 0.0;
@@ -250,21 +227,17 @@ impl GpuRenderer {
         let moved = self.last_player_pos.is_some_and(|last| last != current_pos);
         self.last_player_pos = Some(current_pos);
         if moved {
-            self.last_move_instant = Some(Instant::now());
-        }
-        let is_walking = self
-            .last_move_instant
-            .is_some_and(|t| t.elapsed().as_secs_f32() < 0.28);
-        if is_walking {
-            self.player_walk_phase += delta_seconds * 21.0;
-            self.player_walk_phase
+            self.player_walk_phase = (self.player_walk_phase
+                + FIXED_PRESENTATION_STEP_SECONDS * WALK_PHASE_RATE)
+                .rem_euclid(std::f32::consts::TAU);
         } else {
-            self.player_walk_phase *= (-12.0 * delta_seconds).exp();
+            self.player_walk_phase *=
+                (-WALK_IDLE_FADE_RATE * FIXED_PRESENTATION_STEP_SECONDS).exp();
             if self.player_walk_phase.abs() < 0.02 {
                 self.player_walk_phase = 0.0;
             }
-            self.player_walk_phase
         }
+        self.player_walk_phase
     }
 
     /// Entity gait runs only after an authoritative position change. This
@@ -282,17 +255,22 @@ impl GpuRenderer {
             live_ids.insert(id);
             let state = self.actor_walk_states.entry(id).or_insert(ActorWalkState {
                 position: actor.position,
-                last_moved_at: elapsed_seconds,
+                // A first observation is not movement; feet should start
+                // planted until the authoritative position changes.
+                last_moved_at: f32::NEG_INFINITY,
                 phase: 0.0,
             });
             if actor.position != state.position {
                 state.position = actor.position;
                 state.last_moved_at = elapsed_seconds;
             }
-            if elapsed_seconds - state.last_moved_at < 0.28 {
-                state.phase += delta_seconds * 21.0;
+            if actor.stats.is_alive()
+                && elapsed_seconds - state.last_moved_at < WALK_MOVEMENT_GRACE_SECONDS
+            {
+                state.phase = (state.phase + delta_seconds.max(0.0) * WALK_PHASE_RATE)
+                    .rem_euclid(std::f32::consts::TAU);
             } else {
-                state.phase *= (-12.0 * delta_seconds).exp();
+                state.phase *= (-WALK_IDLE_FADE_RATE * delta_seconds.max(0.0)).exp();
                 if state.phase.abs() < 0.02 {
                     state.phase = 0.0;
                 }
@@ -323,9 +301,10 @@ impl GpuRenderer {
             };
             last_pos = Some(snapshot.player.position);
             if moved && snapshot.player.stats.is_alive() {
-                walk_phase += 0.35;
+                walk_phase = (walk_phase + FIXED_PRESENTATION_STEP_SECONDS * WALK_PHASE_RATE)
+                    .rem_euclid(std::f32::consts::TAU);
             } else if walk_phase.abs() > 0.05 {
-                walk_phase *= 0.65;
+                walk_phase *= (-WALK_IDLE_FADE_RATE * FIXED_PRESENTATION_STEP_SECONDS).exp();
             } else {
                 walk_phase = 0.0;
             }
@@ -427,19 +406,26 @@ impl GpuRenderer {
         animation_time: f32,
         deterministic: bool,
     ) -> (CameraUniforms, LightingUniforms) {
-        let walk_phase = if deterministic {
-            self.update_walk_phase(world)
+        let presentation_delta = if deterministic {
+            FIXED_PRESENTATION_STEP_SECONDS
         } else {
-            self.update_walk_phase_delta(world, delta_seconds)
+            delta_seconds
         };
-        let actor_walk_phases = self.update_actor_walk_phases(world, delta_seconds, animation_time);
+        let actor_walk_phases =
+            self.update_actor_walk_phases(world, presentation_delta, animation_time);
+        // The player is part of the same actor gait table as monsters and NPCs.
+        // Using this one source keeps fixed-tick and realtime cadence identical.
+        let walk_phase = actor_walk_phases
+            .get(&world.player.id)
+            .copied()
+            .unwrap_or(0.0);
         let target_x = world.player.position.x as f32 * 0.8;
         let target_z = world.player.position.y as f32 * 0.8;
         let target_pos = Vec2::new(target_x, target_z);
 
         let cam_pos = match self.smooth_cam_pos {
             Some(prev) => {
-                let factor = damping_factor(19.7, delta_seconds);
+                let factor = damping_factor(19.7, presentation_delta);
                 let smoothed = prev.lerp(target_pos, factor);
                 self.smooth_cam_pos = Some(smoothed);
                 smoothed
@@ -452,7 +438,7 @@ impl GpuRenderer {
 
         let player_render_pos = match self.smooth_player_pos {
             Some(prev) => {
-                let factor = damping_factor(28.8, delta_seconds);
+                let factor = damping_factor(28.8, presentation_delta);
                 let smoothed = prev.lerp(target_pos, factor);
                 self.smooth_player_pos = Some(smoothed);
                 smoothed
@@ -462,6 +448,12 @@ impl GpuRenderer {
                 target_pos
             }
         };
+
+        // Observe messages before geometry is built so attack phases affect the
+        // same frame as the combat notification. FX stamping remains after the
+        // scene and is still presentation-only.
+        self.process_combat_events(world, animation_time, player_render_pos, deterministic);
+        let actor_attack_phases = self.active_attack_phases(world, animation_time);
 
         let uniforms = Self::populate_scene_smoothed_at_time(
             self.scene_width,
@@ -475,14 +467,13 @@ impl GpuRenderer {
             &mut self.mesh,
             &mut self.batches,
             Some(&actor_walk_phases),
+            Some(&actor_attack_phases),
             self.camera,
         );
 
         // Combat FX (video-tools REPORT #2 impact bursts + #3 telegraphs):
         // observation, spawn, and stamping all key off `animation_time`, so
-        // the deterministic path stays deterministic and the realtime path
-        // is frame-rate independent.
-        self.process_combat_events(world, animation_time, player_render_pos, deterministic);
+        // both the fixed-tick and realtime paths use the same animation clock.
         self.stamp_combat_fx(animation_time);
         uniforms
     }
@@ -501,19 +492,17 @@ impl GpuRenderer {
         player_focus: Vec2,
         deterministic: bool,
     ) {
-        if deterministic {
-            // Deterministic test/demo builds skip observation so their mesh
-            // output stays a pure function of the standalone world snapshot.
-            return;
-        }
         for message in &world.messages {
             if self.seen_combat_events.iter().any(|seen| seen == message) {
                 continue;
             }
-            if let Some(fx) =
-                Self::combat_fx_from_message(message, world, player_focus, animation_time)
-            {
-                self.combat_fx.push(fx);
+            self.observe_attack_message(message, world, animation_time);
+            if !deterministic {
+                if let Some(fx) =
+                    Self::combat_fx_from_message(message, world, player_focus, animation_time)
+                {
+                    self.combat_fx.push(fx);
+                }
             }
             self.seen_combat_events.push(message.clone());
         }
@@ -527,6 +516,71 @@ impl GpuRenderer {
         // Drop expired bursts.
         self.combat_fx
             .retain(|fx| animation_time - fx.born < fx.telegraph + FX_BURST_SECONDS);
+    }
+
+    /// Records a melee swing for an actor named by the existing combat log.
+    /// Local server snapshots use `You hit ...`; TCP event notices can also
+    /// arrive as `Combat <attacker> -> <defender>: ...`. Both forms identify
+    /// the attacker without inventing a protocol field.
+    fn observe_attack_message(
+        &mut self,
+        message: &str,
+        world: &WorldSnapshot,
+        animation_time: f32,
+    ) {
+        let Some(attacker_id) = Self::attack_actor_from_message(message, world) else {
+            return;
+        };
+        let attacker_alive = world
+            .entities
+            .iter()
+            .chain(std::iter::once(&world.player))
+            .find(|actor| actor.id == attacker_id)
+            .is_some_and(|actor| actor.stats.is_alive());
+        if attacker_alive {
+            self.attack_started_at.insert(attacker_id, animation_time);
+        }
+    }
+
+    fn attack_actor_from_message(message: &str, world: &WorldSnapshot) -> Option<EntityId> {
+        if message.starts_with("You hit ") {
+            return world.player.stats.is_alive().then_some(world.player.id);
+        }
+        let rest = message.strip_prefix("Combat ")?;
+        let attacker = rest.split_once(" -> ")?.0.trim().parse::<EntityId>().ok()?;
+        world
+            .entities
+            .iter()
+            .chain(std::iter::once(&world.player))
+            .any(|actor| actor.id == attacker)
+            .then_some(attacker)
+    }
+
+    fn active_attack_phases(
+        &mut self,
+        world: &WorldSnapshot,
+        animation_time: f32,
+    ) -> HashMap<EntityId, f32> {
+        let live_ids: HashSet<EntityId> = world
+            .entities
+            .iter()
+            .chain(std::iter::once(&world.player))
+            .filter(|actor| actor.stats.is_alive())
+            .map(|actor| actor.id)
+            .collect();
+        self.attack_started_at.retain(|id, started| {
+            live_ids.contains(id) && animation_time - *started < ATTACK_PHASE_SECONDS
+        });
+
+        self.attack_started_at
+            .iter()
+            .map(|(&id, &started)| {
+                (
+                    id,
+                    attack_phase_at(animation_time - started, ATTACK_PHASE_SECONDS),
+                )
+            })
+            .collect()
     }
 
     /// Message -> FX translation; None for non-combat lines. Melee hits
@@ -669,6 +723,7 @@ impl GpuRenderer {
             mesh,
             batches,
             None,
+            None,
             CameraState::default(),
         )
     }
@@ -686,6 +741,7 @@ impl GpuRenderer {
         mesh: &mut MeshBuffer,
         batches: &mut SceneBatches,
         actor_walk_phases: Option<&HashMap<EntityId, f32>>,
+        actor_attack_phases: Option<&HashMap<EntityId, f32>>,
         camera_state: CameraState,
     ) -> (CameraUniforms, LightingUniforms) {
         let px = player_render_pos.x;
@@ -739,12 +795,16 @@ impl GpuRenderer {
 
         let mut lights = Vec::new();
 
-        // Player Hip Lantern (Warm flickering light pool)
-        let player_flicker = (time * 8.0).sin() * 0.12;
-        lights.push(GpuPointLight {
-            position: [px + 0.4, 1.2, pz + 0.2, 9.5],
-            color: [1.0, 0.82, 0.45, 1.2 + player_flicker],
-        });
+        // Player Hip Lantern (Warm flickering light pool). A defeated player
+        // keeps a snapshot/model for continuity, but should not emit a live
+        // actor light.
+        if world.player.stats.is_alive() {
+            let player_flicker = (time * 8.0).sin() * 0.12;
+            lights.push(GpuPointLight {
+                position: [px + 0.4, 1.2, pz + 0.2, 9.5],
+                color: [1.0, 0.82, 0.45, 1.2 + player_flicker],
+            });
+        }
 
         // Gate Torches at fixed world points (Gate at y = -12 -> z = -9.6)
         let gate_flicker1 = (time * 9.5).sin() * 0.15;
@@ -760,6 +820,11 @@ impl GpuRenderer {
 
         // Dynamic Entity Lighting (Living actors & loot cast atmospheric lighting pools onto the ground)
         for entity in &world.entities {
+            // Dead actors remain in snapshots for labels/combat history, but
+            // should not continue to cast an active creature light pool.
+            if entity.kind != EntityKind::Item && !entity.stats.is_alive() {
+                continue;
+            }
             let ex = entity.position.x as f32 * 0.8;
             let ez = entity.position.y as f32 * 0.8;
             match entity.kind {
@@ -829,17 +894,20 @@ impl GpuRenderer {
             let gait_phase = actor_walk_phases
                 .and_then(|phases| phases.get(&entity.id).copied())
                 .unwrap_or(0.0);
+            let attack_phase = actor_attack_phases
+                .and_then(|phases| phases.get(&entity.id).copied())
+                .unwrap_or(0.0);
             let model_scale = match entity.kind {
                 EntityKind::Monster => {
                     let label = entity.name.to_ascii_lowercase();
                     if label.contains("warrior") {
-                        mesh.add_skeleton_warrior([ex, 0.0, ez], gait_phase, 0.0);
+                        mesh.add_skeleton_warrior([ex, 0.0, ez], gait_phase, attack_phase);
                         0.88 // readable OSRS-style player-sized champion
                     } else if label.contains("skeleton") {
-                        mesh.add_skeleton([ex, 0.0, ez], gait_phase, 0.0);
+                        mesh.add_skeleton([ex, 0.0, ez], gait_phase, attack_phase);
                         0.84 // lean undead frame, still readable at top-down zoom
                     } else {
-                        mesh.add_mossling([ex, 0.0, ez], gait_phase);
+                        mesh.add_mossling_with_attack([ex, 0.0, ez], gait_phase, attack_phase);
                         0.90 // stocky, low-slung beast
                     }
                 }
@@ -848,7 +916,7 @@ impl GpuRenderer {
                     0.88 // human height; staff and lantern scale with the body
                 }
                 EntityKind::Player => {
-                    mesh.add_humanoid([ex, 0.0, ez], 0.0, 0.0, 0.0);
+                    mesh.add_humanoid([ex, 0.0, ez], 0.0, gait_phase, attack_phase);
                     0.90
                 }
                 EntityKind::Item => {
@@ -865,6 +933,12 @@ impl GpuRenderer {
             };
             if entity.kind != EntityKind::Item {
                 mesh.scale_vertices_since(actor_vertices, [ex, 0.0, ez], model_scale);
+                // Keep every readable actor's authored front toward the orbit
+                // camera.  Without this, remote players and mobs showed a
+                // side/back silhouette while their labels stayed screen-flat.
+                // This is presentation-only; entity facing is not gameplay
+                // state and never enters snapshots or protocol messages.
+                mesh.rotate_vertices_since(actor_vertices, [ex, 0.0, ez], camera_state.yaw);
             }
         }
 
@@ -874,7 +948,15 @@ impl GpuRenderer {
         // passing the camera yaw keeps the player's head and body facing the
         // viewer as the orbit camera swings. Presentation-only: yaw never
         // enters snapshots or the wire protocol.
-        mesh.add_humanoid([px, 0.0, pz], camera_state.yaw, walk_phase, 0.0);
+        let player_attack_phase = actor_attack_phases
+            .and_then(|phases| phases.get(&world.player.id).copied())
+            .unwrap_or(0.0);
+        mesh.add_humanoid(
+            [px, 0.0, pz],
+            camera_state.yaw,
+            walk_phase,
+            player_attack_phase,
+        );
         mesh.scale_vertices_since(player_vertices, [px, 0.0, pz], 0.90);
         mesh.set_entity_context(0, 0);
 
@@ -964,7 +1046,22 @@ impl GpuRenderer {
                     continue;
                 }
                 let phase = time * 2.4 + seed as f32 * 0.013;
-                mesh.add_grass_blade(x, z, 0.28 + (seed % 5) as f32 * 0.06, phase.sin() * 0.14);
+                // Match the terrain generator's shared meadow height field so
+                // crossed blades stay planted while the ground gently rolls.
+                let ground_y = if x.abs() < 3.2 {
+                    0.0
+                } else if x.abs() < 3.8 {
+                    0.08
+                } else {
+                    (x * 0.25).sin() * (z * 0.25).cos() * 0.15
+                };
+                mesh.add_grass_blade_grounded(
+                    x,
+                    z,
+                    ground_y,
+                    0.28 + (seed % 5) as f32 * 0.06,
+                    phase.sin() * 0.14,
+                );
             }
         }
 
@@ -1049,8 +1146,18 @@ impl GpuRenderer {
             };
             let head_y = match actor.kind {
                 EntityKind::Item => 0.6,
-                EntityKind::Monster => 2.0,
-                _ => 2.35,
+                EntityKind::Monster => {
+                    let label = actor.name.to_ascii_lowercase();
+                    if label.contains("warrior") {
+                        1.9
+                    } else if label.contains("skeleton") {
+                        1.65
+                    } else {
+                        1.35
+                    }
+                }
+                EntityKind::Npc => 2.05,
+                EntityKind::Player => 2.1,
             };
             let (Some((col, feet_row)), Some((_, head_row))) = (
                 project(Vec3::new(x, 0.1, z)),
@@ -1131,6 +1238,13 @@ impl GpuRenderer {
 
 fn damping_factor(rate: f32, delta_seconds: f32) -> f32 {
     1.0 - (-rate * delta_seconds.max(0.0)).exp()
+}
+
+fn attack_phase_at(age_seconds: f32, duration_seconds: f32) -> f32 {
+    if duration_seconds <= 0.0 {
+        return 1.0;
+    }
+    (age_seconds / duration_seconds).clamp(0.0, 1.0)
 }
 
 /// Quantizes a 0-255 channel to 32 levels for ANSI run-merging.
@@ -1466,6 +1580,26 @@ f 2 5 4 3
             lighting.num_point_lights >= 2,
             "Scene should include player and NPC lights"
         );
+
+        // Dead actors remain renderable for snapshot continuity, but stop
+        // contributing creature light pools.
+        world.entities[0].stats.hp = 0;
+        let mut dead_mesh = MeshBuffer::new();
+        let mut dead_batches = SceneBatches::default();
+        let (_, dead_lighting) = GpuRenderer::populate_scene(
+            40,
+            20,
+            WeatherMode::Rain,
+            &world,
+            20,
+            0.5,
+            &mut dead_mesh,
+            &mut dead_batches,
+        );
+        assert!(
+            dead_lighting.num_point_lights < lighting.num_point_lights,
+            "dead monster should not cast a dynamic point-light pool"
+        );
     }
 
     #[test]
@@ -1552,6 +1686,31 @@ f 2 5 4 3
         let two_steps = 1.0 - (1.0 - damping_factor(rate, 1.0 / 60.0)).powi(2);
         assert!((one_step - two_steps).abs() < 1e-6);
         assert_eq!(damping_factor(rate, 0.0), 0.0);
+    }
+
+    #[test]
+    fn attack_messages_identify_player_and_remote_attackers() {
+        let world = sample_world();
+        assert_eq!(
+            GpuRenderer::attack_actor_from_message("You hit Mossling for 5 damage.", &world),
+            Some(world.player.id)
+        );
+        assert_eq!(
+            GpuRenderer::attack_actor_from_message("Combat 2 -> 1: 3 damage", &world),
+            Some(2)
+        );
+        assert_eq!(
+            GpuRenderer::attack_actor_from_message("Combat 99 -> 1: 3 damage", &world),
+            None
+        );
+        assert_eq!(attack_phase_at(0.0, ATTACK_PHASE_SECONDS), 0.0);
+        assert!(
+            (attack_phase_at(ATTACK_PHASE_SECONDS * 0.5, ATTACK_PHASE_SECONDS) - 0.5).abs() < 1e-6
+        );
+        assert_eq!(
+            attack_phase_at(ATTACK_PHASE_SECONDS * 2.0, ATTACK_PHASE_SECONDS),
+            1.0
+        );
     }
 
     #[test]
