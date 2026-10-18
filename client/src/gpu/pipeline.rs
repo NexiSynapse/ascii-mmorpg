@@ -47,6 +47,7 @@ impl GpuCell {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct PostConfigUniform {
+    inv_view_proj: [[f32; 4]; 4],
     width: u32,
     height: u32,
     time: f32,
@@ -883,6 +884,11 @@ impl GpuPipeline {
         queue.write_buffer(&slot.lighting_buffer, 0, bytemuck::bytes_of(lighting));
 
         let config = PostConfigUniform {
+            // The compute pass unprojects each cell's averaged depth back to
+            // world space so glyph/dither hashes can lock to world tiles for
+            // stationary geometry (no "shower-door" shimmer while the camera
+            // pans). Same matrix the scene shader uses.
+            inv_view_proj: camera.inv_view_proj,
             width: self.width,
             height: self.height,
             time: camera.time,
@@ -904,10 +910,14 @@ impl GpuPipeline {
                         view: &self.color_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
+                            // Near-black void clear: leftover pixels (beyond
+                            // the far_void gate) must resolve to Band 0 ' '
+                            // like the reference's pure-empty horizon, not a
+                            // band-1 punctuation speckle.
                             load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.05,
-                                g: 0.06,
-                                b: 0.09,
+                                r: 0.008,
+                                g: 0.010,
+                                b: 0.018,
                                 a: 1.0,
                             }),
                             store: wgpu::StoreOp::Store,

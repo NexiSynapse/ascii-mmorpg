@@ -221,8 +221,12 @@ impl SceneBatches {
         time: f32,
         weather_mode: u32,
     ) {
-        let rain_color = [0.65, 0.82, 1.0, 0.85];
-        let snow_color = [0.95, 0.98, 1.0, 0.9];
+        // Weather ink stays a quiet accent (reference captures: rain/snow
+        // are dim streaks over a near-black void, never the brightest
+        // thing in the frame — the old 0.65/0.82/1.0 tint formed a large
+        // saturated-white blob under the dark-rebalanced lighting).
+        let rain_color = [0.34, 0.44, 0.62, 0.75];
+        let snow_color = [0.55, 0.60, 0.70, 0.8];
         let num_particles = 180;
 
         for i in 0..num_particles {
@@ -1691,7 +1695,20 @@ impl MeshBuffer {
                     // raised chroma — the reference carpet is dark AND
                     // saturated (deep navy/teal-greens), so bright/white
                     // actors separate from the ground by hue too.
-                    let grass = [0.012, 0.072, 0.028, 1.0];
+                    //
+                    // Clump-and-void (forest scene negative space, Videos
+                    // 1/2/5/6): off-road floor is NOT a continuous sheet —
+                    // a coherent world-space mask carves ~60% of quads into
+                    // near-black void floor that resolves to Band 0 ' '
+                    // until a torch/lens passes over, leaving discrete
+                    // moss/foliage islands in the pinned compact color.
+                    let clump = (quad_center_x * 0.42).sin() * (quad_center_z * 0.38).cos()
+                        + (quad_center_x * 0.85 + quad_center_z * 0.75).sin() * 0.45;
+                    let grass = if clump > 0.12 {
+                        [0.012, 0.072, 0.028, 1.0] // pinned quiet-ground island
+                    } else {
+                        [0.002, 0.011, 0.004, 1.0] // inter-clump void floor
+                    };
                     (
                         grass,
                         3.0,
@@ -1730,7 +1747,9 @@ impl MeshBuffer {
         time: f32,
         weather_mode: u32,
     ) {
-        let rain_color = [0.65, 0.82, 1.0, 0.85];
+        // Quiet weather ink (mirrors the instanced path above): dim streaks
+        // so rain stays a subtle accent over the near-black carpet.
+        let rain_color = [0.34, 0.44, 0.62, 0.75];
         let num_particles = 180;
 
         for i in 0..num_particles {
@@ -1771,7 +1790,7 @@ impl MeshBuffer {
                     self.add_box(
                         [drift_x, py, pz],
                         [0.12, 0.12, 0.12],
-                        [0.95, 0.98, 1.0, 0.9],
+                        [0.55, 0.60, 0.70, 0.8],
                         5.0,
                         0.2,
                     );
@@ -2049,6 +2068,45 @@ mod tests {
             }
             assert_eq!(lo, hi, "cliff at corner {pos:?}: {ys:?}");
         }
+    }
+
+    #[test]
+    fn meadow_clumps_carve_dark_void_islands() {
+        // Forest negative space (Videos 1/2/5/6): the off-road floor is
+        // discrete moss/foliage islands between near-black void tiles, not
+        // a continuous meadow sheet. The pinned quiet-ground island color
+        // still exists (g <= 0.15 bound), and the void floor must stay
+        // dark enough to resolve Band 0 ' ' when unlit.
+        let mut mb = MeshBuffer::new();
+        mb.add_terrain(0.0, 0.0, 24.0);
+        let mut island = false;
+        let mut void_tile = false;
+        for v in &mb.vertices {
+            if v.material_id < 2.8 || v.material_id > 3.2 {
+                continue;
+            }
+            let (r, g) = (v.color[0], v.color[1]);
+            assert!(
+                g <= 0.15,
+                "meadow vertex brightened past the quiet-ground bound: {:?}",
+                v.color
+            );
+            if (r - 0.012).abs() < 1e-4 && (g - 0.072).abs() < 1e-4 {
+                island = true;
+            }
+            if (r - 0.002).abs() < 1e-4 && (g - 0.011).abs() < 1e-4 {
+                assert!(
+                    (v.color[2] - 0.004).abs() < 1e-4,
+                    "void floor must keep its near-black blue-green tint"
+                );
+                void_tile = true;
+            }
+        }
+        assert!(island, "pinned moss islands must remain in the clump mask");
+        assert!(
+            void_tile,
+            "void tiles must carve negative space between clumps"
+        );
     }
 
     #[test]
