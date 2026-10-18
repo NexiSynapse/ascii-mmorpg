@@ -335,6 +335,11 @@ fn qid(v: f32) -> u32 {
 fn material_glyph(material: u32, band: u32, x: u32, y: u32) -> u32 {
     let v = hash2(x, y) % 4u;
     if (material == 0u) { // terrain: keep the ground readable without a solid block of '@'
+        // Dark-field carpet gate: unlit terrain/road/sand should not emit a
+        // glyph on every cell — match the meadow's sparse-tuft behavior so
+        // the carpet reads as near-black with isolated punctuation. Bright
+        // bands (6+: cobblestone light pools) keep full texture.
+        if (band <= 2u && hash2(x, y) % 4u != 0u) { return 32u; }
         if (band == 0u) { return 32u; }  // ' '
         if (band == 1u) {
             if (v == 0u) { return 46u; }  // '.'
@@ -1028,6 +1033,12 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let entity_edge_y = entity_id != 0u
         && (qid(top_meta.g) != entity_id || qid(bottom_meta.g) != entity_id);
 
+    // Dark-field predicate: stationary terrain (entity 0) below the 0.08 sRGB
+    // local-luma gate. Weak heightfield curvature on dark carpet must not
+    // resolve to punctuation strokes; only real silhouettes survive.
+    let luma_early = dot(avg_color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let dark_field_terrain = entity_id == 0u && luma_early < 0.08;
+
     // World-locked glyph hash ("shower-door" fix): the reference terrain is
     // glyph-locked to world tiles — sliding the camera by one cell must not
     // re-randomize a tile's volume glyph. Stationary geometry (entity_id 0)
@@ -1065,8 +1076,12 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     var glyph: u32 = 32u; // ' ' default
     var is_edge = false;
 
-    // Detect structural edges (silhouettes and creases)
-    if (edge_mag > 0.38 && avg_nd.w < 0.999 && !smooth_slope) {
+    // Detect structural edges (silhouettes and creases). Dark-field terrain
+    // needs a materially stronger edge before a stroke fires: weak
+    // heightfield curvature on the dark carpet must stay volumetric texture,
+    // not rules — only real silhouettes (edge_mag > ~0.95) survive there.
+    let stroke_edge_gate_outer = select(0.38, 0.95, dark_field_terrain);
+    if (edge_mag > stroke_edge_gate_outer && avg_nd.w < 0.999 && !smooth_slope) {
         is_edge = true;
         let edge_hash = hash2(x, y) % 3u;
         if (edge_y > edge_x * 1.6) {
@@ -1154,7 +1169,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 shape_s0, shape_s1, shape_s2, shape_s3, shape_s4, shape_s5,
                 e0c, e1c, e2c, e3c, e4c, e5c,
                 edge_mag,
-                entity_id == 0u && luma < 0.08,
+                dark_field_terrain,
                 smooth_slope,
                 material_id == 6u,
                 hash2(x, y) % 3u,
@@ -1315,10 +1330,21 @@ mod tests {
         // Strokes require a geometric discontinuity; smooth fog gradients
         // must fall back to volumetric texture, never full-width rules.
         // Marginal treeline shimmer needs a strong step, not a bare pass.
+        // The outer edge gate raises its threshold for dark-field terrain
+        // (0.38 -> 0.95) so weak heightfield curvature on the dark carpet
+        // stays volumetric texture; the inner gate (0.12 -> 1.0) covers the
+        // shape_glyph path for non-edge cells.
+        assert!(ASCII_POST_WGSL
+            .contains("let stroke_edge_gate_outer = select(0.38, 0.95, dark_field_terrain);"));
+        assert!(ASCII_POST_WGSL.contains(
+            "if (edge_mag > stroke_edge_gate_outer && avg_nd.w < 0.999 && !smooth_slope)"
+        ));
         assert!(ASCII_POST_WGSL
             .contains("let stroke_edge_gate = select(0.12, 1.0, dark_field_terrain);"));
         assert!(ASCII_POST_WGSL.contains("if (edge_mag > stroke_edge_gate && !smooth_slope)"));
-        assert!(ASCII_POST_WGSL.contains("entity_id == 0u && luma < 0.08"));
+        assert!(ASCII_POST_WGSL
+            .contains("let dark_field_terrain = entity_id == 0u && luma_early < 0.08;"));
+        assert!(ASCII_POST_WGSL.contains("dark_field_terrain,"));
         assert!(ASCII_POST_WGSL.contains("coarse_d > fine_d * 2.0"));
         // Ragged treelines: every third horizontal-stroke cell keeps
         // volumetric texture instead of ruling the screen. Bottom sills
