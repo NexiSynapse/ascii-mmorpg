@@ -12,7 +12,7 @@ silhouette readability.
 ## Start here
 
 Workspace: `ASCII-Game/`; application repository: `ascii-mmorpg/`. Read the parent and repository `AGENTS.md` files. Latest turn: "Game feel, character animation & visual fidelity refinement" section at the end — the 3D play path now uses joint-pivot humanoid poses, responsive facing/gait/attack presentation state, focus-safe input, faceted cones/road landmarks, and improved actor labels; the terminal GPU path now has attack-driven poses, grounded limbs/grass, distinct road/sand/stone materials, slope normals, static non-foliage organic surfaces, and differentiated storm weather. The next human check remains the live 3D window plus the 156x44 TUI.
-Repository status (verified 2026-10-18, Windows): checked-out `rendering_gra_update` is at `b1afcfd` and tracks `origin/rendering_gra_update`; `main`/`origin/main` are separate and behind. Do not commit or push unless asked. Current intentional worktree changes include the refinement, black-world, and high-density slices in the client/GPU and engine paths; the pre-existing user modification to `play_ansi.bat` is preserved untouched. CRLF-vs-LF warnings are historical; current diffs are real content.
+Repository status (verified 2026-10-18, Windows): checked-out `main` is at `2984ff1` and is up to date with `origin/main`; local `rendering_gra_update` also points at the merge commit while its remote tracking branch remains separate. The high-density slice and the fetched `origin/main` optimizations are committed and published. The pre-existing user modification to `play_ansi.bat` was restored after publication and is the only current worktree change. Future commits/pushes still require an explicit user request. CRLF-vs-LF warnings are historical; current diffs are real content.
 Latest integrated direction: the windowed `play` example now routes its
 triangle fill through `engine/src/present/gpu3d.rs` by default, while retaining
 the CPU path behind `--cpu`. The GPU pass replays the screened triangle fill
@@ -45,50 +45,44 @@ and coverage rules could never match the CPU's inclusive edge test):
 
 1. CPU pre-pass: `raster::basis` + `clip_near` (both now `pub(crate)`), then
    exact projection/shade — the screened triangles are what `fill_tri` would
-   see bit for bit. Uploaded as `GpuTri` (52 B, `[f32;3]`×4 + lum).
-2. Compute pass (`@workgroup_size(8,8)`, one thread per 2x sample) replays
+   see bit for bit. Uploaded as `GpuTri` (68 B, screen vertices, inverse depth,
+   colour, luminance, view normal, and material index).
+2. Compute pass (`@workgroup_size(8,8)`, one thread per 4x sample) replays
    `fill_tri`'s exact math: same edge-function expression, same area
    expression, `abs(area) >= 1e-9`, all-barycentric `>= 0` acceptance,
    `w > 0`, strict-`<` overwrite scanning tris in upload order — ties resolve
    to the same triangle. 64-sample **tile bins** (built CPU-side from each
    tri's exact clamped `fill_tri` bbox, index lists ascending) keep each
    sample's visitation set and tri order identical to the CPU scan.
-3. Samples written as 5 floats (depth, r, g, b, lum); miss sentinel depth
-   `-1.0` (decode's `z < 0.0 → skip` unchanged, leaves `Sample::empty`);
+3. Samples written as 10 floats (depth, r, g, b, lum, lum-squared, normal xyz,
+   material index); miss sentinel depth `-1.0` (decode's `z < 0.0 → skip`
+   unchanged, leaves `Sample::empty`);
    readback pitch pads rows to 256 B; decoded via existing `map_async` +
    `poll(Wait)` loop, then shared `raster::resolve_layer` finishes.
 
-### Verification (all 2026-10-18, Windows, GTX 1650 / Vulkan)
-- Parity test `gpu_resolve_matches_cpu_fill` (skips cleanly on machines without
-  a Vulkan adapter; CI never compiles `present`): **gpu=1168 cpu=1168
-  covered=1168 glyph=1168 color=1168 — 100% cell match** on slab+cube+wood
-  scene after binning (the buggy first bin build — cursor not starting at each
-  bin's offset — dropped to 347 cells; fixed, parity restored).
-- `cargo fmt --all -- --check` clean; `cargo test --workspace --locked` green
-  (engine default 100; `--features present` engine lib 117 incl. the 5 new
-  gpu3d tests: layout sizes, two-sided shade, void layer, finite prepass,
-  parity); `tools content ok 11`; clippy clean both with and without
-  `--features present`.
-- `play -- --check` ok ("3D world, FX digits, orbit movement, inventory
-  modal"; check mode still forces CPU fill). Release perf (600 frames, exe
-  direct): GPU fill **58.9 fps** vs `--cpu` **66 fps** at grid 240x87 /
-  world grid 480x154 / 543 tris — the fill is off the CPU, and the remaining
-  GPU-side frame costs are `resolve_layer` (~3-5 ms) and buffer readback
-  (~2-3 ms) per `[world3d]` stage breakdown (pre/bins/sub ≈ 1.5 ms,
-  compute poll ≈ 1 ms). Fixed vs the binless first cut: the binless compute
-  scored 36.6 fps vs CPU 73.6 (every sample thread scanned every tri).
-- Removed: `raster::cpu_sample_buffer` (test-only helper, redundant once
-  parity passed) and the temporary `debug_cells` machinery.
+### Verification (updated 2026-10-18, Windows, NVIDIA MX230 / Vulkan)
+- `cargo test -p ascii-mmorpg-engine --features present --lib` passed (129
+  tests, including `gpu_resolve_matches_cpu_fill`); the GPU/CPU resolve parity
+  test passed on the local Vulkan adapter.
+- `cargo test --workspace` passed; `cargo run -p ascii-mmorpg-tools -- content`
+  passed; workspace and `--features present` clippy passed with `-D warnings`.
+- `cargo run -p ascii-mmorpg-engine --locked --features present --example play
+  -- --check` and the matching `--cpu --check` both passed. A 60-frame default
+  GPU run also completed on Vulkan.
+- The high-density renderer and GPU compute integration were committed as
+  `4450951` plus merge commit `2984ff1`; `git push origin main` returned
+  `751b953..2984ff1 main -> main`.
+- The pre-existing `play_ansi.bat` edit was kept out of the commits, restored
+  after the push, and is the only current worktree modification.
 
 ### Next action (fresh session)
-The bounded GPU-fill slice is complete. Next candidates in preference order:
-(a) optional perf slice — move `resolve_layer` into WGSL or slim the readback
-(real win only if the user wants the GPU path meaningfully above 60 fps;
-resolve stays CPU-identical today, moving it is a language-parity project, not
-a quick toggle), or (b) return to the look-parity playbook: Slice 2 (lightning
-column, icicle sweep, smoke-ring → `engine/src/fx.rs`), then Slices 3-4 —
-re-check overlap with `video-tools/REPORT.md` #4–#7 first. Still awaiting user
-live verdicts (3D window, TUI 156x44). No commit or push was performed.
+The high-density and bounded GPU-fill slices are complete and published. The
+next useful human check is a fresh live default-GPU comparison at close,
+medium, and far camera distances, followed by the same check with `--cpu` and
+the TUI at 156x44. If performance work is requested, move `resolve_layer`
+into WGSL or slim the readback; otherwise return to the look-parity playbook
+(Slice 2 lightning column, icicle sweep, smoke-ring in `engine/src/fx.rs`) and
+re-check overlap with `video-tools/REPORT.md` #4–#7 first.
 
 ## Look-parity Slice 16 — reference quiet-carpet rebalance (2026-10-18)
 
