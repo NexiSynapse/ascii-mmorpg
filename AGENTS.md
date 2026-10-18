@@ -50,3 +50,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 ## Launchers (`play_*.bat`)
 - Path-independent via `%~dp0`; never hardcode install paths. Exe lookup prefers `target\release`, falls back to `target\debug`; all default `--fps uncapped`.
 - `play_notcurses.bat` probes `target\x86_64-pc-windows-gnu\{release,debug}` first, resolves MSYS2 UCRT64 via `%MSYS2_ROOT%` (default `C:\msys64`, fallback `C:\tools\msys64`), warns instead of failing if absent, keeps `chcp 65001`. `play_wezterm*.bat` must keep targeting `wezterm-gui.exe start --always-new-process` (wrapper `wezterm.exe` detaches early → error 10054).
+
+## Performance (windowed presenter, `--features present`)
+- **Run with `--release`.** Debug builds are typically 5-10x slower for the CPU rasterizer + wgpu validation layers. The `play` example at 10 FPS in debug is expected; `--release` is the single biggest win.
+  - `cargo run --locked -p ascii-mmorpg-engine --features present --release --example play`
+- The 3D triangle fill moved to the **GPU** (`engine/src/present/gpu3d.rs`, wgpu compute): the CPU pre-pass (clip→project→shade, `raster::`'s own math) uploads screened triangles + 64-sample tile bins, and one compute thread per 2x sample replays `raster::fill_tri`'s exact edge/barycentric/depth math — output is **bit-identical** to the CPU fill (test `gpu_resolve_matches_cpu_fill`, 100% cell match), so `resolve_layer` (glyphs, fog, rim) stays on the CPU unchanged. `--cpu` on `play` keeps the full CPU fill. Remaining CPU costs per frame: `resolve_layer` (~3-5ms) and the buffer readback (~2-3ms) — moving resolve into WGSL is the next lever, not a quick toggle.
+- Frame timing breakdown: `PRESENT_PROFILE=1 cargo run ... --example play` prints per-frame `build` (scene construction), `compose` (CPU composition), and `inst` (instance flattening) timings every 60 frames, plus a `[world3d]` per-stage line (pre/bins/sub/poll/map+dec/resolve) each frame while the env var is set.
+- `apply_rim` in `engine/src/raster.rs` was O(n²) (linear cell search per silhouette cell) and is now O(n) via direct mutable iteration over the already-built coverage grid.
+

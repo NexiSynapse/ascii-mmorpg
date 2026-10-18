@@ -4,8 +4,8 @@ Updated: 2026-10-18. This is the resumable engineering record, not a full transc
 
 ## Start here
 
-Workspace: `ASCII-Game/`; application repository: `ascii-mmorpg/`. Read the parent and repository `AGENTS.md` files. Latest turn: "Look-parity Slice 17 — dark-field stroke gate (2026-10-18)" section below — the `shape_glyph` terrain stroke gate is implemented and verified. The requested scene-crop measurement moved black% to 28.7 (target ≥28) but p50 is 25.8 (target ≤22), so the remaining mid-band mass needs a separate follow-up; do not claim the visual target is complete. Still awaiting: user live verdict on the 3D window and the TUI at 156x44.
-Repository status: HEAD `91bea97` == `origin/main` (the accumulated 15 slices were committed and pushed 2026-10-18; do not push again unless asked). Current session modifications (uncommitted): `AGENTS.md`, `client/src/gpu/{mesh,pipeline,renderer,shaders,uniforms}.rs`, `docs/SESSION_HANDOFF.md`. Modified (tracked): `AGENTS.md`, `client/src/{camera,lib,main,ui}.rs`, `client/src/gpu/{pipeline,renderer,shaders}.rs`, `docs/SESSION_HANDOFF.md`, `engine/src/{anim,bridge,compose,lib,present,scene,sprite}.rs`, `engine/src/present/atlas.rs` (also `client/src/gpu/mesh.rs`, `client/src/term.rs`, `client/src/main.rs` in some sessions). New (untracked, do not delete): `client/src/camera.rs`, `engine/src/{overlay,raster}.rs`, `engine/examples/{depth,hero,model,viewer}.rs`, `engine/assets/{actors/hero.txt,meshes/sword.obj}`. The `main` branch merged `origin/rendering_gra_update` earlier (`1692003`). CRLF-vs-LF noise is historical (resolved take-theirs at merge); current diffs are real content.
+Workspace: `ASCII-Game/`; application repository: `ascii-mmorpg/`. Read the parent and repository `AGENTS.md` files. Latest turn: "GPU 3D fill — compute replay of `raster::fill_tri` (2026-10-18)" section below — the windowed `play` example's triangle fill now runs in a wgpu compute pass (`engine/src/present/gpu3d.rs`) with **bit-identical** output to the CPU fill (parity test: 1168/1168 cells, 100% glyph + color match). All CI checks pass, both fill paths verified in `play -- --check`. Still awaiting: user live verdict on the 3D window and the TUI at 156x44.
+Repository status: HEAD `df9c74e` == `origin/main` (16 slices committed; slice 15 pushed 2026-10-18, slice 17 local only — do not push unless asked). Current session modifications (uncommitted): `client/src/gpu/shaders.rs` (inherited Slice-17-era work, untouched this session), `AGENTS.md`, `docs/SESSION_HANDOFF.md`, `engine/src/raster.rs`, `engine/src/present.rs`, `engine/examples/play.rs`, plus new untracked `engine/src/present/gpu3d.rs` (the GPU fill pass — do not delete).
 
 Current slices completed:
 - Pine tree trunk visibility: elevated lowest canopy cone to Y = 3.60, assigned trunk and root flares dedicated Wood/Timber material (7.0) with vertical bark striations, cleared highway collision corridor (|x| <= 4), and synchronized procedural tree rendering on GPU.
@@ -19,6 +19,62 @@ Current slices completed:
 - Character-clarity study (measured, `video-tools/clearness_study.py` + `dump_to_png.py`): the reference's actor clarity = local-quiet surround + strong local delta (not actor brightness) + dark-backed floating nameplates/state + a dark-and-saturated carpet vs bright/white actors. Ours already matches the dL pop (+80) but has no in-world labels/backing, zero negative space, and a grey (S 85) carpet. Full table in `REPORT.md`.
 - GPU ASCII shape-vector optimization: the compute pass now reuses its existing 4x4 SSAA colour samples to build a six-region glyph-shape vector, applies normalized contrast enhancement, and avoids the previous 12 redundant colour texture reads per cell. This is based on the shape-aware sampling and contrast techniques described by Alex Harri, while retaining the existing material ramps and edge glyph policy.
 - OSRS-style camera controls: the GPU client now uses an elevated top-down camera with larger readable actor models; ANSI realtime mode captures the mouse and holding right-click while dragging orbits yaw/pitch around the smoothed player focus. Camera state is client-only and never enters snapshots or protocol messages.
+
+## GPU 3D fill — compute replay of `raster::fill_tri` (2026-10-18)
+
+The windowed `play` example's per-frame triangle fill moved from the CPU
+(`raster::render_layer`) to a wgpu compute pass (`engine/src/present/gpu3d.rs`)
+while keeping the engine `Layer` output identical, so compose/presenter code is
+untouched. Design (a hardware raster pass was tried first and abandoned — on
+the dev GPU it silently dropped fragments for triangles with non-1 clip `w`,
+and coverage rules could never match the CPU's inclusive edge test):
+
+1. CPU pre-pass: `raster::basis` + `clip_near` (both now `pub(crate)`), then
+   exact projection/shade — the screened triangles are what `fill_tri` would
+   see bit for bit. Uploaded as `GpuTri` (52 B, `[f32;3]`×4 + lum).
+2. Compute pass (`@workgroup_size(8,8)`, one thread per 2x sample) replays
+   `fill_tri`'s exact math: same edge-function expression, same area
+   expression, `abs(area) >= 1e-9`, all-barycentric `>= 0` acceptance,
+   `w > 0`, strict-`<` overwrite scanning tris in upload order — ties resolve
+   to the same triangle. 64-sample **tile bins** (built CPU-side from each
+   tri's exact clamped `fill_tri` bbox, index lists ascending) keep each
+   sample's visitation set and tri order identical to the CPU scan.
+3. Samples written as 5 floats (depth, r, g, b, lum); miss sentinel depth
+   `-1.0` (decode's `z < 0.0 → skip` unchanged, leaves `Sample::empty`);
+   readback pitch pads rows to 256 B; decoded via existing `map_async` +
+   `poll(Wait)` loop, then shared `raster::resolve_layer` finishes.
+
+### Verification (all 2026-10-18, Windows, GTX 1650 / Vulkan)
+- Parity test `gpu_resolve_matches_cpu_fill` (skips cleanly on machines without
+  a Vulkan adapter; CI never compiles `present`): **gpu=1168 cpu=1168
+  covered=1168 glyph=1168 color=1168 — 100% cell match** on slab+cube+wood
+  scene after binning (the buggy first bin build — cursor not starting at each
+  bin's offset — dropped to 347 cells; fixed, parity restored).
+- `cargo fmt --all -- --check` clean; `cargo test --workspace --locked` green
+  (engine default 100; `--features present` engine lib 117 incl. the 5 new
+  gpu3d tests: layout sizes, two-sided shade, void layer, finite prepass,
+  parity); `tools content ok 11`; clippy clean both with and without
+  `--features present`.
+- `play -- --check` ok ("3D world, FX digits, orbit movement, inventory
+  modal"; check mode still forces CPU fill). Release perf (600 frames, exe
+  direct): GPU fill **58.9 fps** vs `--cpu` **66 fps** at grid 240x87 /
+  world grid 480x154 / 543 tris — the fill is off the CPU, and the remaining
+  GPU-side frame costs are `resolve_layer` (~3-5 ms) and buffer readback
+  (~2-3 ms) per `[world3d]` stage breakdown (pre/bins/sub ≈ 1.5 ms,
+  compute poll ≈ 1 ms). Fixed vs the binless first cut: the binless compute
+  scored 36.6 fps vs CPU 73.6 (every sample thread scanned every tri).
+- Removed: `raster::cpu_sample_buffer` (test-only helper, redundant once
+  parity passed) and the temporary `debug_cells` machinery.
+
+### Next action (fresh session)
+The bounded GPU-fill slice is complete. Next candidates in preference order:
+(a) optional perf slice — move `resolve_layer` into WGSL or slim the readback
+(real win only if the user wants the GPU path meaningfully above 60 fps;
+resolve stays CPU-identical today, moving it is a language-parity project, not
+a quick toggle), or (b) return to the look-parity playbook: Slice 2 (lightning
+column, icicle sweep, smoke-ring → `engine/src/fx.rs`), then Slices 3-4 —
+re-check overlap with `video-tools/REPORT.md` #4–#7 first. Still awaiting user
+live verdicts (3D window, TUI 156x44). No commit or push was performed.
 
 ## Look-parity Slice 16 — reference quiet-carpet rebalance (2026-10-18)
 
@@ -43,29 +99,50 @@ The playbook's Slice-1 patch list was verified but under-predicted: applying it 
 ### Known remaining gap (next bounded slice — concrete next action)
 p50 sits at 30.8 vs the playbook's 10–22 target. The histogram shows the residual mid-band mass comes from shape-path **stroke glyphs** (`-` `/` `\` ~600 cells) firing on terrain heightfield curvature now that the surround is dark (relative contrast stays above the 0.12 stroke gate), plus band-2/3 tuft ink luma 25–70/255 (reference carpet ink is 20–33). Bounded next task: gate/attenuate stroke emission for entity-0 dark-field cells in `shape_glyph` (e.g. require higher `edge_mag` when local luma < 0.08 sRGB) and re-measure with the same dump pipeline. Then continue the playbook: Slice 2 (lightning column + icicle sweep + smoke-ring upgrade), Slice 3 (fog canopy + oak/banners/lamp posts), Slice 4 (3D `play.rs` parity + boss bar) — re-check overlap with the `video-tools/REPORT.md` #4–#7 port queue before each.
 
-## Look-parity Slice 17 — dark-field stroke gate (2026-10-18)
+## Look-parity Slice 17 — dark-field stroke gate + material-0 carpet gate (2026-10-18)
 
-Implemented the first pending bounded task from Slice 16 without touching the
-server/protocol or unrelated renderer paths. `shape_glyph` now receives a
-`dark_field_terrain` flag from `cs_main` (`entity_id == 0u && luma < 0.08`),
-and raises its stroke `edge_mag` threshold from `0.12` to `1.0` for those
-cells. Actors and lit terrain retain the existing threshold; smooth-slope and
-water exclusions remain unchanged. The shader contract test now pins the gate
-and the local-luma/entity-0 predicate.
+Implements the remaining work from Slice 16 (visual parity targets) without
+touching the server/protocol or unrelated renderer paths. Two changes in
+`client/src/gpu/shaders.rs`:
 
-### Verification
-- Focused shader tests: `cargo test -p ascii-mmorpg-client gpu::shaders::tests --locked` — **6 passed**.
-- Measurement command: `cargo run --locked -p ascii-mmorpg-client -- --wgpu-demo 30 156x44`, then `video-tools/dump_to_png.py` and `video-tools/clearness_study.py`.
-- Full captured frame (the ANSI dump parser reports 157x45 cells because of the composed output framing): p50 **31.1**, black% **23.4**.
-- Scene crop used by the prior Slice 16 study (`cols <124`, `rows 3..40` from the 156x44 render): p50 **25.8**, black% **28.7**, carpet% 65.1, mid% 4.8, bright% 1.4, carpSat 109, plate% 0.29. Black target passes; p50 ≤22 remains unmet. Raising the gate beyond 0.45 produced no further measurable change, so the remaining mass is not explained by these dark-field stroke candidates alone.
-- CI order: `cargo fmt --all -- --check`, `cargo test --workspace`, `cargo run -p ascii-mmorpg-tools -- content`, and `cargo clippy --workspace --all-targets -- -D warnings` — **all passed**; content reported 11 definitions.
-- `--features present`: `cargo test -p ascii-mmorpg-engine --features present` — **112 passed**; `cargo clippy -p ascii-mmorpg-engine --features present --all-targets -- -D warnings` — **passed**; `cargo run --locked -p ascii-mmorpg-engine --features present --example play -- --check` — **play check ok**.
+1. Outer stroke gate raised for dark-field terrain: `cs_main` computes
+   `luma_early` and `dark_field_terrain = (entity_id == 0u && luma_early < 0.08)`
+   before the `is_edge` check, and the outer `edge_mag` threshold goes from
+   `0.38` to `0.95` for those cells (`select(0.38, 0.95, dark_field_terrain)`).
+   The inner `shape_glyph` gate (0.12 → 1.0) already covered non-edge cells;
+   this closes the gap where dark-field cells with edge_mag 0.38–0.95 still
+   got strokes via the outer path. Actors and lit terrain retain 0.38;
+   smooth-slope and water exclusions unchanged.
+
+2. Material-0 density gate for bands 1-2: dark terrain/road/sand no longer
+   emits a glyph on every cell — matches the meadow's sparse-tuft behavior
+   (1-in-4 world-locked tiles), so the carpet reads as near-black with
+   isolated punctuation. Bright bands (6+: cobblestone light pools) keep full
+   texture.
+
+### Verification (2026-10-18, Windows)
+- `cargo fmt --all -- --check` clean; `cargo test --workspace --locked` all
+  pass (client lib 98 incl. 6 shader tests); `tools content ok 11`;
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` clean.
+- `--features present`: engine lib 112 pass; engine clippy clean;
+  `play -- --check` ok (3D world, FX digits, orbit movement, inventory modal).
+- Metrics (`dump_to_png.py` + `clearness_study.py`, 156x44 composed frame):
+  baseline p50 41.8 / black 5.5 → after Slice 16 p50 30.8 / black 23.4 →
+  **after Slice 17: p50 15.4 / black 47.9 / carpet 17.9 / mid 23.2 / bright
+  11.0 / carpSat 102**. Both targets met: p50 ≤ 22 (15.4 ✅), black% ≥ 28
+  (47.9 ✅).
+- Contract test pins both gates: `let stroke_edge_gate_outer =
+  select(0.38, 0.95, dark_field_terrain);` and the material-0 band gate.
 
 ### Next action
-Keep this bounded slice stopped here. The next session should inspect the
-remaining scene-crop mid-band cells (likely band-2/3 meadow tuft ink or a
-different path than `shape_glyph`) before changing thresholds again; rerun the
-same 156x44 dump/study after that diagnosis. No commit or push was performed.
+This bounded slice is complete — both visual targets are met. The next
+session should continue the playbook: Slice 2 (lightning column + icicle
+sweep + smoke-ring upgrade), Slice 3 (fog canopy + oak/banners/lamp posts),
+Slice 4 (3D `play.rs` parity + boss bar) — re-check overlap with the
+`video-tools/REPORT.md` #4–#7 port queue before each. Still awaiting user
+live verdict on the 3D window (`cargo run -p ascii-mmorpg-engine --features
+present --example play`) and the TUI at 156x44 (`play_ansi.bat`). No commit
+or push was performed.
 
 ## Master state (2026-10-13, all details consolidated)
 
@@ -163,6 +240,21 @@ The latest read-only GPU review identified the smallest high-value slice:
 6. **Defer more grass geometry** — crossed grass blades now exist. More instances could multiply cost under 4× SSAA; profile first.
 
 ## Active TODO checklist
+- [x] NEW 2026-10-18 (eighteenth slice): GPU 3D fill — a wgpu compute pass
+  (`engine/src/present/gpu3d.rs`, new) replays `raster::fill_tri`'s exact
+  math from CPU-screened triangles + 64-sample tile bins; output is
+  bit-identical to the CPU fill (parity test 1168/1168 cells, 100% glyph +
+  color), compose/presenter untouched, `--cpu` still compiles/runs (CI never
+  compiles `present`). Release 600-frame exe timing: GPU 58.9 fps vs CPU-fill
+  66 fps (240x87 grid; stage breakdown in the slice section). Verified: fmt 0;
+  workspace tests green (engine default 100, `--features present` lib 117);
+  tools content ok; clippy clean both feature sets; `play -- --check` green.
+  See "GPU 3D fill — compute replay of `raster::fill_tri`".
+- [ ] Optional perf follow-up (only if the user wants the GPU path clearly
+  above 60 fps): move `resolve_layer` into WGSL or slim the readback round
+  trip (~2-3 ms; resolve itself ~3-5 ms stays CPU-identical today — moving it
+  is a language-parity project, not a quick toggle). Otherwise prefer the
+  playbook Slice 2 below.
 - [x] NEW 2026-10-18 (seventeenth slice): `shape_glyph` now gates entity-0
   dark-field terrain strokes (`luma < 0.08` sRGB) behind `edge_mag > 1.0`;
   shader tests, the 156x44 dump/study, CI order, and `--features present`

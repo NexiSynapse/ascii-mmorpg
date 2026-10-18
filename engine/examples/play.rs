@@ -37,7 +37,7 @@ fn main() {
 #[cfg(feature = "present")]
 fn real_main() -> Result<(), String> {
     use ascii_mmorpg_engine::motion::KinematicMotion;
-    use ascii_mmorpg_engine::present::{PointerEvent, PresentOptions, SceneSource};
+    use ascii_mmorpg_engine::present::{GpuWorld, PointerEvent, PresentOptions, SceneSource};
     use ascii_mmorpg_engine::raster::{self, Camera3, DepthOpts, Mesh, Transform, Vec3};
     use ascii_mmorpg_engine::{bridge, Camera, Cell, Layer, Partition, Rgb, Scene};
     use std::collections::{HashMap, HashSet};
@@ -239,10 +239,19 @@ fn real_main() -> Result<(), String> {
         inv_open: bool,
         /// Mesh facing angle (yaw radians); starts facing east like the TUI.
         facing: f32,
+        /// GPU raster (default) vs `--cpu` CPU fill.
+        gpu3d: bool,
+        /// Stashed during the last `scene_at_size`: meshes + camera for the
+        /// presenter's GPU raster pass (consumed by `SceneSource::gpu_world`).
+        pending_world: Option<GpuWorld>,
     }
 
     impl LocalGame {
         fn new() -> Self {
+            Self::with_gpu3d(!std::env::args().any(|arg| arg == "--cpu"))
+        }
+
+        fn with_gpu3d(gpu3d: bool) -> Self {
             let mut sim = Simulation::demo();
             sim.connect_player(PLAYER_ID);
             Self {
@@ -262,6 +271,8 @@ fn real_main() -> Result<(), String> {
                 seen_combat_events: Vec::new(),
                 inv_open: false,
                 facing: std::f32::consts::FRAC_PI_2,
+                gpu3d,
+                pending_world: None,
             }
         }
 
@@ -629,6 +640,13 @@ fn real_main() -> Result<(), String> {
             self.scene_at_size(t, GRID_W, GRID_H)
         }
 
+        fn gpu_world(&mut self) -> Option<GpuWorld> {
+            // Once per frame, paired with scene_at_size above. `--check`
+            // and the engine tests run scene builders without the
+            // presenter, so leftovers here are presentation-state only.
+            self.pending_world.take()
+        }
+
         fn scene_at_size(&mut self, t: f32, width: u32, height: u32) -> (Scene, Camera) {
             let (w, h) = (width as i32, height as i32);
             let world_h = (h - HUD_H - LOG_H).max(4);
@@ -672,6 +690,12 @@ fn real_main() -> Result<(), String> {
             scene.layers.push(hud);
 
             // ---- World partition: one raster pass + screen labels ----
+            //
+            // GPU mode (default): the triangle fill runs on the GPU
+            // (`present::gpu3d`) — stash meshes for the presenter and push a
+            // placeholder layer whose slot the presenter swaps with the GPU-
+            // resolved raster before compose. `--cpu` keeps the CPU fill
+            // (`raster::render_layer`), the exact pre-parity path.
             let meshes = self.world_meshes(&snapshot, t, dt);
             let opts = DepthOpts {
                 near: 0.5,
@@ -681,10 +705,22 @@ fn real_main() -> Result<(), String> {
             };
             // Sun tilts out of the south-west so actor verticals stay lit
             // while ground zones keep their dark meadow tone.
-            let terrain =
-                raster::render_layer(&meshes, &camera, Vec3::new(0.55, 0.85, 0.3), &opts, 0);
+            let sun = Vec3::new(0.55, 0.85, 0.3);
             let terrain_idx = scene.layers.len();
-            scene.layers.push(terrain);
+            if self.gpu3d {
+                self.pending_world = Some(GpuWorld {
+                    meshes,
+                    camera,
+                    sun,
+                    opts,
+                    z: 0,
+                    layer_slot: terrain_idx,
+                });
+                scene.layers.push(Layer::new("mesh3d", 0)); // placeholder
+            } else {
+                let terrain = raster::render_layer(&meshes, &camera, sun, &opts, 0);
+                scene.layers.push(terrain);
+            }
 
             // Nameplates + mini-bars + damage digits (screen coords in the
             // raster view space; the same projection math the fill used).
@@ -920,7 +956,9 @@ fn real_main() -> Result<(), String> {
         // build must (a) damage the mob through the sim, (b) observe the
         // message into FX state, (c) ink a 3D raster world, and (d) raise a
         // damage digit into the screen-space label overlay.
-        let mut game = LocalGame::new();
+        // CPU raster: `--check` runs headless (no presenter, no GPU swap),
+        // so it validates the CPU fill path and the label math directly.
+        let mut game = LocalGame::with_gpu3d(false);
         game.key(KeyCode::KeyF, true);
         let (scene, _) = game.scene_at(0.06);
         let snap = game.sim.snapshot_for(PLAYER_ID);
@@ -958,8 +996,9 @@ fn real_main() -> Result<(), String> {
 
         // Movement path: default camera looks north, so screen-right (D)
         // walks the world-west step that the raster projects back screen-
-        // right — the input is basis-relative end to end.
-        let mut game = LocalGame::new();
+        // right — the input is basis-relative end to end. (CPU raster, as
+        // above: headless check.)
+        let mut game = LocalGame::with_gpu3d(false);
         game.key(KeyCode::KeyD, true);
         game.scene_at(0.0);
         for frame in 1..=40 {
@@ -1010,6 +1049,7 @@ fn real_main() -> Result<(), String> {
     match ascii_mmorpg_engine::present::run_dynamic(
         LocalGame::new(),
         PresentOptions {
+            // GPU raster is the default; `--cpu` forces the CPU fill.
             title: "ASCII MMORPG — 3D orbit camera (OSRS controls)".into(),
             cell_px: 8.0,
             width_cells: GRID_W,
