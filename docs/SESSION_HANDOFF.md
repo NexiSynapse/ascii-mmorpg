@@ -2,10 +2,17 @@
 
 Updated: 2026-10-18. This is the resumable engineering record, not a full transcript.
 
+Latest slice: the 3D play renderer now has a 4x4 depth sample resolve, broad
+material-specific printable-ASCII glyph families, stable coverage/normal/
+variance-aware selection, extra tree/road/gate detail, and richer close actor
+planes. The world-black foreground-only contract remains intact. The next
+human check is a live close/medium/far comparison of glyph density and
+silhouette readability.
+
 ## Start here
 
 Workspace: `ASCII-Game/`; application repository: `ascii-mmorpg/`. Read the parent and repository `AGENTS.md` files. Latest turn: "Game feel, character animation & visual fidelity refinement" section at the end — the 3D play path now uses joint-pivot humanoid poses, responsive facing/gait/attack presentation state, focus-safe input, faceted cones/road landmarks, and improved actor labels; the terminal GPU path now has attack-driven poses, grounded limbs/grass, distinct road/sand/stone materials, slope normals, static non-foliage organic surfaces, and differentiated storm weather. The next human check remains the live 3D window plus the 156x44 TUI.
-Repository status (verified 2026-10-18, Windows): `origin/main` and the checked-out `rendering_gra_update` ref are at `91bea97`; do not commit or push unless asked. Current intentional worktree changes include the refinement slices in `client/src/gpu/{mesh,renderer,shaders}.rs`, `engine/examples/play.rs`, `engine/src/{motion,present,raster}.rs`; the pre-existing user modification to `play_ansi.bat` is preserved untouched. CRLF-vs-LF warnings are historical; current diffs are real content.
+Repository status (verified 2026-10-18, Windows): checked-out `rendering_gra_update` is at `b1afcfd` and tracks `origin/rendering_gra_update`; `main`/`origin/main` are separate and behind. Do not commit or push unless asked. Current intentional worktree changes include the refinement, black-world, and high-density slices in the client/GPU and engine paths; the pre-existing user modification to `play_ansi.bat` is preserved untouched. CRLF-vs-LF warnings are historical; current diffs are real content.
 
 Current slices completed:
 - Pine tree trunk visibility: elevated lowest canopy cone to Y = 3.60, assigned trunk and root flares dedicated Wood/Timber material (7.0) with vertical bark striations, cleared highway collision corridor (|x| <= 4), and synchronized procedural tree rendering on GPU.
@@ -225,6 +232,78 @@ Deferred (honest notes): no road strip, no rain/weather in 3D yet, NPC/item deta
 Changed this slice: `engine/src/raster.rs` (Vec3 pub ops + Sub ops impl, `quad_y`/`decal_y`/`retinted` + 3 tests), `engine/src/present.rs` (`PointerEvent` + `SceneSource::pointer` + App wire + 1 test), `engine/examples/play.rs` (full rewrite: 3D world builder, orbit camera, camera-relative input, labels/digits, HUD/log, inventory modal, rewritten `--check`), `AGENTS.md` engine bullet, this handoff.
 
 Next action (next session): user LIVE verdict on the 3D window (orbit feel/drag sign, zoom, walk feel, FX readability, plate/digit overlay, inventory panel) and the still-pending TUI verdict at 156x44; fix the drag sign or camera/focal tuning if it feels wrong; then the REPORT.md queue (#4 lightning column, #5 icicle sweep, #6 fog banks, #7 organic trees/banners/torches) or CPU `scene_partition_dims` adoption. Do not commit or push unless asked.
+
+## High-density glyph and world-detail slice (2026-10-18, latest)
+
+Request: replace the remaining narrow ramp-like 3D ASCII output with a
+high-density, geometry-aware colored glyph system while preserving the pure
+black world viewport, depth/occlusion, dark-fantasy palette, camera, controls,
+animation, gameplay, and performance.
+
+Implemented in the depth-raster play path:
+
+- **4x4 native-cell supersampling.** `engine/src/raster.rs` now resolves a
+  `SAMPLE_GRID × SAMPLE_GRID` depth/shading block per terminal cell instead of
+  the old 2x2 block. Each winning sample carries shaded color, luminance
+  variance, material identity, and view-space face normal; perspective depth
+  and near-wins remain unchanged.
+- **Broad printable ASCII vocabulary.** Generic, foliage, bark, earth, stone,
+  water, fire, magic, and metal families use stable printable ASCII families
+  rather than one global ` .:-=+*#%@` ramp. Edge strokes select material-aware
+  variants (`|!iIl1`, `-_=+~`, `/\\xX*`, etc.) instead of always emitting the
+  same four characters.
+- **Geometry-aware and distance-aware selection.** Cell coverage, averaged
+  view normal, supersample luminance variance, fog distance, and a spatial
+  hash choose density/detail. Close partial silhouettes get fine directional
+  ink; distant cells suppress jitter and simplify deterministically. No
+  time-varying random glyph noise was introduced.
+- **Model enrichment.** `humanoid_pose` now has visor, chest heraldry, and crest
+  planes; mosslings have bark spots and brow/teeth detail; skeletons have
+  horizontal rib bars; herbalists have robe/hood bands. `play.rs` adds a third
+  pine canopy tier, stable root decals, split grass blades, road cobbles, gate
+  keystone/rubble, and additional foreground stone detail.
+- **Material correction.** Bright warm surfaces such as sand are classified as
+  earth instead of bark, keeping their glyph language distinct from dark
+  red-brown timber.
+- **Regression coverage.** Added tests for broad printable glyph coverage,
+  deterministic material-aware selection, black world backgrounds, occlusion,
+  fog monotonicity, point-light foreground-only behavior, and 4x raster output.
+
+Verification for this slice (Windows, NVIDIA GeForce MX230/Vulkan):
+
+- `cargo fmt --all`
+- `cargo test -p ascii-mmorpg-engine --features present --lib` — 124 passed
+- `cargo test --workspace` — all workspace tests passed (client 105, engine 112, server 8 + 3, shared 14, tools 2, bot 1)
+- `cargo fmt --all -- --check` — passed
+- `cargo clippy --workspace --all-targets -- -D warnings` — passed
+- `cargo clippy -p ascii-mmorpg-engine --features present --all-targets -- -D warnings` — passed
+- `cargo run -p ascii-mmorpg-tools -- content` — `content ok: 11 definitions`
+- `cargo run -p ascii-mmorpg-engine --example depth -- --check` — passed
+- `cargo run -p ascii-mmorpg-engine --example depth` — emitted dense turntable
+  rows using the expanded glyph families
+- `cargo run -p ascii-mmorpg-engine --locked --features present --example play -- --check` — passed
+- `cargo run -p ascii-mmorpg-engine --locked --features present --example play -- --frames 60` — 60 Vulkan frames presented
+- Captured current window comparisons: `C:\Users\kladd\AppData\Local\Temp\omnirush\reco-analysis\ascii_high_density_latest.png` (default), `ascii_high_density_zoom.png` (wheel-zoom close view), and `ascii_high_density_orbit.png` (right-drag orbit). They show a black world viewport with distributed terrain ink, dense tree facets, readable close actor models, labels, and foreground-only color.
+- `git diff --check` — passed; only existing CRLF conversion warnings appeared
+
+Still required:
+
+- Full workspace CI-order checks and present-feature clippy after this slice.
+- Human review is now complete for the captured default, close zoom, and orbit
+  views. The current remaining visual follow-up is an optional wider/zoomed-out
+  comparison against the supplied reference video.
+- `ffprobe` remains unavailable for the reference-video pipeline; use the
+  existing OpenCV analysis and screenshots unless the tool is installed.
+
+Changed for this slice: `engine/src/raster.rs`, `engine/examples/play.rs`, and
+this handoff. The earlier intentional changes in the client/GPU, bridge,
+compose, presenter, and `play_ansi.bat` remain in the worktree; the launcher
+modification is pre-existing and untouched.
+
+Next action: run the full required checks, then perform the live visual density
+review. If the close view reads as texture soup, narrow the family jitter and
+reserve structural glyphs for actual edges/normals before adding more geometry.
+Do not commit or push unless asked.
 
 ## Combat FX in the windowed engine renderer (2026-10-17)
 
@@ -1442,3 +1521,96 @@ Request: overhaul the difficult-to-see 3D MMORPG presentation from the supplied 
 ### Remaining limits and live review
 
 The windowed raster path is still a CPU depth-to-cell renderer rather than a true GPU 3D scene with skeletal skinning. The available automated proof confirms geometry, labels, controls, resize math, and Vulkan presentation, but cannot replace a human comparison of the supplied screenshot. A fresh live run should check the close gameplay view, right-drag orbit, wheel zoom, resize, `F`/`1-3` combat readability, and whether the larger silhouettes now dominate the terrain as intended. No commit or push was made.
+
+## Dark-fantasy environment refinement — moonlight, landmarks, and warm pools (2026-10-18)
+
+This bounded follow-up continued the visibility overhaul without changing gameplay, camera input, protocol, or the terminal renderer. The target remains the windowed `engine/examples/play.rs` depth-raster path.
+
+### Implemented
+
+- Added a cool moonlight tint to `raster::DepthOpts`, with a deliberately low default strength so warm local materials retain their identity. Ground-cell resolution now uses deterministic hashed quiet moss/earth glyphs and dark material-specific backgrounds instead of repeated horizontal bands.
+- Added four far midnight-indigo backdrop walls plus distant low conifer silhouettes so missed rays resolve to a readable night sky rather than a hard black horizon.
+- Added three localized torch anchors: two-tier warm ground pools, physical posts, bright caps, and flame cones. This creates warm navigation points while keeping the implementation within the current single-pass mesh rasterizer.
+- Added an ancient stone gate landmark with cool masonry, crimson hanging banners, and restrained violet ground markers. Existing tree roots and canopy layers remain part of the scene composition.
+- Increased player, monster, NPC, and skeleton presentation scales and raised projected head anchors so the larger silhouettes and nameplates stay aligned. HP mini-bars now use solid block glyphs for clearer contrast.
+- Reworded and repositioned the windowed HUD toward the moonlit wilderness presentation while preserving the existing controls and title/status overlays.
+
+### Changed files
+
+- `engine/examples/play.rs`: backdrop, distant silhouettes, torch pools, gate/banners/markers, actor scale and label anchors, HUD copy, and moonlight options.
+- `engine/src/raster.rs`: `DepthOpts` moon tint/strength, quiet ground glyph selection, deterministic cell hash, and ground background treatment.
+- `play_ansi.bat`: pre-existing user modification preserved and not included in this renderer slice.
+
+### Verification (2026-10-18, Windows)
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo test --workspace`: passed — client 105, engine 106, server 8+3, shared 14, tools 2, bot 1; doc tests clean.
+- `cargo run -p ascii-mmorpg-tools -- content`: passed, `content ok: 11 definitions`.
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed.
+- `cargo run -p ascii-mmorpg-engine --locked --features present --example play -- --check`: passed (`3D world, FX digits, orbit movement, inventory modal`).
+- `cargo run -p ascii-mmorpg-engine --locked --features present --example play -- --frames 60`: presented 60 Vulkan frames on the NVIDIA MX230 with no runtime error.
+- `cargo run -p ascii-mmorpg-client -- --demo`: completed the deterministic six-frame terminal smoke run.
+- `git diff --check`: passed; Git reported only the existing LF/CRLF conversion warnings.
+
+The first parallel workspace-test attempt encountered Windows `LNK1104` because an earlier live `play.exe` still held the target executable open; after stopping that stale process, the complete workspace test rerun passed. The finite 60-frame window smoke exited cleanly and left no `play` process running.
+
+### Remaining live review
+
+Automated checks do not establish the artistic result. The next human check is the live window: compare the new cool sky, distant tree line, gate, torches, ground quieting, actor prominence, orbit/zoom, and `F`/`1-3` effects against the reference. Then re-check `play_ansi.bat` at 156x44 for the carried TUI readability items. No commit or push was made.
+
+## Colored-glyph-only renderer overhaul — pure black world viewport (2026-10-18, latest)
+
+Request: correct the previous dark-fantasy pass so the MMORPG remains a genuine ASCII renderer. Environmental colour, lighting, material identity, and atmospheric detail now arrive through visible glyph foregrounds, glyph density, and placement. The world viewport is pure black; HUD/modal panels retain their intentional interface styling.
+
+### Root cause of the coloured background
+
+The windowed path had three independent background sources: `raster::resolve_cell` assigned `VOID_BG`/material-scaled backgrounds to every hit cell, `present::SHADER` blended each glyph quad's `bg` across the cell outside the atlas alpha, and the presenter clear colour was a dark navy rather than black. The scene builder amplified the problem with large coloured sky walls, meadow/road/ocean planes, warm torch pool planes, and bridge light/glow passes that repainted world backgrounds. The terminal GPU path also generated a dark per-cell `bg` channel and used a non-black terminal default.
+
+### Twelve refinement passes completed
+
+1. **Renderer audit:** traced `play.rs` → camera/projection → `raster::render_layer` → `compose::Frame` → `present::frame_instances`/WGSL and separately traced the terminal GPU lowering path. Identified every world background source above.
+2. **Black-background guarantee:** rasterized world cells now use `Rgb::new(0,0,0)` backgrounds; the windowed render target clear is black; world instances force black backgrounds; the glyph shader bypasses washes for world cells; bridge stage/world constants and terminal defaults are black.
+3. **Buffer/depth correctness:** `Frame` now records a world-cell mask, preserves partition ownership through composition, skips world background wash/glow writes, applies world glow to existing glyph foregrounds only, and clears the final world background channel after all passes. Empty cells remain `Cell::CLEAR`.
+4. **Centralized palette:** `play.rs` now uses a `WorldPalette` for foliage, bark/root, path, grass, stone, water/sand, fire/ember, magic, and actor shadows. Interface colours remain separate HUD/label constants.
+5. **Glyph density mapping:** `raster.rs` classifies visible faces into foliage, bark, earth, stone, water, fire, magic, metal, or generic material languages. Density and edge selection use luminance, fog distance, surface depth structure, material identity, and deterministic hashing rather than one global ramp.
+6. **Terrain refinement:** removed the continuous meadow ground field and replaced it with sparse stable path marks, shoreline/wave segments, and hashed grass tufts. Large unoccupied terrain areas are now black instead of a dotted or filled carpet.
+7. **Structural refinement:** removed the skybox/far-wall geometry and large road/beach/ocean/torch pool planes. Trees gained trunk roots and branch solids; stones, the gate, crimson banners, and violet markers remain as selective glyph geometry.
+8. **Directional shading:** retained the face-normal diffuse/depth raster and added a restrained configurable moon tint (`DepthOpts::moon_tint`/`moonlight_strength`) that changes glyph foreground RGB only.
+9. **Localized lighting:** added raster `PointLight` sources. Torches and active combat FX brighten/tint nearby visible triangle samples with quadratic distance falloff; no screen-space halo or coloured empty-cell pool is emitted.
+10. **Entity refinement:** preserved enlarged actor recipes, nameplates, HP bars, shadows, target rings, damage digits, and combat FX while forcing labels/world backings to black and keeping actor/material glyph colours distinct.
+11. **Depth/camera validation:** preserved the orbit camera, camera-relative movement, focal/zoom behaviour, depth testing, occlusion, and resize path. The world partition is marked as a camera/world partition for black-ink enforcement even though the 3D camera is baked inside the raster pass.
+12. **Final polish/regression:** added black-background and point-light tests, updated glow/light tests to assert foreground-only world lighting, changed the terminal GPU packed background output to zero, and ran workspace, content, clippy, deterministic demo, gameplay, and Vulkan presentation checks.
+
+### Changed files
+
+- `engine/src/raster.rs`: black world cells, material-aware glyph profiles, moonlight foreground shading, `PointLight`, glyph-only local lighting, and focused regression tests.
+- `engine/src/compose.rs`: world-cell ownership mask, black finalization, foreground-only world glow, and black-background regression test.
+- `engine/src/present.rs`: pure-black surface clear, world-instance black backgrounds, world-only wash bypass in WGSL, and presenter regression assertions.
+- `engine/examples/play.rs`: centralized foreground palette, selective glyph terrain/landmarks, no sky/floor/pool fill planes, enlarged actor labels, torch/combat point lights, and foreground-only world partition.
+- `engine/src/bridge.rs`: black world/stage palette and foreground-only light-pool/glow behavior.
+- `client/src/gpu/pipeline.rs`: terminal GPU scene colour target clears to black.
+- `client/src/gpu/shaders.rs`: packed GPU background channels are retained for ABI compatibility but always zero.
+- `client/src/gpu/renderer.rs`: terminal scene lowering discards GPU background colour and writes black scene backgrounds.
+- `client/src/partitions.rs`: blank scene cells use black foreground/default state.
+- `client/src/terminal_colors.rs`: terminal/notcurses default background is pure black.
+- `docs/SESSION_HANDOFF.md`: this record.
+- `play_ansi.bat`: pre-existing user modification preserved and not included in this renderer change.
+
+### Verification (2026-10-18, Windows)
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo test --workspace`: passed — client 105, engine 109, server 8+3, shared 14, tools 2, bot 1; doc tests clean.
+- `cargo run -p ascii-mmorpg-tools -- content`: passed, `content ok: 11 definitions`.
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed.
+- `cargo clippy -p ascii-mmorpg-engine --features present --all-targets -- -D warnings`: passed.
+- `cargo test -p ascii-mmorpg-engine --features present --lib`: passed — 121 tests, including black world/background and point-light tests.
+- `cargo run -p ascii-mmorpg-engine --locked --features present --example play -- --check`: passed — 3D world, FX digits, orbit movement, and inventory modal.
+- `cargo run -p ascii-mmorpg-engine --locked --features present --example play -- --frames 60`: presented 60 Vulkan frames on the NVIDIA MX230.
+- `cargo run -p ascii-mmorpg-client -- --demo`: completed the deterministic six-frame terminal smoke run with the existing HUD styling and black scene default.
+- `git diff --check`: passed; only the repository's existing LF/CRLF conversion warnings were reported.
+
+### Visual evidence and remaining review
+
+Captured comparable windowed output at `%TEMP%\omnirush\reco-analysis\ascii_black_world.png`, `ascii_black_world2.png`, and `ascii_black_orbit_zoom.png`. The world viewport is visibly black between glyphs; tree foliage, bark, stone, water, magic, fire, player/enemy silhouettes, labels, and combat marks are foreground-colored glyphs. The second capture shows denser material-specific foliage/branch silhouettes while retaining large black negative space; the orbit/zoom capture was taken after sending a right-drag and wheel event to the live window.
+
+The automated checks cannot judge artistic parity or camera feel. The remaining human review is to run the live window, right-drag orbit, wheel zoom, walk, `F`, `1/2/3`, and `I`, then compare a close and wide view against the reference. No commit or push was made.

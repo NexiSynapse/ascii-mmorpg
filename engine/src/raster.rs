@@ -316,6 +316,23 @@ impl Mesh {
             Vec3::new(0.78, 0.18, 0.78),
             steel,
         ));
+        // Small authored face and heraldry planes keep the actor readable at
+        // close zoom without turning the model into a solid featureless box.
+        add(Mesh::boxed(
+            Vec3::new(0.0, 3.08 + breath, 0.37),
+            Vec3::new(0.46, 0.12, 0.08),
+            steel_dark,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.0, 2.18 + breath, 0.37),
+            Vec3::new(0.14, 0.42, 0.08),
+            gold,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.0, 3.66 + breath, 0.10),
+            Vec3::new(0.14, 0.22, 0.28),
+            gold,
+        ));
 
         // Each leg is built as two overlapping segments around a hip and knee
         // pivot.  The foot boxes stay close to y=0 throughout the gait cycle.
@@ -461,6 +478,24 @@ impl Mesh {
             Vec3::new(0.12, 0.12, 0.06),
             eye,
         ));
+        // Mossling bark spots and a small brow/teeth break up the broad green
+        // body into stable, material-specific planes.
+        for (x, y, z, size) in [
+            (-0.38, 0.78, 0.54, 0.16),
+            (0.38, 0.86, 0.53, 0.13),
+            (-0.08, 0.58, 0.54, 0.11),
+        ] {
+            add(Mesh::boxed(
+                Vec3::new(x, y + breathe, z + lunge),
+                Vec3::new(size, size, 0.06),
+                dark,
+            ));
+        }
+        add(Mesh::boxed(
+            Vec3::new(0.0, 1.54 + breathe, 0.56 + lunge),
+            Vec3::new(0.56, 0.08, 0.08),
+            bark,
+        ));
         for (x, z, phase) in [
             (-0.48, -0.32, stride),
             (0.48, -0.32, -stride),
@@ -527,6 +562,13 @@ impl Mesh {
             Vec3::new(0.10, 0.48, 0.10),
             bone,
         ));
+        for y in [1.56, 1.38, 1.20] {
+            add(Mesh::boxed(
+                Vec3::new(0.0, y, 0.10),
+                Vec3::new(0.52, 0.08, 0.10),
+                bone,
+            ));
+        }
         add(Mesh::boxed(
             Vec3::new(0.0, 0.88, 0.0),
             Vec3::new(0.48, 0.18, 0.28),
@@ -601,6 +643,16 @@ impl Mesh {
             Vec3::new(0.0, 1.64, 0.31),
             Vec3::new(0.34, 0.22, 0.08),
             Rgb::new(18, 22, 32),
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.0, 1.43, 0.34),
+            Vec3::new(0.86, 0.10, 0.12),
+            leather,
+        ));
+        add(Mesh::boxed(
+            Vec3::new(0.0, 0.78, 0.34),
+            Vec3::new(0.68, 0.08, 0.10),
+            hood,
         ));
         add(Mesh::boxed(
             Vec3::new(0.46, 1.04, 0.12),
@@ -865,8 +917,14 @@ pub struct DepthOpts {
     /// Floor for unlit faces (0..1). Low enough that modeling shadows read;
     /// the rim pass (not ambient) separates actors from the ground.
     pub ambient: f32,
-    /// World-unit depth step inside one 2x2 block that reads as an edge.
+    /// World-unit depth step inside one supersampled cell block that reads as
+    /// an edge.
     pub edge_step: f32,
+    /// Cool directional tint used to make the night scene read as moonlit
+    /// instead of uniformly neutral gray. Strength stays deliberately low so
+    /// warm local materials can still carry their own identity.
+    pub moon_tint: Rgb,
+    pub moonlight_strength: f32,
 }
 
 impl Default for DepthOpts {
@@ -876,17 +934,155 @@ impl Default for DepthOpts {
             far: 40.0,
             ambient: 0.28,
             edge_step: 0.36,
+            moon_tint: Rgb::new(178, 198, 238),
+            moonlight_strength: 0.15,
         }
     }
 }
 
-/// Luminance ramp for filled faces (dark → bright).
-const RAMP: &[u8] = b" .:-=+*#%@";
-/// Near-black void the geometry floats in (matches the engine night look).
-const VOID_BG: Rgb = Rgb::new(9, 12, 20);
+/// A localized world-space light. It contributes only to visible geometry
+/// samples; it never creates a screen-space halo or paints empty cells.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointLight {
+    pub position: Vec3,
+    pub color: Rgb,
+    pub radius: f32,
+    pub intensity: f32,
+}
+
+impl PointLight {
+    pub const fn new(position: Vec3, color: Rgb, radius: f32, intensity: f32) -> Self {
+        Self {
+            position,
+            color,
+            radius,
+            intensity,
+        }
+    }
+}
+
+/// Samples per character cell on each axis. Four-by-four keeps diagonal
+/// silhouettes and small props from collapsing into a single block while the
+/// final output remains one native terminal glyph per cell.
+const SAMPLE_GRID: usize = 4;
+
+/// Material families deliberately extend the old global luminance ramp rather
+/// than letting every surface collapse to the same ten characters.
+const GENERIC_GLYPHS: &[u8] = b" .,:;`'\"_-+=*/\\|![]{}()<>xX%#@Oo0&$?^v~";
+const FOLIAGE_GLYPHS: &[u8] = b" .,:;`'\"+*xX#%&@Oo";
+const BARK_GLYPHS: &[u8] = b" ._-'`|!iIl1tT/\\+=*#%";
+const EARTH_GLYPHS: &[u8] = b" .,:;`'\"_-~=+*#%@";
+const STONE_GLYPHS: &[u8] = b" .,:;._-+=/\\xX#%&@$O0";
+const WATER_GLYPHS: &[u8] = b" .,-_~^v=<>";
+const FIRE_GLYPHS: &[u8] = b".,:;*+xX#%@Oo";
+const MAGIC_GLYPHS: &[u8] = b".:+*xX#%@Oo0";
+const METAL_GLYPHS: &[u8] = b" .-_=+*/\\|!xX#%&@$O0";
+/// The world renderer never paints a framebuffer background. A resolved
+/// geometry cell owns a foreground glyph; everything between glyphs is this
+/// exact black clear value.
+const WORLD_BLACK: Rgb = Rgb::new(0, 0, 0);
+
+/// Coarse material identity used by the cell resolver. The mesh API still
+/// accepts compact RGB albedos, but the rasterizer does not reduce every
+/// surface to one global luminance ramp: each class gets its own glyph
+/// language and density thresholds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MaterialKind {
+    Generic,
+    Foliage,
+    Bark,
+    Earth,
+    Stone,
+    Water,
+    Fire,
+    Magic,
+    Metal,
+}
+
+impl MaterialKind {
+    fn classify(c: Rgb) -> Self {
+        let r = c.r as i16;
+        let g = c.g as i16;
+        let b = c.b as i16;
+        if r > 175 && g > 85 && b < g - 20 {
+            return Self::Fire;
+        }
+        if b > r + 28 && g > r + 8 {
+            return Self::Water;
+        }
+        if b > r + 28 && b > g + 12 {
+            return Self::Magic;
+        }
+        if g > r + 12 && g > b + 6 {
+            return Self::Foliage;
+        }
+        if r > g + 18 && g > b + 8 {
+            // Bright, high-value warm surfaces are sand/earth/leather rather
+            // than bark. Darker, red-brown faces retain the vertical bark
+            // language used by trunks, roots, and wooden props.
+            return if r > 112 && g > 78 {
+                Self::Earth
+            } else if r > 72 {
+                Self::Bark
+            } else {
+                Self::Earth
+            };
+        }
+        if (r - g).abs() < 28 && (g - b).abs() < 28 && r < 190 {
+            return Self::Stone;
+        }
+        if r > 155 && g > 155 && b > 155 {
+            return Self::Metal;
+        }
+        Self::Generic
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Generic => 0,
+            Self::Foliage => 1,
+            Self::Bark => 2,
+            Self::Earth => 3,
+            Self::Stone => 4,
+            Self::Water => 5,
+            Self::Fire => 6,
+            Self::Magic => 7,
+            Self::Metal => 8,
+        }
+    }
+
+    fn from_index(index: usize) -> Self {
+        match index {
+            1 => Self::Foliage,
+            2 => Self::Bark,
+            3 => Self::Earth,
+            4 => Self::Stone,
+            5 => Self::Water,
+            6 => Self::Fire,
+            7 => Self::Magic,
+            8 => Self::Metal,
+            _ => Self::Generic,
+        }
+    }
+
+    fn glyphs(self) -> &'static [u8] {
+        match self {
+            Self::Generic => GENERIC_GLYPHS,
+            Self::Foliage => FOLIAGE_GLYPHS,
+            Self::Bark => BARK_GLYPHS,
+            Self::Earth => EARTH_GLYPHS,
+            Self::Stone => STONE_GLYPHS,
+            Self::Water => WATER_GLYPHS,
+            Self::Fire => FIRE_GLYPHS,
+            Self::Magic => MAGIC_GLYPHS,
+            Self::Metal => METAL_GLYPHS,
+        }
+    }
+}
 
 /// One supersampled fragment: perspective-correct depth, shaded albedo
-/// (0..1 floats), and its luminance. 2x2 of these resolve to one cell.
+/// (0..1 floats), flat-face view normal, and its luminance. A `SAMPLE_GRID` by
+/// `SAMPLE_GRID` block resolves to one cell.
 #[derive(Clone, Copy)]
 struct Sample {
     depth: f32,
@@ -894,6 +1090,11 @@ struct Sample {
     g: f32,
     b: f32,
     lum: f32,
+    lum_sq: f32,
+    normal_x: f32,
+    normal_y: f32,
+    normal_z: f32,
+    material: MaterialKind,
 }
 
 impl Sample {
@@ -904,6 +1105,11 @@ impl Sample {
             g: 0.0,
             b: 0.0,
             lum: 0.0,
+            lum_sq: 0.0,
+            normal_x: 0.0,
+            normal_y: 0.0,
+            normal_z: 0.0,
+            material: MaterialKind::Generic,
         }
     }
 }
@@ -911,18 +1117,33 @@ impl Sample {
 /// Render `meshes` through `cam` into a still-cell layer at height `z`.
 ///
 /// Pipeline per frame: project → flat-shade each face → barycentric raster
-/// into a 2x supersampled depth buffer (near wins) → resolve each 2x2 block
-/// to a ramp glyph, or a depth-edge glyph (`| - / \`) where the block spans
-/// a depth step, with distance fog throughout.
+/// into a 4x supersampled depth buffer (near wins) → resolve each 4x4 block
+/// to a material-aware glyph, with depth-edge strokes where a block spans a
+/// step and distance-aware detail/fog throughout.
 pub fn render_layer(meshes: &[Mesh], cam: &Camera3, sun: Vec3, opts: &DepthOpts, z: i32) -> Layer {
+    render_layer_with_lights(meshes, cam, sun, opts, &[], z)
+}
+
+/// Render a mesh layer with localized world lights. The original
+/// [`render_layer`] remains the zero-light convenience path used by fixtures
+/// and examples; the playable scene supplies torches through this function so
+/// only nearby geometry glyphs receive their warm contribution.
+pub fn render_layer_with_lights(
+    meshes: &[Mesh],
+    cam: &Camera3,
+    sun: Vec3,
+    opts: &DepthOpts,
+    lights: &[PointLight],
+    z: i32,
+) -> Layer {
     let sun = sun.norm();
-    let w2 = (cam.width.max(1) * 2) as usize;
-    let h2 = (cam.height.max(1) * 2) as usize;
+    let w2 = cam.width.max(1) as usize * SAMPLE_GRID;
+    let h2 = cam.height.max(1) as usize * SAMPLE_GRID;
     let mut buf = vec![Sample::empty(); w2 * h2];
 
     for mesh in meshes {
         for tri in &mesh.tris {
-            rasterize_tri(&mut buf, w2, h2, tri, cam, sun, opts);
+            rasterize_tri(&mut buf, w2, h2, tri, cam, sun, opts, lights);
         }
     }
 
@@ -989,6 +1210,7 @@ fn basis(cam: &Camera3) -> (Vec3, Vec3, Vec3) {
 
 /// Rasterize one face: project, flat-shade from its geometric normal,
 /// barycentric-fill with perspective-correct depth, near-wins per sample.
+#[allow(clippy::too_many_arguments)]
 fn rasterize_tri(
     buf: &mut [Sample],
     w2: usize,
@@ -997,6 +1219,7 @@ fn rasterize_tri(
     cam: &Camera3,
     sun: Vec3,
     opts: &DepthOpts,
+    lights: &[PointLight],
 ) {
     let (fwd, right, up) = basis(cam);
     // View space first so near-plane straddlers clip instead of dropping:
@@ -1013,13 +1236,50 @@ fn rasterize_tri(
     // them exactly as an outward normal would.
     let n = (tri.v[1] - tri.v[0]).cross(tri.v[2] - tri.v[0]).norm();
     let diff = opts.ambient + (1.0 - opts.ambient) * n.dot(sun).abs().min(1.0);
-    let shade = |c: u8| f32::from(c) / 255.0 * diff;
-    let (sr, sg, sb) = (
-        shade(tri.albedo.r),
-        shade(tri.albedo.g),
-        shade(tri.albedo.b),
+    let moon = opts.moon_tint;
+    let moon_strength = opts.moonlight_strength.clamp(0.0, 1.0);
+    let shade = |c: u8, tint: u8| {
+        let base = f32::from(c) / 255.0 * diff;
+        let tint_factor = f32::from(tint) / 255.0;
+        base * (1.0 - moon_strength + moon_strength * tint_factor)
+    };
+    let (mut sr, mut sg, mut sb) = (
+        shade(tri.albedo.r, moon.r),
+        shade(tri.albedo.g, moon.g),
+        shade(tri.albedo.b, moon.b),
     );
+    // Coarse face-centre point lighting is intentional for this 4x
+    // character-cell raster: it keeps local sources stable instead of
+    // producing per-pixel shimmer while still brightening actual surfaces.
+    // Empty screen cells never reach this path and therefore stay black.
+    let center = Vec3::new(
+        (tri.v[0].x + tri.v[1].x + tri.v[2].x) / 3.0,
+        (tri.v[0].y + tri.v[1].y + tri.v[2].y) / 3.0,
+        (tri.v[0].z + tri.v[1].z + tri.v[2].z) / 3.0,
+    );
+    let response = match MaterialKind::classify(tri.albedo) {
+        MaterialKind::Metal => 0.82,
+        MaterialKind::Water => 0.52,
+        MaterialKind::Foliage | MaterialKind::Earth => 0.72,
+        MaterialKind::Fire | MaterialKind::Magic => 0.95,
+        _ => 0.64,
+    };
+    for light in lights {
+        let radius = light.radius.max(0.001);
+        let distance = (center - light.position)
+            .dot(center - light.position)
+            .sqrt();
+        let falloff = (1.0 - distance / radius).max(0.0);
+        let contribution = falloff * falloff * light.intensity.max(0.0) * response;
+        if contribution <= 0.0 {
+            continue;
+        }
+        sr = (sr + f32::from(light.color.r) / 255.0 * contribution).min(1.0);
+        sg = (sg + f32::from(light.color.g) / 255.0 * contribution).min(1.0);
+        sb = (sb + f32::from(light.color.b) / 255.0 * contribution).min(1.0);
+    }
     let lum = 0.2126 * sr + 0.7152 * sg + 0.0722 * sb;
+    let view_normal = Vec3::new(n.dot(right), n.dot(up), n.dot(fwd)).norm();
 
     let cx = cam.width as f32 / 2.0;
     let cy = cam.height as f32 / 2.0;
@@ -1028,12 +1288,27 @@ fn rasterize_tri(
         let mut syv = [0.0f32; 3];
         let mut inv_z = [0.0f32; 3];
         for (i, v) in clipped.iter().enumerate() {
-            // Supersample space: one cell covers 2x2 samples.
-            sx[i] = (cx + cam.focal * v.x / v.z) * 2.0;
-            syv[i] = (cy - cam.focal * v.y / v.z) * 2.0;
+            // Supersample space: one cell covers SAMPLE_GRID×SAMPLE_GRID
+            // samples. Keeping projection in the same coordinate system as
+            // the depth buffer preserves native terminal resolution.
+            sx[i] = (cx + cam.focal * v.x / v.z) * SAMPLE_GRID as f32;
+            syv[i] = (cy - cam.focal * v.y / v.z) * SAMPLE_GRID as f32;
             inv_z[i] = 1.0 / v.z;
         }
-        fill_tri(buf, w2, h2, &sx, &syv, &inv_z, sr, sg, sb, lum);
+        fill_tri(
+            buf,
+            w2,
+            h2,
+            &sx,
+            &syv,
+            &inv_z,
+            sr,
+            sg,
+            sb,
+            lum,
+            view_normal,
+            MaterialKind::classify(tri.albedo),
+        );
     }
 }
 
@@ -1084,6 +1359,8 @@ fn fill_tri(
     sg: f32,
     sb: f32,
     lum: f32,
+    normal: Vec3,
+    material: MaterialKind,
 ) {
     // Edge functions over the sample-space bbox, clipped to the buffer.
     let min_x = sx
@@ -1142,13 +1419,19 @@ fn fill_tri(
                 s.g = sg;
                 s.b = sb;
                 s.lum = lum;
+                s.lum_sq = lum * lum;
+                s.normal_x = normal.x;
+                s.normal_y = normal.y;
+                s.normal_z = normal.z;
+                s.material = material;
             }
         }
     }
 }
 
-/// Resolve one cell's 2x2 samples: ramp glyph by mean luminance, or a depth
-/// edge glyph where the block spans a step; distance fog throughout.
+/// Resolve one cell's 4x4 samples: material glyph by mean luminance and
+/// stable local variation, or a depth edge glyph where the block spans a
+/// step; distance-aware detail and fog throughout.
 /// `None` when no sample hit (void shows through).
 fn resolve_cell(buf: &[Sample], w2: usize, cx: i32, cy: i32, opts: &DepthOpts) -> Option<Cell> {
     let mut hits = 0u32;
@@ -1156,23 +1439,41 @@ fn resolve_cell(buf: &[Sample], w2: usize, cx: i32, cy: i32, opts: &DepthOpts) -
     let mut r = 0.0f32;
     let mut g = 0.0f32;
     let mut b = 0.0f32;
+    let mut lum_sq = 0.0f32;
+    let mut normal_x = 0.0f32;
+    let mut normal_y = 0.0f32;
+    let mut normal_z = 0.0f32;
     let mut zmin = f32::INFINITY;
     let mut zmax = f32::NEG_INFINITY;
+    let mut material_votes = [0u32; 9];
     // Corner depths for the edge orientation (fall back to the block mean
     // where a corner missed — silhouettes keep their shaded side).
     let mut corner = [f32::NAN; 4];
-    for dy in 0..2 {
-        for dx in 0..2 {
-            let s = buf[(cy as usize * 2 + dy) * w2 + cx as usize * 2 + dx];
+    for dy in 0..SAMPLE_GRID {
+        for dx in 0..SAMPLE_GRID {
+            let s = buf[(cy as usize * SAMPLE_GRID + dy) * w2 + cx as usize * SAMPLE_GRID + dx];
             if s.depth.is_finite() {
                 hits += 1;
                 lum += s.lum;
                 r += s.r;
                 g += s.g;
                 b += s.b;
+                lum_sq += s.lum_sq;
+                normal_x += s.normal_x;
+                normal_y += s.normal_y;
+                normal_z += s.normal_z;
                 zmin = zmin.min(s.depth);
                 zmax = zmax.max(s.depth);
-                corner[dy * 2 + dx] = s.depth;
+                material_votes[s.material.index()] += 1;
+                if dx == 0 && dy == 0 {
+                    corner[0] = s.depth;
+                } else if dx == SAMPLE_GRID - 1 && dy == 0 {
+                    corner[1] = s.depth;
+                } else if dx == 0 && dy == SAMPLE_GRID - 1 {
+                    corner[2] = s.depth;
+                } else if dx == SAMPLE_GRID - 1 && dy == SAMPLE_GRID - 1 {
+                    corner[3] = s.depth;
+                }
             }
         }
     }
@@ -1180,6 +1481,16 @@ fn resolve_cell(buf: &[Sample], w2: usize, cx: i32, cy: i32, opts: &DepthOpts) -
         return None;
     }
     let n = hits as f32;
+    let mean_lum = lum / n;
+    let variation = (lum_sq / n - mean_lum * mean_lum).max(0.0).sqrt();
+    let view_normal = Vec3::new(normal_x / n, normal_y / n, normal_z / n).norm();
+    let coverage = hits as f32 / (SAMPLE_GRID * SAMPLE_GRID) as f32;
+    let material = material_votes
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, votes)| **votes)
+        .map(|(index, _)| MaterialKind::from_index(index))
+        .unwrap_or(MaterialKind::Generic);
     let zavg = (zmin + zmax) / 2.0;
     // Distance fog: far geometry sinks toward the void.
     let fog = ((zavg - opts.near) / (opts.far - opts.near)).clamp(0.0, 1.0);
@@ -1189,8 +1500,7 @@ fn resolve_cell(buf: &[Sample], w2: usize, cx: i32, cy: i32, opts: &DepthOpts) -
     let dim = 1.0 - 0.52 * fog;
     let to_u8 = |c: f32| (c / n * dim * 255.0).clamp(0.0, 255.0) as u8;
     let fg = Rgb::new(to_u8(r), to_u8(g), to_u8(b));
-
-    let glyph = if zmax - zmin > opts.edge_step {
+    let edge = if zmax - zmin > opts.edge_step {
         let at = |i: usize| {
             if corner[i].is_finite() {
                 corner[i]
@@ -1210,12 +1520,148 @@ fn resolve_cell(buf: &[Sample], w2: usize, cx: i32, cy: i32, opts: &DepthOpts) -
             '/'
         }
     } else {
-        let idx = ((lum / n * dim) * (RAMP.len() - 1) as f32)
-            .round()
-            .clamp(0.0, (RAMP.len() - 1) as f32) as usize;
-        RAMP[idx] as char
+        '\0'
     };
-    Some(Cell::new(glyph, fg, VOID_BG))
+    let glyph = select_glyph(
+        material,
+        mean_lum * dim,
+        edge,
+        fog,
+        coverage,
+        variation,
+        view_normal,
+        cx,
+        cy,
+    );
+    // Foreground-only world contract: a hit cell may carry a coloured glyph,
+    // but neither it nor the empty space around it paints a terrain fill.
+    Some(Cell::new(glyph, fg, WORLD_BLACK))
+}
+
+/// Material-specific density and shape selection. The first-class edge
+/// strokes are retained for structural geometry, while organic materials use
+/// branching/cluster glyphs instead of a uniform global ramp. Coverage,
+/// supersample variance, view orientation, and fog all participate so close
+/// geometry gets fine texture while distant geometry simplifies deterministically.
+#[allow(clippy::too_many_arguments)]
+fn select_glyph(
+    material: MaterialKind,
+    luminance: f32,
+    edge: char,
+    fog: f32,
+    coverage: f32,
+    variation: f32,
+    view_normal: Vec3,
+    x: i32,
+    y: i32,
+) -> char {
+    let hash = cell_hash(x, y);
+    // Front-facing and upward facets carry more authored detail; grazing
+    // facets stay sparse so the silhouette remains legible instead of turning
+    // into a wall of texture.
+    let orientation =
+        view_normal.z.abs() * 0.16 + view_normal.y.max(0.0) * 0.10 - view_normal.x.abs() * 0.04;
+    let density = (luminance * 1.52 + orientation - fog * 0.08).clamp(0.0, 1.0);
+    let detail = (variation * 3.0 + coverage * 0.42 + (1.0 - fog) * 0.34).clamp(0.0, 1.0);
+
+    if edge != '\0' {
+        return edge_glyph(material, edge, hash, view_normal);
+    }
+
+    let family = material.glyphs();
+    let mut glyph = family_glyph(family, density, detail, fog, hash);
+    // A partially covered geometry cell should never disappear solely because
+    // its density family begins with a space. The black void remains untouched;
+    // this only gives a visible ink mark to actual silhouette coverage.
+    if glyph == ' ' && coverage >= 0.18 {
+        glyph = family.get(1).copied().unwrap_or(b'.') as char;
+    }
+
+    // Near-facing structural facets get a stable directional cue even when
+    // their luminance is low. This is useful for trunks, walls, armor seams,
+    // and narrow props that occupy only a few supersample taps.
+    if detail > 0.68 && coverage < 0.48 {
+        match material {
+            MaterialKind::Bark if view_normal.y.abs() > 0.42 => {
+                glyph = if view_normal.x.abs() > view_normal.z.abs() {
+                    if hash & 1 == 0 {
+                        '/'
+                    } else {
+                        '\\'
+                    }
+                } else {
+                    '|'
+                };
+            }
+            MaterialKind::Stone | MaterialKind::Metal if view_normal.y.abs() > 0.55 => {
+                glyph = if hash & 1 == 0 { '_' } else { '=' };
+            }
+            MaterialKind::Water if view_normal.y > 0.45 => {
+                glyph = if hash & 1 == 0 { '~' } else { '-' };
+            }
+            _ => {}
+        }
+    }
+    glyph
+}
+
+fn family_glyph(family: &[u8], density: f32, detail: f32, fog: f32, hash: u32) -> char {
+    if family.is_empty() {
+        return ' ';
+    }
+    let max = family.len() - 1;
+    let base = (density * max as f32).round() as i32;
+    // Close, varied faces can move one slot around their density band. The
+    // offset is a spatial hash, never a time-varying random source, so the
+    // world does not shimmer while the camera moves.
+    let jitter_span = if detail > 0.44 && fog < 0.72 { 1 } else { 0 };
+    let jitter = if jitter_span == 0 {
+        0
+    } else {
+        ((hash.rotate_left(7) % 3) as i32) - 1
+    };
+    let index = (base + jitter).clamp(0, max as i32) as usize;
+    family[index] as char
+}
+
+fn edge_glyph(material: MaterialKind, edge: char, hash: u32, normal: Vec3) -> char {
+    let family: &[u8] = match edge {
+        '|' => match material {
+            MaterialKind::Bark | MaterialKind::Foliage => b"|!iIl1T",
+            MaterialKind::Stone => b"|[]!I",
+            MaterialKind::Metal => b"|!I1",
+            _ => b"|!I",
+        },
+        '-' => match material {
+            MaterialKind::Foliage => b"-_=+~",
+            MaterialKind::Bark => b"-_=+",
+            MaterialKind::Water => b"-_~=",
+            MaterialKind::Stone | MaterialKind::Metal => b"-_+=",
+            _ => b"-_+=",
+        },
+        '/' | '\\' => match material {
+            MaterialKind::Foliage => b"/\\xX*",
+            MaterialKind::Bark => b"/\\|T",
+            MaterialKind::Stone => b"/\\xX",
+            MaterialKind::Magic | MaterialKind::Fire => b"/\\*+",
+            _ => b"/\\|x",
+        },
+        _ => material.glyphs(),
+    };
+    let mut glyph = family[(hash as usize) % family.len()] as char;
+    if edge == '|' && normal.y.abs() > 0.7 && matches!(material, MaterialKind::Bark) {
+        glyph = if hash & 1 == 0 { 'I' } else { '!' };
+    }
+    if edge == '-' && normal.z.abs() > 0.7 && matches!(material, MaterialKind::Water) {
+        glyph = if hash & 1 == 0 { '~' } else { '=' };
+    }
+    glyph
+}
+
+fn cell_hash(x: i32, y: i32) -> u32 {
+    let mut h = (x as u32).wrapping_mul(374_761_393) ^ (y as u32).wrapping_mul(668_265_263);
+    h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
+    h ^ (h >> 16)
 }
 
 #[cfg(test)]
@@ -1228,6 +1674,102 @@ mod tests {
 
     fn white() -> Rgb {
         Rgb::new(255, 255, 255)
+    }
+
+    #[test]
+    fn glyph_families_cover_broad_printable_ascii() {
+        let families = [
+            GENERIC_GLYPHS,
+            FOLIAGE_GLYPHS,
+            BARK_GLYPHS,
+            EARTH_GLYPHS,
+            STONE_GLYPHS,
+            WATER_GLYPHS,
+            FIRE_GLYPHS,
+            MAGIC_GLYPHS,
+            METAL_GLYPHS,
+        ];
+        let mut seen = [false; 128];
+        for family in families {
+            for &glyph in family {
+                assert!(
+                    glyph.is_ascii_graphic() || glyph == b' ',
+                    "non-printable glyph {glyph}"
+                );
+                seen[glyph as usize] = true;
+            }
+        }
+        let unique = seen.into_iter().filter(|present| *present).count();
+        assert!(
+            unique >= 45,
+            "glyph vocabulary collapsed to only {unique} symbols"
+        );
+    }
+
+    #[test]
+    fn glyph_selection_is_material_aware_and_stable() {
+        let normal = Vec3::new(0.0, 0.7, 0.7).norm();
+        let materials = [
+            MaterialKind::Foliage,
+            MaterialKind::Bark,
+            MaterialKind::Stone,
+            MaterialKind::Water,
+            MaterialKind::Fire,
+            MaterialKind::Magic,
+            MaterialKind::Metal,
+        ];
+        let mut outputs = [false; 128];
+        for (index, material) in materials.into_iter().enumerate() {
+            for band in 0..=8 {
+                let glyph = select_glyph(
+                    material,
+                    band as f32 / 8.0,
+                    '\0',
+                    0.12,
+                    0.82,
+                    0.18,
+                    normal,
+                    (index * 11) as i32,
+                    band,
+                );
+                assert!(glyph.is_ascii(), "selection must stay ASCII");
+                outputs[glyph as usize] = true;
+                assert_eq!(
+                    glyph,
+                    select_glyph(
+                        material,
+                        band as f32 / 8.0,
+                        '\0',
+                        0.12,
+                        0.82,
+                        0.18,
+                        normal,
+                        (index * 11) as i32,
+                        band,
+                    ),
+                    "selection must be deterministic"
+                );
+            }
+        }
+        let unique = outputs.into_iter().filter(|present| *present).count();
+        assert!(
+            unique >= 20,
+            "material families produced only {unique} glyphs"
+        );
+    }
+
+    #[test]
+    fn warm_materials_keep_earth_distinct_from_dark_bark() {
+        assert_eq!(
+            MaterialKind::classify(Rgb::new(132, 104, 66)),
+            MaterialKind::Earth,
+            "bright sand should use earth glyph language"
+        );
+        assert_eq!(
+            MaterialKind::classify(Rgb::new(92, 58, 38)),
+            MaterialKind::Bark,
+            "dark red-brown timber should keep bark glyph language"
+        );
     }
 
     #[test]
@@ -1333,6 +1875,67 @@ mod tests {
     }
 
     #[test]
+    fn resolved_geometry_keeps_the_world_background_black() {
+        let mut mesh = Mesh::cube(2.0, Rgb::new(32, 112, 52));
+        for tri in &mut mesh.tris {
+            for v in &mut tri.v {
+                *v = Vec3::new(v.x, v.y + 1.4, v.z + 2.0);
+            }
+        }
+        let layer = render_layer(
+            &[mesh],
+            &test_cam(),
+            Vec3::new(-0.35, 0.55, -0.75),
+            &DepthOpts::default(),
+            0,
+        );
+        assert!(!layer.cells.is_empty());
+        assert!(layer
+            .cells
+            .iter()
+            .all(|cell| cell.cell.bg == Rgb::new(0, 0, 0)));
+    }
+
+    #[test]
+    fn point_light_changes_visible_ink_without_a_background_halo() {
+        let mut mesh = Mesh::cube(2.0, Rgb::new(52, 78, 48));
+        for tri in &mut mesh.tris {
+            for v in &mut tri.v {
+                *v = Vec3::new(v.x, v.y + 1.4, v.z + 2.0);
+            }
+        }
+        let cam = test_cam();
+        let sun = Vec3::new(-0.35, 0.55, -0.75);
+        let opts = DepthOpts::default();
+        let plain = render_layer(&[mesh.clone()], &cam, sun, &opts, 0);
+        let lit = render_layer_with_lights(
+            &[mesh],
+            &cam,
+            sun,
+            &opts,
+            &[PointLight::new(
+                Vec3::new(0.0, 2.0, 2.0),
+                Rgb::new(255, 130, 40),
+                6.0,
+                1.0,
+            )],
+            0,
+        );
+        let plain_center = plain
+            .cells
+            .iter()
+            .find(|cell| cell.x == 48 && cell.y == 17)
+            .expect("plain center");
+        let lit_center = lit
+            .cells
+            .iter()
+            .find(|cell| cell.x == 48 && cell.y == 17)
+            .expect("lit center");
+        assert_ne!(plain_center.cell.fg, lit_center.cell.fg);
+        assert_eq!(lit_center.cell.bg, Rgb::new(0, 0, 0));
+    }
+
+    #[test]
     fn distant_geometry_fogs_dimmer() {
         // Same lit cube near vs far: the far center cell must sit lower on
         // the ramp (fog), proving depth cueing is monotonic.
@@ -1354,14 +1957,20 @@ mod tests {
                 .cells
                 .iter()
                 .find(|c| c.x == 48 && c.y == 17)
-                .map(|c| c.cell.glyph)
+                .map(|c| {
+                    (
+                        c.cell.glyph,
+                        f32::from(c.cell.fg.r) * 0.2126
+                            + f32::from(c.cell.fg.g) * 0.7152
+                            + f32::from(c.cell.fg.b) * 0.0722,
+                    )
+                })
         };
-        let ramp_pos = |g: char| RAMP.iter().position(|&c| c == g as u8).unwrap_or(0);
-        let near_glyph = render_center(0.0).expect("near cube covers center");
-        let far_glyph = render_center(20.0).expect("far cube still covers center");
+        let (near_glyph, near_luma) = render_center(0.0).expect("near cube covers center");
+        let (far_glyph, far_luma) = render_center(20.0).expect("far cube still covers center");
         assert!(
-            ramp_pos(far_glyph) < ramp_pos(near_glyph),
-            "far '{far_glyph}' must be dimmer than near '{near_glyph}'"
+            far_luma < near_luma,
+            "far '{far_glyph}' ({far_luma:.1}) must be dimmer than near '{near_glyph}' ({near_luma:.1})"
         );
     }
 

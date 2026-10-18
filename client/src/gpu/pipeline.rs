@@ -904,10 +904,13 @@ impl GpuPipeline {
                         view: &self.color_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
+                            // The terminal world's empty sample is a pure
+                            // black void; environmental colour is recovered
+                            // from glyph foregrounds in the ASCII pass.
                             load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.05,
-                                g: 0.06,
-                                b: 0.09,
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.0,
                                 a: 1.0,
                             }),
                             store: wgpu::StoreOp::Store,

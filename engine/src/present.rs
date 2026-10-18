@@ -813,11 +813,12 @@ impl App {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            // Void must read darkest: below vignetted ground
-                            // so empty blocks sink instead of glowing.
-                            r: 0.005,
-                            g: 0.006,
-                            b: 0.012,
+                            // The world viewport is a real black void. Every
+                            // environmental colour arrives from a glyph's
+                            // foreground alpha, never from the clear colour.
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -1019,9 +1020,10 @@ fn frame_band(
             }
             let xi = x as i32;
             let yi = y as i32;
-            let in_world = world
-                .iter()
-                .any(|&(px, py, pw, ph)| xi >= px && xi < px + pw && yi >= py && yi < py + ph);
+            let in_world = frame.is_world(xi, yi)
+                || world
+                    .iter()
+                    .any(|&(px, py, pw, ph)| xi >= px && xi < px + pw && yi >= py && yi < py + ph);
             let bold = if cell.bold { 1.25 } else { 1.0 };
             let f = |c: u8| ((f32::from(c) / 255.0) * bold).min(1.0);
             out.push(GlyphInstance {
@@ -1030,11 +1032,15 @@ fn frame_band(
                 glyph: atlas::slot(cell.glyph),
                 fg_start: [f(cell.fg.r), f(cell.fg.g), f(cell.fg.b)],
                 fg_end: [f(cell.fg_end.r), f(cell.fg_end.g), f(cell.fg_end.b)],
-                bg: [
-                    f32::from(cell.bg.r) / 255.0,
-                    f32::from(cell.bg.g) / 255.0,
-                    f32::from(cell.bg.b) / 255.0,
-                ],
+                bg: if in_world {
+                    [0.0, 0.0, 0.0]
+                } else {
+                    [
+                        f32::from(cell.bg.r) / 255.0,
+                        f32::from(cell.bg.g) / 255.0,
+                        f32::from(cell.bg.b) / 255.0,
+                    ]
+                },
                 fg_gradient_axis: match cell.fg_gradient {
                     None => 0,
                     Some(super::Axis::X) => 1,
@@ -1130,6 +1136,7 @@ struct VOut {
     @location(3) fg_end: vec3<f32>,
     @location(4) bg: vec3<f32>,
     @interpolate(flat) @location(5) gradient_axis: u32,
+    @interpolate(flat) @location(6) world: u32,
 };
 
 @vertex
@@ -1167,6 +1174,7 @@ fn vs(@builtin(vertex_index) vi: u32,
     o.fg_end = fg_end;
     o.bg = bg;
     o.gradient_axis = gradient_axis;
+    o.world = world;
     return o;
 }
 
@@ -1177,7 +1185,9 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {
     let blend = select(0.0, position, i.gradient_axis != 0u);
     let fg = mix(i.fg_start, i.fg_end, blend);
     let col = mix(i.bg, fg, a);
-    return vec4<f32>(mix(col, u.wash_rgb, u.wash_strength), 1.0);
+    let washed = mix(col, u.wash_rgb, u.wash_strength);
+    let final_col = select(washed, col, i.world != 0u);
+    return vec4<f32>(final_col, 1.0);
 }
 "#;
 
@@ -1535,11 +1545,13 @@ mod tests {
     fn world_flag_marks_camera_rects_only() {
         let mut frame = Frame::blank(4, 1);
         for cell in frame.cells.iter_mut() {
-            *cell = Cell::new('x', Rgb::new(1, 1, 1), Rgb::new(0, 0, 0));
+            *cell = Cell::new('x', Rgb::new(1, 1, 1), Rgb::new(80, 40, 20));
         }
         let instances = frame_instances(&frame, 4, 1, &[(1, 0, 2, 1)]);
         let flags: Vec<u32> = instances.iter().map(|i| i.world).collect();
         assert_eq!(flags, vec![0, 1, 1, 0]);
+        assert_eq!(instances[1].bg, [0.0, 0.0, 0.0]);
+        assert_eq!(instances[0].bg, [80.0 / 255.0, 40.0 / 255.0, 20.0 / 255.0]);
     }
 
     #[test]

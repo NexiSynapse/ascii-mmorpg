@@ -175,7 +175,7 @@ impl SceneCell {
     pub fn blank() -> Self {
         Self {
             glyph: ' ',
-            fg: (12, 15, 22),
+            fg: (0, 0, 0),
             bg: None,
         }
     }

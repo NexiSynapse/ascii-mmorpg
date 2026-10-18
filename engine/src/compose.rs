@@ -8,6 +8,11 @@ pub struct Frame {
     pub w: i32,
     pub h: i32,
     pub cells: Vec<Cell>,
+    /// Cells contributed by a camera/world partition. World cells are kept
+    /// separate from pinned interface cells so the presenter can enforce the
+    /// renderer contract: the world has a pure black void and only glyph
+    /// foregrounds carry environmental colour.
+    world_cells: Vec<bool>,
 }
 
 impl Frame {
@@ -16,6 +21,7 @@ impl Frame {
             w,
             h,
             cells: vec![Cell::CLEAR; w.max(0) as usize * h.max(0) as usize],
+            world_cells: vec![false; w.max(0) as usize * h.max(0) as usize],
         }
     }
 
@@ -27,10 +33,25 @@ impl Frame {
     }
 
     fn set(&mut self, x: i32, y: i32, cell: Cell) {
+        self.set_partition_cell(x, y, cell, false);
+    }
+
+    fn set_partition_cell(&mut self, x: i32, y: i32, cell: Cell, world: bool) {
         if x < 0 || y < 0 || x >= self.w || y >= self.h {
             return;
         }
-        self.cells[(y * self.w + x) as usize] = cell;
+        let index = (y * self.w + x) as usize;
+        self.cells[index] = cell;
+        self.world_cells[index] = world;
+    }
+
+    /// Whether a composed cell belongs to the camera/world viewport rather
+    /// than a pinned HUD or modal partition.
+    pub fn is_world(&self, x: i32, y: i32) -> bool {
+        if x < 0 || y < 0 || x >= self.w || y >= self.h {
+            return false;
+        }
+        self.world_cells[(y * self.w + x) as usize]
     }
 
     /// Plain glyph rows (for tests and headless previews; presenter adds color).
@@ -98,7 +119,7 @@ pub fn compose(scene: &Scene, camera: &Camera, t: f32) -> Frame {
                         }
                         let mut resolved = cell.cell;
                         resolved.fg = flat;
-                        frame.set(x, y, resolved);
+                        frame.set_partition_cell(x, y, resolved, partition.camera);
                         continue;
                     }
                 }
@@ -119,13 +140,21 @@ pub fn compose(scene: &Scene, camera: &Camera, t: f32) -> Frame {
                     (cell.x as f32 + s.dx as f32, cell.y as f32 + s.dy as f32),
                 );
                 resolved.fg = resolved.fg.scaled(s.bright);
-                frame.set(x, y, resolved);
+                frame.set_partition_cell(x, y, resolved, partition.camera);
             }
         }
     }
     apply_glow(&mut frame);
     if let Some(wash) = scene.wash {
         apply_wash(&mut frame, wash);
+    }
+    // Final world contract: camera partitions are foreground-only. This is
+    // repeated after glow/wash so a legacy world layer cannot smuggle a
+    // coloured fill back into the viewport between composition and display.
+    for (cell, &is_world) in frame.cells.iter_mut().zip(&frame.world_cells) {
+        if is_world {
+            cell.bg = Rgb::new(0, 0, 0);
+        }
     }
     frame
 }
@@ -141,7 +170,7 @@ fn apply_wash(frame: &mut Frame, wash: Wash) {
     for y in 0..frame.h {
         for x in 0..frame.w {
             if let Some(mut cell) = frame.get(x, y) {
-                if cell.transparent {
+                if cell.transparent || frame.is_world(x, y) {
                     continue;
                 }
                 let warm = |bg: u8, tint: u8| {
@@ -191,6 +220,12 @@ fn apply_glow(frame: &mut Frame) {
         .collect();
     for (sx, sy, mut source) in sources {
         source.glow = source.glow.min(8.0);
+        let source_index = (sy * w + sx) as usize;
+        let source_is_world = frame
+            .world_cells
+            .get(source_index)
+            .copied()
+            .unwrap_or(false);
         let radius = (source.glow * GLOW_RADIUS_PER_UNIT).ceil() as i32;
         for dy in -radius..=radius {
             for dx in -radius..=radius {
@@ -207,14 +242,28 @@ fn apply_glow(frame: &mut Frame) {
                 if tx < 0 || ty < 0 || tx >= w || ty >= h {
                     continue;
                 }
-                let target = &mut frame.cells[(ty * w + tx) as usize];
-                let wash =
-                    |bg: u8, fg: u8| (f32::from(bg) + fall * f32::from(fg)).clamp(0.0, 255.0) as u8;
-                target.bg = Rgb::new(
-                    wash(target.bg.r, source.fg.r),
-                    wash(target.bg.g, source.fg.g),
-                    wash(target.bg.b, source.fg.b),
-                );
+                let target_index = (ty * w + tx) as usize;
+                let target = &mut frame.cells[target_index];
+                let target_is_world = frame.world_cells[target_index];
+                if target_is_world {
+                    // World light is ink-only: brighten/tint an existing
+                    // visible glyph, but never paint a halo into an empty
+                    // space cell. This is the character-cell equivalent of a
+                    // light buffer with no coloured framebuffer background.
+                    if source_is_world && target.glyph != ' ' {
+                        let tint = (fall * 0.48).clamp(0.0, 0.48);
+                        target.fg = target.fg.lerp(source.fg, tint).scaled(1.0 + fall * 0.55);
+                    }
+                } else if !source_is_world {
+                    let wash = |bg: u8, fg: u8| {
+                        (f32::from(bg) + fall * f32::from(fg)).clamp(0.0, 255.0) as u8
+                    };
+                    target.bg = Rgb::new(
+                        wash(target.bg.r, source.fg.r),
+                        wash(target.bg.g, source.fg.g),
+                        wash(target.bg.b, source.fg.b),
+                    );
+                }
             }
         }
     }
@@ -282,6 +331,31 @@ mod tests {
         // World cell (5,2) appears at the view origin; the hud shows it raw.
         assert_eq!(frame.get(0, 0).unwrap().glyph, 'T');
         assert_eq!(frame.get(13, 2).unwrap().glyph, 'T');
+    }
+
+    #[test]
+    fn world_partition_forces_black_cell_backgrounds() {
+        let mut scene = Scene::default();
+        let mut world = Layer::new("world", 0);
+        world.push(AnimCell::still(
+            0,
+            0,
+            Cell::new('@', Rgb::new(120, 220, 140), Rgb::new(80, 40, 20)).with_glow(1.0),
+        ));
+        scene.layers.push(world);
+        scene
+            .partitions
+            .push(Partition::new("world", 0, 0, 3, 1, vec![0], true));
+        scene.wash = Some(Wash {
+            tint: Rgb::new(255, 120, 20),
+            strength: 1.0,
+        });
+
+        let frame = compose(&scene, &Camera::default(), 0.0);
+        let cell = frame.get(0, 0).expect("world cell");
+        assert!(frame.is_world(0, 0));
+        assert_eq!(cell.bg, Rgb::new(0, 0, 0));
+        assert_ne!(cell.fg, Rgb::new(0, 0, 0));
     }
 
     #[test]

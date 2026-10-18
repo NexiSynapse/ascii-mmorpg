@@ -10,7 +10,10 @@ impl Default for TerminalColors {
     fn default() -> Self {
         Self {
             fg: (208, 208, 208),
-            bg: (16, 16, 24),
+            // Empty terminal cells are part of the world void and therefore
+            // reset to pure black. HUD panels provide their own explicit
+            // backgrounds where intentional interface styling is needed.
+            bg: (0, 0, 0),
         }
     }
 }

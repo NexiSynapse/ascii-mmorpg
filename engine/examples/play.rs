@@ -39,7 +39,7 @@ fn real_main() -> Result<(), String> {
     use ascii_mmorpg_engine::motion::{smooth_angle, KinematicMotion};
     use ascii_mmorpg_engine::present::{PointerEvent, PresentOptions, SceneSource};
     use ascii_mmorpg_engine::raster::{
-        self, Camera3, DepthOpts, HumanoidPose, Mesh, Transform, Vec3,
+        self, Camera3, DepthOpts, HumanoidPose, Mesh, PointLight, Transform, Vec3,
     };
     use ascii_mmorpg_engine::{
         bridge, overlay::TextRun, Camera, Cell, Layer, Partition, Rgb, Scene,
@@ -87,23 +87,56 @@ fn real_main() -> Result<(), String> {
     const HUD_DIM: Rgb = Rgb::new(164, 180, 202);
     const HP_FILL: Rgb = Rgb::new(220, 60, 50);
     const HP_EMPTY: Rgb = Rgb::new(90, 30, 26);
-    const LABEL_BG: Rgb = Rgb::new(10, 10, 14);
+    const LABEL_BG: Rgb = Rgb::new(0, 0, 0);
     const DIGIT_GOLD: Rgb = Rgb::new(255, 230, 160);
     const TARGET_ORANGE: Rgb = Rgb::new(255, 170, 58);
 
-    // Meadow palette: dim saturated greens so actors/light FX pop (quiet-
-    // carpet contract from the video study, factored for the 3D zones).
-    const MEADOW: [Rgb; 4] = [
-        Rgb::new(30, 72, 42),
-        Rgb::new(24, 60, 36),
-        Rgb::new(38, 88, 50),
-        Rgb::new(22, 54, 34),
-    ];
+    /// Centralized foreground-only world palette. These colours are albedos
+    /// for visible geometry and are resolved into glyph foregrounds by the
+    /// depth rasterizer; none of them is used as a world-cell background.
+    #[derive(Clone, Copy)]
+    struct WorldPalette {
+        foliage_shadow: Rgb,
+        foliage: Rgb,
+        foliage_moon: Rgb,
+        bark: Rgb,
+        root: Rgb,
+        path: Rgb,
+        path_edge: Rgb,
+        grass: Rgb,
+        stone: Rgb,
+        stone_light: Rgb,
+        water: Rgb,
+        sand: Rgb,
+        fire: Rgb,
+        ember: Rgb,
+        magic: Rgb,
+        shadow: Rgb,
+    }
+
+    const WORLD: WorldPalette = WorldPalette {
+        foliage_shadow: Rgb::new(28, 72, 44),
+        foliage: Rgb::new(44, 108, 58),
+        foliage_moon: Rgb::new(86, 156, 112),
+        bark: Rgb::new(92, 58, 38),
+        root: Rgb::new(62, 44, 34),
+        path: Rgb::new(74, 76, 82),
+        path_edge: Rgb::new(142, 116, 72),
+        grass: Rgb::new(54, 112, 60),
+        stone: Rgb::new(78, 88, 108),
+        stone_light: Rgb::new(132, 144, 158),
+        water: Rgb::new(38, 92, 128),
+        sand: Rgb::new(132, 104, 66),
+        fire: Rgb::new(255, 148, 48),
+        ember: Rgb::new(255, 196, 76),
+        magic: Rgb::new(154, 92, 220),
+        shadow: Rgb::new(12, 18, 22),
+    };
 
     /// Deterministic scenery list (hand-placed so the highway corridor and
-    /// the demo spawn area stay walkable; `quad_y`/`boxed` scenes rebuild
-    /// these every frame — no mesh cache needed at this scale).
-    fn tree_spots() -> [(f32, f32); 9] {
+    /// the demo spawn area stay walkable; the small glyph meshes rebuild every
+    /// frame — no mesh cache is needed at this scale).
+    fn tree_spots() -> [(f32, f32); 15] {
         [
             (12.0, 6.0),
             (-9.0, 9.0),
@@ -114,7 +147,19 @@ fn real_main() -> Result<(), String> {
             (-22.0, 18.0),
             (16.0, 26.0),
             (-5.0, 24.0),
+            (-26.0, 4.0),
+            (28.0, 8.0),
+            (-24.0, -8.0),
+            (29.0, -15.0),
+            (12.0, 32.0),
+            (-19.0, 31.0),
         ]
+    }
+
+    fn scene_hash(x: i32, y: i32) -> u32 {
+        let mut h = (x as u32).wrapping_mul(374_761_393) ^ (y as u32).wrapping_mul(668_265_263);
+        h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
+        h ^ (h >> 16)
     }
 
     /// Current zone label for the HUD (first "Zone: " message).
@@ -484,62 +529,130 @@ fn real_main() -> Result<(), String> {
                 dt,
             );
 
-            // Ground: 14-unit zone blocks in a window around the player.
-            // Much cheaper than per-cell work and reads the same at this
-            // pull-back distance.
-            const BLOCK: f32 = 14.0;
-            const RADIUS: i32 = 4; // blocks either side of the player
-            let px = (player.0 / BLOCK).round();
-            let pz = (player.1 / BLOCK).round();
-            for bx in (px - RADIUS as f32) as i32..=(px + RADIUS as f32) as i32 {
-                for bz in (pz - RADIUS as f32) as i32..=(pz + RADIUS as f32) as i32 {
-                    // Tiny integer hash for zone variety (unsigned fold).
-                    let mix = (bx + 64) * 7 + (bz + 64) * 13 + ((bx * bz) & 3);
-                    let albedo = MEADOW[mix.unsigned_abs() as usize % MEADOW.len()];
-                    meshes.push(Mesh::quad_y(
-                        Vec3::new(bx as f32 * BLOCK, 0.0, bz as f32 * BLOCK),
-                        BLOCK / 2.0,
-                        BLOCK / 2.0,
-                        albedo,
+            // The world has no coloured floor, skybox, fog card, or terrain
+            // fill. Selective decals and small solids describe the path,
+            // shoreline, grass, and stones; every other viewport cell is the
+            // presenter's exact black clear colour.
+            for z in -30..=30 {
+                if z % 2 != 0 {
+                    continue;
+                }
+                let skip = scene_hash(z, z + 17) % 5 == 0;
+                if !skip {
+                    for side in [-1.0f32, 1.0] {
+                        let x = side * (3.1 + (scene_hash(z, 4) % 3) as f32 * 0.12);
+                        meshes.push(Mesh::decal_y(
+                            Vec3::new(x, 0.018, z as f32),
+                            0.0,
+                            0.48,
+                            0.055,
+                            WORLD.path_edge,
+                        ));
+                    }
+                }
+                if z % 6 == 0 {
+                    meshes.push(Mesh::decal_y(
+                        Vec3::new(-1.0 + (scene_hash(z, 8) % 3) as f32, 0.02, z as f32 + 0.5),
+                        0.0,
+                        0.34,
+                        0.09,
+                        WORLD.path,
+                    ));
+                }
+                if z % 4 == 0 {
+                    for (offset, yaw) in [(-1.65, 0.12), (1.55, -0.15)] {
+                        meshes.push(Mesh::decal_y(
+                            Vec3::new(offset, 0.021, z as f32 + 0.72),
+                            yaw,
+                            0.24,
+                            0.07,
+                            WORLD.path,
+                        ));
+                    }
+                }
+            }
+            // A deterministic terrain weave keeps the meadow legible at
+            // wide zoom without reverting to a solid floor. The repeated
+            // 2-cell motif alternates direction by row, skips the highway
+            // corridor, and leaves generous black negative space between
+            // ink marks.
+            for gz in (-28i32..=30).step_by(2) {
+                let row = (gz + 28) / 2;
+                for gx in (-24i32..=24).step_by(2) {
+                    let column = (gx + 24) / 2;
+                    let motif = (column + row * 3).rem_euclid(7);
+                    if motif > 1 || (gx.abs() <= 4 && row % 3 != 0) {
+                        continue;
+                    }
+                    let yaw = if (row + column) % 2 == 0 { 0.24 } else { -0.24 };
+                    let color = if gx.abs() <= 4 {
+                        WORLD.path
+                    } else if motif == 0 {
+                        WORLD.grass
+                    } else {
+                        WORLD.foliage_shadow
+                    };
+                    meshes.push(Mesh::decal_y(
+                        Vec3::new(gx as f32 + (row % 2) as f32 * 0.18, 0.020, gz as f32 + 0.18),
+                        yaw,
+                        0.30,
+                        0.065,
+                        color,
                     ));
                 }
             }
-            // A stable road ribbon gives the meadow a readable landmark and
-            // makes movement direction legible from the orbit camera.  It is
-            // deliberately a separate, slightly raised surface so the quiet
-            // meadow remains the dominant material rather than a checkerboard.
-            meshes.push(Mesh::quad_y(
-                Vec3::new(0.0, 0.035, -0.5),
-                3.0,
-                35.5,
-                Rgb::new(46, 50, 62),
-            ));
-            meshes.push(Mesh::quad_y(
-                Vec3::new(-3.35, 0.045, -0.5),
-                0.16,
-                35.5,
-                Rgb::new(112, 92, 61),
-            ));
-            meshes.push(Mesh::quad_y(
-                Vec3::new(3.35, 0.045, -0.5),
-                0.16,
-                35.5,
-                Rgb::new(112, 92, 61),
-            ));
-            // Southern ocean + dry-then-wet sand beach south of the world
-            // bound (35): same quiet sea language as the TUI, flat sheets.
-            meshes.push(Mesh::quad_y(
-                Vec3::new(0.0, -0.12, 47.0),
-                160.0,
-                8.0,
-                Rgb::new(62, 54, 40), // sand 39..55
-            ));
-            meshes.push(Mesh::quad_y(
-                Vec3::new(0.0, -0.2, 87.0),
-                160.0,
-                32.0,
-                Rgb::new(10, 30, 48), // open water 55..119
-            ));
+            // Dry shoreline and sparse wave crests remain readable as ink,
+            // not as beach/water rectangles.
+            for row in 0..8 {
+                let z = 36.0 + row as f32 * 2.8;
+                let color = if row < 2 { WORLD.sand } else { WORLD.water };
+                for segment in -7..=7 {
+                    if scene_hash(segment, row + 40) % 3 == 0 {
+                        continue;
+                    }
+                    meshes.push(Mesh::decal_y(
+                        Vec3::new(segment as f32 * 2.6, 0.01, z),
+                        0.0,
+                        0.65 + row as f32 * 0.05,
+                        0.045,
+                        color,
+                    ));
+                }
+            }
+            // Sparse grass tufts are intentional detail, not a per-cell
+            // carpet. Hashing keeps their positions stable while the player
+            // moves and preserves a quiet black surround.
+            for i in 0..72i32 {
+                let x = (scene_hash(i, 91) % 28) as f32 - 14.0;
+                let z = (scene_hash(i, 137) % 34) as f32 - 17.0;
+                if x.abs() < 4.4 || z.abs() > 29.0 {
+                    continue;
+                }
+                meshes.push(Mesh::decal_y(
+                    Vec3::new(x, 0.022, z),
+                    if scene_hash(i, 211) & 1 == 0 {
+                        0.18
+                    } else {
+                        -0.18
+                    },
+                    0.24,
+                    0.045,
+                    WORLD.grass,
+                ));
+                if scene_hash(i, 313) & 1 == 0 {
+                    meshes.push(Mesh::decal_y(
+                        Vec3::new(x + 0.08, 0.024, z + 0.05),
+                        if scene_hash(i, 317) & 1 == 0 {
+                            0.72
+                        } else {
+                            -0.72
+                        },
+                        0.18,
+                        0.035,
+                        WORLD.foliage_moon,
+                    ));
+                }
+            }
 
             // Trees (trunk + canopy), off the road corridor.
             for (i, (tx, tz)) in tree_spots().into_iter().enumerate() {
@@ -547,21 +660,124 @@ fn real_main() -> Result<(), String> {
                 meshes.push(Mesh::boxed(
                     Vec3::new(tx, h / 2.0, tz),
                     Vec3::new(0.35, h, 0.35),
-                    Rgb::new(106, 72, 42),
+                    WORLD.bark,
+                ));
+                meshes.push(Mesh::boxed(
+                    Vec3::new(tx, 0.16, tz),
+                    Vec3::new(1.15, 0.32, 1.15),
+                    WORLD.root,
+                ));
+                meshes.push(Mesh::boxed(
+                    Vec3::new(tx + if i % 2 == 0 { 0.34 } else { -0.34 }, h - 0.28, tz),
+                    Vec3::new(1.25, 0.13, 0.16),
+                    WORLD.bark,
+                ));
+                meshes.push(Mesh::boxed(
+                    Vec3::new(tx, h + 0.18, tz + if i % 2 == 0 { 0.26 } else { -0.26 }),
+                    Vec3::new(0.16, 0.12, 1.05),
+                    WORLD.bark,
                 ));
                 meshes.push(Mesh::cone(
                     Vec3::new(tx, h - 0.05, tz),
                     1.45,
                     2.5,
                     8,
-                    Rgb::new(38, 92, 52),
+                    if i % 3 == 0 {
+                        WORLD.foliage_shadow
+                    } else {
+                        WORLD.foliage
+                    },
                 ));
                 meshes.push(Mesh::cone(
                     Vec3::new(tx, h + 0.95, tz),
                     1.05,
                     1.8,
                     8,
-                    Rgb::new(52, 116, 62),
+                    WORLD.foliage_moon,
+                ));
+                meshes.push(Mesh::cone(
+                    Vec3::new(tx, h + 1.72, tz + if i % 2 == 0 { -0.10 } else { 0.10 }),
+                    0.62,
+                    1.05,
+                    7,
+                    WORLD.foliage_shadow,
+                ));
+                for root in 0..3 {
+                    let angle = (root as f32 + i as f32 * 0.35) * std::f32::consts::TAU / 3.0;
+                    meshes.push(Mesh::decal_y(
+                        Vec3::new(tx + angle.sin() * 0.34, 0.026, tz + angle.cos() * 0.34),
+                        angle,
+                        0.34,
+                        0.045,
+                        WORLD.root,
+                    ));
+                }
+            }
+
+            // Torches are visible glyph geometry and their light is applied to
+            // nearby visible faces in the raster pass. There is deliberately
+            // no circular pool mesh underneath them.
+            for (tx, tz) in [(-7.5, -3.5), (8.5, 4.0), (-4.5, 1.5)] {
+                meshes.push(Mesh::boxed(
+                    Vec3::new(tx, 0.95, tz),
+                    Vec3::new(0.16, 1.9, 0.16),
+                    WORLD.bark,
+                ));
+                meshes.push(Mesh::boxed(
+                    Vec3::new(tx, 1.88, tz),
+                    Vec3::new(0.34, 0.22, 0.34),
+                    WORLD.ember,
+                ));
+                meshes.push(Mesh::cone(
+                    Vec3::new(tx, 1.92, tz),
+                    0.28,
+                    0.62,
+                    7,
+                    WORLD.fire,
+                ));
+            }
+
+            // One ancient stone gate gives the forest a memorable destination
+            // silhouette and a cool counterpoint to the warm torches.
+            for x in [-10.5, -7.5] {
+                meshes.push(Mesh::boxed(
+                    Vec3::new(x, 1.55, -9.5),
+                    Vec3::new(0.85, 3.1, 0.85),
+                    WORLD.stone,
+                ));
+                meshes.push(Mesh::boxed(
+                    Vec3::new(x, 3.12, -9.5),
+                    Vec3::new(1.1, 0.26, 1.0),
+                    WORLD.stone_light,
+                ));
+                meshes.push(Mesh::boxed(
+                    Vec3::new(x + if x < -9.0 { 0.38 } else { -0.38 }, 2.55, -9.15),
+                    Vec3::new(0.08, 0.92, 0.62),
+                    Rgb::new(124, 38, 54),
+                ));
+            }
+            meshes.push(Mesh::boxed(
+                Vec3::new(-9.0, 3.02, -9.5),
+                Vec3::new(3.2, 0.44, 0.86),
+                WORLD.stone,
+            ));
+            for x in [-9.0, -8.55] {
+                meshes.push(Mesh::boxed(
+                    Vec3::new(x, 0.22, -8.72),
+                    Vec3::new(0.16, 0.44, 0.16),
+                    WORLD.magic,
+                ));
+            }
+            meshes.push(Mesh::boxed(
+                Vec3::new(-9.0, 3.43, -9.5),
+                Vec3::new(0.46, 0.20, 0.92),
+                WORLD.stone_light,
+            ));
+            for (x, z, scale) in [(-11.3, -8.9, 0.7), (-7.0, -8.8, 0.55), (-10.9, -10.1, 0.45)] {
+                meshes.push(Mesh::boxed(
+                    Vec3::new(x, 0.18 * scale, z),
+                    Vec3::new(0.72 * scale, 0.36 * scale, 0.55 * scale),
+                    WORLD.stone,
                 ));
             }
 
@@ -593,17 +809,6 @@ fn real_main() -> Result<(), String> {
                 ));
             }
 
-            // Readable environmental anchors: broad, low-contrast clearings
-            // break up the meadow without reverting to a dotted tile carpet.
-            for (x, z, sx, sz, color) in [
-                (-6.0, 4.0, 3.8, 2.4, Rgb::new(42, 86, 46)),
-                (7.0, 6.5, 3.2, 2.0, Rgb::new(50, 76, 42)),
-                (-8.5, -7.0, 2.8, 2.2, Rgb::new(46, 66, 44)),
-                (8.0, -9.0, 3.6, 2.5, Rgb::new(38, 76, 46)),
-            ] {
-                meshes.push(Mesh::quad_y(Vec3::new(x, 0.018, z), sx, sz, color));
-            }
-
             // Near-field stone clusters provide scale and a clear foreground
             // silhouette. They stay low so the player and nameplates remain
             // the primary read.
@@ -616,12 +821,12 @@ fn real_main() -> Result<(), String> {
                 meshes.push(Mesh::boxed(
                     Vec3::new(x, 0.22 * scale, z),
                     Vec3::new(0.9 * scale, 0.44 * scale, 0.72 * scale),
-                    Rgb::new(82, 92, 104),
+                    WORLD.stone,
                 ));
                 meshes.push(Mesh::boxed(
                     Vec3::new(x - 0.18 * scale, 0.48 * scale, z + 0.12 * scale),
                     Vec3::new(0.45 * scale, 0.18 * scale, 0.38 * scale),
-                    Rgb::new(112, 122, 132),
+                    WORLD.stone_light,
                 ));
             }
 
@@ -639,13 +844,13 @@ fn real_main() -> Result<(), String> {
                     },
                 )
             };
-            let player_scale = 0.96;
+            let player_scale = 1.15;
             meshes.push(Mesh::decal_y(
                 Vec3::new(player.0, 0.018, player.1),
                 facing,
                 0.82,
                 0.30,
-                Rgb::new(14, 20, 26),
+                WORLD.shadow,
             ));
             meshes.push(place(
                 Mesh::humanoid_pose(HumanoidPose::new(self.gait_phase, attack_phase, t * 1.7)),
@@ -679,10 +884,10 @@ fn real_main() -> Result<(), String> {
                     EntityKind::Item => continue,
                 };
                 let scale = match entity.kind {
-                    EntityKind::Npc => 0.96,
-                    EntityKind::Monster if label.contains("skeleton") => 0.95,
-                    EntityKind::Monster => 1.02,
-                    EntityKind::Player => 0.96,
+                    EntityKind::Npc => 1.05,
+                    EntityKind::Monster if label.contains("skeleton") => 1.08,
+                    EntityKind::Monster => 1.12,
+                    EntityKind::Player => 1.15,
                     EntityKind::Item => 1.0,
                 };
                 meshes.push(Mesh::decal_y(
@@ -694,7 +899,7 @@ fn real_main() -> Result<(), String> {
                         0.68
                     },
                     0.26,
-                    Rgb::new(14, 20, 26),
+                    WORLD.shadow,
                 ));
                 meshes.push(place(actor, gx, gy, facing, scale));
             }
@@ -842,18 +1047,11 @@ fn real_main() -> Result<(), String> {
             let mut hud = Layer::new("hud", 0);
             hud.fill_rect(0, 0, w, HUD_H, Cell::new(' ', HUD_TEXT, PANEL_BG));
             hud.border_rect(0, 0, w, HUD_H, PANEL_EDGE, PANEL_BG);
-            let zone_line = format!(
-                "{}  HP {}/{}  Tick {}",
-                scene_zone(&snapshot),
-                snapshot.player.stats.hp,
-                snapshot.player.stats.max_hp,
-                snapshot.tick
-            );
-            hud.push_text(2, 5, &zone_line, HUD_DIM, PANEL_BG);
+            hud.push_text(2, 5, "MOONLIT WILDERNESS  |  SAFE PATH", HUD_DIM, PANEL_BG);
             hud.push_text(
                 2,
-                4,
-                "WASD move   F attack   1-3 cast   I inventory   R rest   Right-drag orbit   Wheel zoom   Q quit",
+                3,
+                "WASD Move   F Attack   1-3 Cast   I Inventory   R Rest   RMB Orbit   Wheel Zoom   Q Quit",
                 HUD_DIM,
                 PANEL_BG,
             );
@@ -874,7 +1072,7 @@ fn real_main() -> Result<(), String> {
             let hud_idx = scene.layers.len();
             scene.layers.push(hud);
             scene.overlay_text.push(TextRun {
-                x: 12.0,
+                x: 15.0,
                 y: 0.35,
                 text: "WHISPERING FOREST".into(),
                 size: 1.35,
@@ -882,7 +1080,7 @@ fn real_main() -> Result<(), String> {
                 bg: [0.02, 0.03, 0.06],
             });
             scene.overlay_text.push(TextRun {
-                x: 12.0,
+                x: 15.0,
                 y: 1.8,
                 text: format!(
                     "{}   HP {}/{}   TICK {}",
@@ -903,11 +1101,35 @@ fn real_main() -> Result<(), String> {
                 far: 64.0,
                 ambient: 0.46,
                 edge_step: 0.48,
+                moon_tint: Rgb::new(178, 198, 238),
+                moonlight_strength: 0.22,
             };
+            let mut lights = vec![
+                PointLight::new(Vec3::new(-7.5, 1.8, -3.5), WORLD.fire, 5.0, 1.15),
+                PointLight::new(Vec3::new(8.5, 1.8, 4.0), WORLD.fire, 5.0, 1.15),
+                PointLight::new(Vec3::new(-4.5, 1.8, 1.5), WORLD.fire, 4.5, 1.0),
+            ];
+            for fx in &self.combat_fx {
+                let age = t - fx.born_s;
+                if age >= 0.0 && age < fx.telegraph_s + bridge::FX_BURST_S {
+                    lights.push(PointLight::new(
+                        Vec3::new(fx.origin.0, 0.9, fx.origin.1),
+                        fx.color,
+                        fx.radius.max(1.5) * 1.7,
+                        0.75,
+                    ));
+                }
+            }
             // Sun tilts out of the south-west so actor verticals stay lit
-            // while ground zones keep their dark meadow tone.
-            let terrain =
-                raster::render_layer(&meshes, &camera, Vec3::new(0.55, 0.85, 0.3), &opts, 0);
+            // while selective ground glyphs keep their dark meadow tone.
+            let terrain = raster::render_layer_with_lights(
+                &meshes,
+                &camera,
+                Vec3::new(0.55, 0.85, 0.3),
+                &opts,
+                &lights,
+                0,
+            );
             let terrain_idx = scene.layers.len();
             scene.layers.push(terrain);
 
@@ -928,10 +1150,10 @@ fn real_main() -> Result<(), String> {
                     .unwrap_or(&(entity.position.x as f32, entity.position.y as f32));
                 let entity_label = entity.name.to_ascii_lowercase();
                 let head_y = match entity.kind {
-                    EntityKind::Monster if entity_label.contains("skeleton") => 2.35,
-                    EntityKind::Monster => 2.05,
-                    EntityKind::Npc => 2.85,
-                    EntityKind::Player => 3.45,
+                    EntityKind::Monster if entity_label.contains("skeleton") => 2.62,
+                    EntityKind::Monster => 2.28,
+                    EntityKind::Npc => 3.05,
+                    EntityKind::Player => 4.05,
                     EntityKind::Item => 0.8,
                 };
                 if let Some((sx, sy)) = project(Vec3::new(gx, head_y, gy), &camera) {
@@ -954,7 +1176,7 @@ fn real_main() -> Result<(), String> {
                     let hp_ratio =
                         entity.stats.hp.max(0) as f32 / entity.stats.max_hp.max(1) as f32;
                     let lit = (8.0 * hp_ratio).round().clamp(0.0, 8.0) as usize;
-                    let mini = format!("{}{}", "▮".repeat(lit), "▯".repeat(8 - lit));
+                    let mini = format!("{}{}", "█".repeat(lit), "░".repeat(8 - lit));
                     let row = format!("{} {} ", mini, entity.stats.hp.max(0));
                     labels.push_text(
                         sx - row.chars().count() as i32 / 2,
@@ -1017,7 +1239,7 @@ fn real_main() -> Result<(), String> {
                 w,
                 world_h,
                 vec![terrain_idx, labels_idx],
-                false,
+                true,
             ));
             scene.partitions.push(Partition::new(
                 "log",
@@ -1091,8 +1313,10 @@ fn real_main() -> Result<(), String> {
                 ));
             }
 
-            // No camera-follow: every partition is pinned; the 3D camera
-            // pans inside the single raster pass instead.
+            // The 3D camera is already baked into the raster pass, so the
+            // world partition uses the camera flag only to mark its cells as
+            // foreground-only world ink. HUD/log/modal partitions stay pinned
+            // and retain their intentional interface styling.
             (scene, Camera::default())
         }
 

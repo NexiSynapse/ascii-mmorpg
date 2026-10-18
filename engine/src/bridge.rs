@@ -257,10 +257,13 @@ pub const FX_CORE_S: f32 = 0.18;
 /// Ring/ember burst lifetime after any telegraph.
 pub const FX_BURST_S: f32 = 0.45;
 
-const STAGE_BG: Rgb = Rgb::new(7, 6, 5);
+const STAGE_BG: Rgb = Rgb::new(0, 0, 0);
 const STAGE_FG: Rgb = Rgb::new(10, 9, 8);
 
-const BG: Rgb = Rgb::new(5, 6, 12);
+/// World cells are foreground-only. HUD and modal layers use `PANEL_BG`
+/// separately, but the scene viewport and combat stage always resolve over
+/// the presenter's exact black clear colour.
+const BG: Rgb = Rgb::new(0, 0, 0);
 
 fn hash2(x: i32, y: i32, seed: u32) -> u32 {
     let mut h = seed
@@ -481,8 +484,8 @@ fn light_falloff(dist: f32) -> f32 {
 }
 
 /// Repaint pass over the ground layer: each cell takes the strongest nearby
-/// light and mixes its foreground toward the tint (plus a faint background
-/// lift). World-locked and deterministic; actors keep their own glow.
+/// light and mixes its foreground toward the tint. World-locked and
+/// deterministic; actors keep their own glow. The empty space remains black.
 fn apply_light_pools(ground: &mut Layer, lights: &[Light]) {
     for cell in &mut ground.cells {
         let mut warmth = 0.0f32;
@@ -505,7 +508,6 @@ fn apply_light_pools(ground: &mut Layer, lights: &[Light]) {
         }
         let k = (warmth * 0.7).min(1.0);
         cell.cell.fg = cell.cell.fg.lerp(tint, k);
-        cell.cell.bg = cell.cell.bg.lerp(tint.scaled(0.2), k * 0.25);
     }
 }
 
@@ -1922,7 +1924,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_actor_glow_tints_nearby_background() {
+    fn dynamic_actor_glow_tints_nearby_glyphs_without_background_paint() {
         let mut view = demo_view();
         view.actors.clear();
         view.player.palette = Some(ColorTrack::Static(Rgb::new(255, 30, 20)));
@@ -1930,13 +1932,10 @@ mod tests {
         let (scene, camera) = scene_from_view(&view);
         let frame = compose(&scene, &camera, 0.0);
         let adjacent = frame.get(cx + 1, cy).expect("ground beside player");
-        assert_ne!(
-            adjacent.bg, BG,
-            "actor glow should spill into nearby ground"
-        );
+        assert_eq!(adjacent.bg, BG, "world glow must not paint the background");
         assert!(
-            adjacent.bg.r > BG.r,
-            "spill carries the actor palette's red channel"
+            adjacent.fg.r > BG.r,
+            "spill carries the actor palette into glyph foreground"
         );
     }
 

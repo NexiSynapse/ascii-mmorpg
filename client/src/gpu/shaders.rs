@@ -272,7 +272,9 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
 
 /// ASCII Conversion Post-Processing Compute Shader:
 /// Runs over the offscreen rendered G-buffer, evaluates Sobel edge detection,
-/// surface luminance, dithering, and outputs packed cell data:
+/// surface luminance, dithering, and outputs packed cell data. The background
+/// slots remain in the packed ABI for readback compatibility but are always
+/// zero; the terminal world is foreground glyphs over pure black:
 /// Cell format: [glyph_codepoint (u32), fg_r (u8), fg_g (u8), fg_b (u8), bg_r (u8), bg_g (u8), bg_b (u8)]
 pub const ASCII_POST_WGSL: &str = r#"
 struct GpuCell {
@@ -1254,14 +1256,16 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let white_pt = 2.4;
     let tonemapped = (avg_color.rgb * (vec3<f32>(1.0) + avg_color.rgb / (white_pt * white_pt))) / (vec3<f32>(1.0) + avg_color.rgb);
     var fg_rgb = clamp(tonemapped * config.contrast_boost, vec3<f32>(0.0), vec3<f32>(1.0));
-    var bg_rgb = clamp(tonemapped * 0.12, vec3<f32>(0.0), vec3<f32>(1.0));
+    // The terminal viewport is a pure black void. Environmental lighting is
+    // carried by the glyph foreground and its density, never by a per-cell
+    // background wash.
+    var bg_rgb = vec3<f32>(0.0);
 
     if (entity_edge_x || entity_edge_y) {
         if (entity_class == 1u) { fg_rgb = mix(fg_rgb, vec3<f32>(0.60, 1.00, 0.35), 0.60); }
         if (entity_class == 2u) { fg_rgb = mix(fg_rgb, vec3<f32>(1.00, 0.28, 0.16), 0.60); }
         if (entity_class == 3u) { fg_rgb = mix(fg_rgb, vec3<f32>(1.00, 0.78, 0.25), 0.60); }
         if (entity_class == 4u) { fg_rgb = mix(fg_rgb, vec3<f32>(0.35, 0.85, 1.00), 0.60); }
-        bg_rgb = fg_rgb * 0.08;
     }
 
     let out_idx = y * config.width + x;

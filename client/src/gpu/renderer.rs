@@ -1200,7 +1200,10 @@ impl GpuRenderer {
     ) -> String {
         // Lower GPU cells to shared scene cells and compose the full frame in
         // one Ratatui buffer (scene + HUD + overlay), exactly like the CPU
-        // path. Channel quantization is preserved for ANSI run-merging.
+        // path. The scene viewport is foreground-only: GPU background
+        // channels are intentionally discarded here so empty terminal cells
+        // remain pure black. Channel quantization is preserved for ANSI
+        // run-merging.
         let scene_width = self.scene_width as usize;
         let scene: Vec<crate::partitions::SceneCell> = cells
             .iter()
@@ -1211,11 +1214,7 @@ impl GpuRenderer {
                     quantize_channel(cell.fg_g) as u8,
                     quantize_channel(cell.fg_b) as u8,
                 ),
-                bg: Some((
-                    quantize_channel(cell.bg_r) as u8,
-                    quantize_channel(cell.bg_g) as u8,
-                    quantize_channel(cell.bg_b) as u8,
-                )),
+                bg: Some((0, 0, 0)),
             })
             .collect();
 
