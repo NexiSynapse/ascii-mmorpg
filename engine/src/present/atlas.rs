@@ -29,16 +29,37 @@ pub struct Atlas {
 }
 
 /// Slot for `glyph`: direct codepoint for 0..=255, curated extras at 256..,
-/// anything else → `?`.
+/// anything else → `?`. Hot path (once per drawn instance), so the
+/// 14-entry extras scan is replaced by a 19KB table built once: ASCII maps
+/// to itself, extras to 256.., everything else to `?`.
 pub fn slot(glyph: char) -> u32 {
-    let code = glyph as u32;
-    if code < 256 {
-        return code;
+    // Bounds-checked above, so indexing cannot panic.
+    let code = glyph as usize;
+    if code < SLOT_LUT_LEN {
+        slot_lut()[code] as u32
+    } else {
+        b'?' as u32
     }
-    if let Some(i) = EXTRA_GLYPHS.iter().position(|&c| c == glyph) {
-        return 256 + i as u32;
-    }
-    b'?' as u32
+}
+
+/// Highest covered codepoint + 1 (▼ U+25BC is the largest extra).
+const SLOT_LUT_LEN: usize = 0x25BD;
+
+/// Lazily built once per process (same OnceLock pattern as the bridge art
+/// cache); entries are slots, which all fit in u16.
+static SLOT_LUT: std::sync::OnceLock<[u16; SLOT_LUT_LEN]> = std::sync::OnceLock::new();
+
+fn slot_lut() -> &'static [u16; SLOT_LUT_LEN] {
+    SLOT_LUT.get_or_init(|| {
+        let mut table = [b'?' as u16; SLOT_LUT_LEN];
+        for (code, entry) in table.iter_mut().enumerate().take(256) {
+            *entry = code as u16;
+        }
+        for (i, glyph) in EXTRA_GLYPHS.iter().enumerate() {
+            table[*glyph as usize] = (256 + i) as u16;
+        }
+        table
+    })
 }
 
 pub fn build(cell_px: f32) -> Result<Atlas, String> {
@@ -124,6 +145,25 @@ pub fn build(cell_px: f32) -> Result<Atlas, String> {
 #[cfg(all(test, feature = "present"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atlas_2x_shares_slots_and_carries_ink() {
+        let base = build(20.0).unwrap();
+        let big = build(40.0).unwrap();
+        assert_eq!(big.cell_h, base.cell_h * 2);
+        // Advance rounds, so width only approximates doubling.
+        assert!((big.cell_w as i32 - base.cell_w as i32 * 2).abs() <= 1);
+        // Full block must rasterize with real coverage at 2x too.
+        let tile = |atlas: &Atlas, slot: u32| {
+            let ox = (slot % ATLAS_COLS) * atlas.cell_w;
+            let oy = (slot / ATLAS_COLS) * atlas.cell_h;
+            (0..atlas.cell_h).any(|row| {
+                (0..atlas.cell_w)
+                    .any(|col| atlas.data[((oy + row) * atlas.stride + ox + col) as usize] != 0)
+            })
+        };
+        assert!(tile(&big, 256 + 3), "'█' must have ink at 2x");
+    }
 
     #[test]
     fn atlas_rasterizes_ascii_and_falls_back() {

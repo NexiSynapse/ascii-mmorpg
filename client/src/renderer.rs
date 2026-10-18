@@ -339,6 +339,7 @@ impl Renderer {
             modal: self.active_modal,
             cells: &scene,
             cells_width: self.width.max(1) as usize,
+            labels: &[],
         })
     }
 

@@ -1,4 +1,4 @@
-use super::{sample, Camera, Cell, Rgb, Scene, Wash};
+use super::{sample, Camera, Cell, ColorTrack, Rgb, Scene, Wash};
 
 /// One flattened frame: resolved glyphs + style per grid cell. This is what a
 /// presenter (terminal today, windowed GUI next) draws; the engine itself
@@ -85,6 +85,23 @@ pub fn compose(scene: &Scene, camera: &Camera, t: f32) -> Frame {
                 if cell.cell.transparent {
                     continue;
                 }
+                // Fast path: still art with a flat color resolves by copy.
+                // Identity-checked: empty tracks sample to (no glyph, no
+                // offset, bright 1.0) and Static returns its color, so this
+                // matches the slow path exactly while skipping two
+                // evaluations per cell (the common case at large grids).
+                if cell.anim.tracks.is_empty() {
+                    if let ColorTrack::Static(flat) = cell.color {
+                        let (x, y) = (cell.x - vx + partition.x, cell.y - vy + partition.y);
+                        if !partition.contains(x, y) {
+                            continue;
+                        }
+                        let mut resolved = cell.cell;
+                        resolved.fg = flat;
+                        frame.set(x, y, resolved);
+                        continue;
+                    }
+                }
                 let s = sample(&cell.anim, cell.x as f32, cell.y as f32, t);
                 let (x, y) = (
                     cell.x - vx + partition.x + s.dx,
@@ -155,14 +172,21 @@ const GLOW_AMPLITUDE: f32 = 0.12;
 /// partitions so halos cross partition borders like real light; writes only
 /// backgrounds, so emission order is irrelevant and the pass is stable.
 fn apply_glow(frame: &mut Frame) {
-    let sources: Vec<(i32, i32, Cell)> = (0..frame.h)
-        .flat_map(|y| (0..frame.w).map(move |x| (x, y)))
-        .filter_map(|(x, y)| {
-            let cell = frame.get(x, y)?;
+    // Index-based scan: the old per-cell `get()` paid bounds checks plus an
+    // Option unwrap on every frame cell; the spill below does one manual
+    // bounds check per target instead of two (get + set). Behavior — which
+    // cells wash and by how much — is unchanged.
+    let w = frame.w;
+    let h = frame.h;
+    let sources: Vec<(i32, i32, Cell)> = frame
+        .cells
+        .iter()
+        .enumerate()
+        .filter_map(|(i, cell)| {
             if cell.transparent || !cell.glow.is_finite() || cell.glow <= 0.0 {
                 return None;
             }
-            Some((x, y, cell))
+            Some(((i as i32 % w.max(1)), (i as i32 / w.max(1)), *cell))
         })
         .collect();
     for (sx, sy, mut source) in sources {
@@ -179,17 +203,18 @@ fn apply_glow(frame: &mut Frame) {
                 if fall <= 0.0 {
                     continue;
                 }
-                if let Some(mut target) = frame.get(sx + dx, sy + dy) {
-                    let wash = |bg: u8, fg: u8| {
-                        (f32::from(bg) + fall * f32::from(fg)).clamp(0.0, 255.0) as u8
-                    };
-                    target.bg = Rgb::new(
-                        wash(target.bg.r, source.fg.r),
-                        wash(target.bg.g, source.fg.g),
-                        wash(target.bg.b, source.fg.b),
-                    );
-                    frame.set(sx + dx, sy + dy, target);
+                let (tx, ty) = (sx + dx, sy + dy);
+                if tx < 0 || ty < 0 || tx >= w || ty >= h {
+                    continue;
                 }
+                let target = &mut frame.cells[(ty * w + tx) as usize];
+                let wash =
+                    |bg: u8, fg: u8| (f32::from(bg) + fall * f32::from(fg)).clamp(0.0, 255.0) as u8;
+                target.bg = Rgb::new(
+                    wash(target.bg.r, source.fg.r),
+                    wash(target.bg.g, source.fg.g),
+                    wash(target.bg.b, source.fg.b),
+                );
             }
         }
     }

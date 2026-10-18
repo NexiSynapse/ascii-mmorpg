@@ -98,6 +98,45 @@ impl SpriteDraw {
     }
 }
 
+/// Horizontally mirrored copy of parsed frames, for facing left/right
+/// without authoring both (turning reads as a sweep, not a snap).
+/// Directional glyphs swap pairs (`/` with `\`, brackets); all else mirrors
+/// in place. Double mirroring returns the original art.
+pub fn mirror_frames(frames: &[Vec<String>]) -> Vec<Vec<String>> {
+    fn mirror_glyph(glyph: char) -> char {
+        match glyph {
+            '/' => '\\',
+            '\\' => '/',
+            '(' => ')',
+            ')' => '(',
+            '<' => '>',
+            '>' => '<',
+            '{' => '}',
+            '}' => '{',
+            '[' => ']',
+            ']' => '[',
+            _ => glyph,
+        }
+    }
+    frames
+        .iter()
+        .map(|frame| {
+            let width = frame
+                .iter()
+                .map(|line| line.chars().count())
+                .max()
+                .unwrap_or(0);
+            frame
+                .iter()
+                .map(|line| {
+                    let mut padded: Vec<char> = line.chars().collect();
+                    padded.resize(width, ' ');
+                    padded.iter().rev().map(|&g| mirror_glyph(g)).collect()
+                })
+                .collect()
+        })
+        .collect()
+}
 /// Build a layer from parsed `frames` (see [`parse_frames`]), placing the
 /// sprite's top-left at `draw`'s origin with uniform colors.
 ///
@@ -149,6 +188,7 @@ mod tests {
     use super::*;
 
     const WARRIOR: &str = include_str!("../../assets/ascii/player_warrior.txt");
+    const HERO: &str = include_str!("../assets/actors/hero.txt");
 
     #[test]
     fn separator_is_line_based_and_crlf_tolerant() {
@@ -224,5 +264,34 @@ mod tests {
         let a = compose(&scene, &Camera::default(), 0.0).rows().join("\n");
         let b = compose(&scene, &Camera::default(), 0.25).rows().join("\n");
         assert_ne!(a, b, "sprite flip-book must advance with time");
+    }
+
+    #[test]
+    fn mirror_swaps_direction_preserves_width_and_round_trips() {
+        let frames = parse_frames("/ab(\n---\ncd");
+        let mirrored = mirror_frames(&frames);
+        assert_eq!(mirrored[0], vec![")ba\\".to_string()]);
+        assert_eq!(mirrored[1], vec!["dc".to_string()]);
+        // Double mirroring restores every frame exactly.
+        assert_eq!(mirror_frames(&mirrored), frames);
+    }
+
+    #[test]
+    fn sparse_hero_loads_five_phases_with_small_cell_budget() {
+        let frames = parse_frames(HERO);
+        assert_eq!(frames.len(), 5, "four walk phases plus a cast");
+        let height = frames[0].len();
+        assert!(frames.iter().all(|f| f.len() == height));
+        for (i, frame) in frames.iter().enumerate() {
+            let cells: usize = frame
+                .iter()
+                .flat_map(|line| line.chars())
+                .filter(|&g| g != ' ')
+                .count();
+            assert!(
+                cells < 250,
+                "sparse contour construction, phase {i} has {cells} cells"
+            );
+        }
     }
 }

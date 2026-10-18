@@ -1,9 +1,9 @@
 use ascii_mmorpg_client::{
     apply_local_command, network::ClientConnection, parse_command, sample_world, ActiveRenderer,
-    PlainTerminal, Renderer, SceneRenderer, Terminal, WeatherMode,
+    PlainTerminal, Renderer, SceneRenderer, Terminal, TerminalEvent, WeatherMode,
 };
 use ascii_mmorpg_shared::{ServerEvent, PROTOCOL_VERSION};
-use crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use std::io::{self, BufRead};
 use std::time::{Duration, Instant};
@@ -172,6 +172,8 @@ fn run_realtime(
 ) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let _raw_mode = RawModeGuard;
+    crossterm::execute!(io::stdout(), event::EnableMouseCapture)?;
+    let _mouse_capture = MouseCaptureGuard;
     run_realtime_with_terminal(address, PlainTerminal::new(), fps, weather, force_cpu)
 }
 
@@ -199,21 +201,79 @@ impl Drop for RawModeGuard {
     }
 }
 
-fn movement_direction(held: [bool; 4]) -> Option<ascii_mmorpg_shared::Direction> {
+struct MouseCaptureGuard;
+
+impl Drop for MouseCaptureGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::execute!(io::stdout(), event::DisableMouseCapture);
+    }
+}
+
+/// Maps held movement keys to a compass direction. `yaw` is the presentation
+/// camera's horizontal orbit angle (GPU renderer); screen-up always means the
+/// direction the camera faces, so the world direction rotates with the camera:
+/// screen-up is `(-sin yaw, -cos yaw)` in world axes, screen-right is
+/// `(cos yaw, -sin yaw)`. The result snaps to the nearest of the protocol's
+/// eight directions (yaw 0 reproduces the fixed mapping: up = North).
+fn movement_direction(held: [bool; 4], yaw: f32) -> Option<ascii_mmorpg_shared::Direction> {
     use ascii_mmorpg_shared::Direction::*;
-    match (
-        i8::from(held[3]) - i8::from(held[1]),
-        i8::from(held[2]) - i8::from(held[0]),
-    ) {
-        (0, -1) => Some(North),
-        (0, 1) => Some(South),
-        (-1, 0) => Some(West),
-        (1, 0) => Some(East),
-        (-1, -1) => Some(NorthWest),
-        (1, -1) => Some(NorthEast),
-        (-1, 1) => Some(SouthWest),
-        (1, 1) => Some(SouthEast),
-        _ => None,
+    let dx = i8::from(held[3]) - i8::from(held[1]);
+    let dy = i8::from(held[2]) - i8::from(held[0]);
+    if dx == 0 && dy == 0 {
+        return None;
+    }
+    let (sx, sy) = (f32::from(dx), f32::from(dy));
+    // Rotate the screen-intent vector into world axes (x east, y south on the
+    // world grid; North = (0, -1)). up(+screen) contributes the facing vector,
+    // right contributes the camera-right vector.
+    let wx = sy * yaw.sin() + sx * yaw.cos();
+    let wy = sy * yaw.cos() - sx * yaw.sin();
+    // Compass angle: 0 = North, positive clockwise (atan2(x, -y)).
+    let dirs = [
+        North, NorthEast, East, SouthEast, South, SouthWest, West, NorthWest,
+    ];
+    let octant = (wx.atan2(-wy) / (std::f32::consts::FRAC_PI_4)).round();
+    Some(dirs[(octant as i32).rem_euclid(8) as usize])
+}
+
+fn handle_mouse_event(
+    event: crossterm::event::MouseEvent,
+    right_dragging: &mut bool,
+    last_mouse: &mut Option<(u16, u16)>,
+    renderer: &mut impl SceneRenderer,
+) {
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Right) => {
+            *right_dragging = true;
+            *last_mouse = Some((event.column, event.row));
+        }
+        MouseEventKind::Drag(MouseButton::Right) if *right_dragging => {
+            let previous = last_mouse.replace((event.column, event.row));
+            if let Some((old_x, old_y)) = previous {
+                let dx = i32::from(event.column) - i32::from(old_x);
+                let dy = i32::from(event.row) - i32::from(old_y);
+                renderer.orbit_camera(
+                    dx.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+                    dy.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+                );
+            }
+        }
+        MouseEventKind::Up(MouseButton::Right) => {
+            *right_dragging = false;
+            *last_mouse = None;
+        }
+        MouseEventKind::Moved if *right_dragging => {
+            let previous = last_mouse.replace((event.column, event.row));
+            if let Some((old_x, old_y)) = previous {
+                renderer.orbit_camera(
+                    (i32::from(event.column) - i32::from(old_x))
+                        .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+                    (i32::from(event.row) - i32::from(old_y))
+                        .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+                );
+            }
+        }
+        _ => {}
     }
 }
 
@@ -252,10 +312,10 @@ fn run_realtime_with_terminal<T: Terminal>(
     let mut world = sample_world();
     let help = match address {
         Some(address) => {
-            format!("Connecting to {address}... WASD move, F attack, R rest, I inv, C char, M map, P pause, Q quit.")
+            format!("Connecting to {address}... WASD move, hold RMB + drag camera, F attack, R rest, I inv, C char, M map, P pause, Q quit.")
         }
         None => {
-            "Real-time mode: WASD move, F attack, R rest, I inv, C char, M map, P pause, Q quit."
+            "Real-time mode: WASD move, hold RMB + drag camera, F attack, R rest, I inv, C char, M map, P pause, Q quit."
                 .into()
         }
     };
@@ -268,7 +328,7 @@ fn run_realtime_with_terminal<T: Terminal>(
     // backend drains through its own input reader: notcurses owns the tty in
     // `--notcurses` mode, so crossterm must not touch stdin there.
     std::thread::sleep(Duration::from_millis(30));
-    while terminal.next_key()?.is_some() {}
+    while terminal.next_event()?.is_some() {}
 
     terminal.draw(&renderer.render(&world))?;
 
@@ -296,6 +356,8 @@ fn realtime_loop(
     let mut animation_frame = world.tick;
     let mut welcomed = connection.is_none();
     let mut held = [false; 4];
+    let mut right_dragging = false;
+    let mut last_mouse = None;
     let mut next_move = Instant::now();
     let mut fps_count = 0u32;
     let mut fps_timer = Instant::now();
@@ -360,7 +422,13 @@ fn realtime_loop(
             return Ok(());
         }
         let frame_start = Instant::now();
-        while let Some(KeyEvent { code, kind, .. }) = terminal.next_key()? {
+        while let Some(input) = terminal.next_event()? {
+            let TerminalEvent::Key(KeyEvent { code, kind, .. }) = input else {
+                if let TerminalEvent::Mouse(mouse) = input {
+                    handle_mouse_event(mouse, &mut right_dragging, &mut last_mouse, renderer);
+                }
+                continue;
+            };
             let movement = match code {
                 KeyCode::Char('w') | KeyCode::Up => Some(0),
                 KeyCode::Char('a') | KeyCode::Left => Some(1),
@@ -465,7 +533,7 @@ fn realtime_loop(
             // Pausing freezes local input; the overlay still renders. In online
             // mode the server world keeps ticking (pause is client-side only).
             if !renderer.is_paused() {
-                if let Some(direction) = movement_direction(held) {
+                if let Some(direction) = movement_direction(held, renderer.camera_yaw()) {
                     tick += 1;
                     let command = ascii_mmorpg_shared::ClientCommand::new(
                         tick,
@@ -519,7 +587,7 @@ fn realtime_loop(
                     WeatherMode::Storm => "Storm",
                 };
                 world.messages = vec![format!(
-                    "Real-time mode: WASD move, F attack, R rest, I inv, C char, M map, P pause, V weather ({weather_label}), Q quit. [{display_fps} FPS ({target_label}) | draw: {last_draw_ms:.2}ms]"
+                    "Real-time mode: WASD move (camera-relative), hold RMB + drag camera, F attack, R rest, I inv, C char, M map, P pause, V weather ({weather_label}), Q quit. [{display_fps} FPS ({target_label}) | draw: {last_draw_ms:.2}ms]"
                 )];
             }
         }
@@ -536,13 +604,10 @@ fn realtime_loop(
             // Sleep for the bulk of the wait to avoid pegging CPU cores
             if wait > Duration::from_millis(6) {
                 let sleep_duration = wait - Duration::from_millis(4);
-                let _ = event::poll(sleep_duration)?;
+                std::thread::sleep(sleep_duration);
             }
             // Tail yield/spin to achieve sub-millisecond timer precision on Windows
             while frame_start.elapsed() < target_frame {
-                if event::poll(Duration::ZERO)? {
-                    break;
-                }
                 std::thread::yield_now();
             }
         }
@@ -553,6 +618,29 @@ fn realtime_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyModifiers, MouseEvent};
+
+    struct CameraSink {
+        orbit: Vec<(i16, i16)>,
+    }
+
+    impl SceneRenderer for CameraSink {
+        fn resize(&mut self, _width: i16, _height: i16) {}
+        fn weather(&self) -> WeatherMode {
+            WeatherMode::Rain
+        }
+        fn set_weather(&mut self, _weather: WeatherMode) {}
+        fn render_frame(
+            &mut self,
+            _world: &ascii_mmorpg_shared::WorldSnapshot,
+            _frame: u64,
+        ) -> String {
+            String::new()
+        }
+        fn orbit_camera(&mut self, dx: i16, dy: i16) {
+            self.orbit.push((dx, dy));
+        }
+    }
 
     #[test]
     fn movement_cancels_opposites_and_preserves_each_axis() {
@@ -561,7 +649,7 @@ mod tests {
             let origin = ascii_mmorpg_shared::Point { x: 10, y: 10 };
             let mut world = sample_world();
             world.player.position = origin;
-            if let Some(direction) = movement_direction(held) {
+            if let Some(direction) = movement_direction(held, 0.0) {
                 let command = ascii_mmorpg_shared::ClientCommand::new(
                     1,
                     ascii_mmorpg_shared::Command::Move(direction),
@@ -579,5 +667,92 @@ mod tests {
                 "keys: {held:?}"
             );
         }
+    }
+
+    use ascii_mmorpg_shared::Direction;
+
+    #[test]
+    fn camera_yaw_zero_keeps_world_relative_mapping() {
+        assert_eq!(
+            movement_direction([true, false, false, false], 0.0),
+            Some(Direction::North)
+        );
+        assert_eq!(
+            movement_direction([false, false, false, true], 0.0),
+            Some(Direction::East)
+        );
+    }
+
+    #[test]
+    fn movement_rotates_with_camera_yaw() {
+        let quarter = std::f32::consts::FRAC_PI_2;
+        // Camera a quarter-turn clockwise (east of the player, facing west):
+        // screen-up must walk west, screen-right must walk north.
+        assert_eq!(
+            movement_direction([true, false, false, false], quarter),
+            Some(Direction::West)
+        );
+        assert_eq!(
+            movement_direction([false, false, false, true], quarter),
+            Some(Direction::North)
+        );
+        // Diagonals: up+right at this yaw is northwest on screen.
+        assert_eq!(
+            movement_direction([true, false, false, true], quarter),
+            Some(Direction::NorthWest)
+        );
+        // Negative yaw (camera west, facing east): up walks east, right walks
+        // south (compass-right of east).
+        assert_eq!(
+            movement_direction([true, false, false, false], -quarter),
+            Some(Direction::East)
+        );
+        assert_eq!(
+            movement_direction([false, false, false, true], -quarter),
+            Some(Direction::South)
+        );
+        // Eighth-turn snapping: yaw = 45 deg puts the camera at the player's
+        // southeast, facing northwest — screen-up walks northwest.
+        assert_eq!(
+            movement_direction([true, false, false, false], std::f32::consts::FRAC_PI_4),
+            Some(Direction::NorthWest)
+        );
+        // No keys held stays None at any yaw.
+        assert_eq!(movement_direction([false; 4], quarter), None);
+    }
+
+    #[test]
+    fn right_drag_orbits_only_after_a_mouse_baseline() {
+        let mut sink = CameraSink { orbit: Vec::new() };
+        let mut dragging = false;
+        let mut last = None;
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse_event(down, &mut dragging, &mut last, &mut sink);
+        assert!(dragging);
+        assert!(sink.orbit.is_empty());
+
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Right),
+            column: 14,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse_event(drag, &mut dragging, &mut last, &mut sink);
+        assert_eq!(sink.orbit, vec![(4, 3)]);
+
+        let up = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Right),
+            column: 14,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse_event(up, &mut dragging, &mut last, &mut sink);
+        assert!(!dragging);
+        assert!(last.is_none());
     }
 }

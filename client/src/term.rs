@@ -426,7 +426,6 @@ impl SpanDiffEncoder {
     ) {
         let mut cur_fg = (255, 255, 255);
         let mut cur_bg = (0, 0, 0);
-        let mut last_written_row: Option<u16> = None;
 
         for y in 0..current.height {
             // Check if row changed
@@ -439,12 +438,13 @@ impl SpanDiffEncoder {
             }
 
             if row_changed {
-                if last_written_row == Some(y.saturating_sub(1)) && y > 0 {
-                    buf.extend_from_slice(b"\r\n");
-                } else {
-                    stats.cursor_jumps += 1;
-                    let _ = write!(buf, "\x1b[{};1H", y + 1);
-                }
+                // Always use absolute cursor positioning. \r\n chaining
+                // assumes the previous row ended at column 1, but a
+                // full-width row auto-wraps the cursor to the next line,
+                // so "\r\n" lands one row too far down and leaves stale
+                // rows (the idle flicker). Absolute jumps are immune.
+                stats.cursor_jumps += 1;
+                let _ = write!(buf, "\x1b[{};1H", y + 1);
 
                 for x in 0..current.width {
                     let cell = current.get(x, y).copied().unwrap_or_default();
@@ -452,7 +452,6 @@ impl SpanDiffEncoder {
                     let mut glyph_buf = [0u8; 4];
                     buf.extend_from_slice(cell.glyph.encode_utf8(&mut glyph_buf).as_bytes());
                 }
-                last_written_row = Some(y);
             }
         }
         buf.extend_from_slice(b"\x1b[0m");

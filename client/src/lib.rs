@@ -5,6 +5,7 @@ use ascii_mmorpg_shared::{
 use std::io::{self, Write};
 
 pub mod assets;
+pub mod camera;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod network;
@@ -20,6 +21,12 @@ pub use term::{
     Cell, CellMatrix, EncoderStrategy, FrameStats, SpanDiffEncoder, WinTimerPrecisionGuard,
 };
 pub use ui::{ActiveModal, RatatuiHud};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalEvent {
+    Key(crossterm::event::KeyEvent),
+    Mouse(crossterm::event::MouseEvent),
+}
 
 pub trait SceneRenderer {
     fn resize(&mut self, width: i16, height: i16);
@@ -54,6 +61,16 @@ pub trait SceneRenderer {
         self.render_frame(world, world.tick)
     }
     fn render_frame(&mut self, world: &WorldSnapshot, frame: u64) -> String;
+    /// Rotates the presentation camera. CPU rendering intentionally ignores
+    /// this because it has no 3D camera; GPU mode implements the orbit.
+    fn orbit_camera(&mut self, _dx: i16, _dy: i16) {}
+    fn reset_camera(&mut self) {}
+    /// Current horizontal orbit angle, radians (0 = default view). Renderers
+    /// without an orbit camera report 0.0, so movement stays world-relative.
+    /// Used to steer WASD input relative to what the camera faces.
+    fn camera_yaw(&self) -> f32 {
+        0.0
+    }
 }
 
 impl SceneRenderer for Renderer {
@@ -96,6 +113,15 @@ impl SceneRenderer for gpu::GpuRenderer {
     }
     fn render_frame(&mut self, world: &WorldSnapshot, frame: u64) -> String {
         self.render_frame(world, frame)
+    }
+    fn orbit_camera(&mut self, dx: i16, dy: i16) {
+        self.orbit_camera(dx, dy);
+    }
+    fn reset_camera(&mut self) {
+        self.reset_camera();
+    }
+    fn camera_yaw(&self) -> f32 {
+        self.camera.yaw
     }
 }
 
@@ -148,6 +174,27 @@ impl SceneRenderer for ActiveRenderer {
             Self::Gpu(r) => r.render_frame(world, frame),
         }
     }
+    fn orbit_camera(&mut self, dx: i16, dy: i16) {
+        match self {
+            Self::Cpu(r) => r.orbit_camera(dx, dy),
+            #[cfg(feature = "gpu")]
+            Self::Gpu(r) => r.orbit_camera(dx, dy),
+        }
+    }
+    fn reset_camera(&mut self) {
+        match self {
+            Self::Cpu(r) => r.reset_camera(),
+            #[cfg(feature = "gpu")]
+            Self::Gpu(r) => r.reset_camera(),
+        }
+    }
+    fn camera_yaw(&self) -> f32 {
+        match self {
+            Self::Cpu(_) => 0.0,
+            #[cfg(feature = "gpu")]
+            Self::Gpu(r) => r.camera_yaw(),
+        }
+    }
 }
 
 pub trait Terminal {
@@ -170,6 +217,9 @@ pub trait Terminal {
             }
         }
         Ok(None)
+    }
+    fn next_event(&mut self) -> io::Result<Option<TerminalEvent>> {
+        Ok(self.next_key()?.map(TerminalEvent::Key))
     }
     /// Whether key releases may never arrive, so held movement keys must be
     /// decayed after each consumed move tick instead of on release.
@@ -237,17 +287,32 @@ impl PlainTerminal {
         // If line count changed or initial frame, perform full redraw with clean clear
         if self.prev_hashes.len() != current_lines.len() {
             self.buffer.clear();
-            self.buffer.extend_from_slice(b"\x1b[?25l\x1b[H");
+            // Synchronized-update markers (DECSET 2026): Windows Terminal
+            // defers painting the whole frame until the closing marker, so
+            // the clean+repaint sequence can never show half-painted or
+            // transitionally-black rows. Terminals without 2026 ignore the
+            // private mode and behave exactly as before.
+            self.buffer.extend_from_slice(b"\x1b[?2026h\x1b[?25l\x1b[H");
+            // Absolute cursor addressing per row, exactly like the
+            // differential branch below. The former \r\n chaining broke on
+            // full-width rows: the auto-wrapped cursor + carriage return +
+            // line feed advanced one row too far in Windows ConPTY
+            // (historical handoff note: "\r\n landed one row too far down
+            // and left stale cells"). Every relaunch and every resize runs
+            // this branch, so a mis-landed full repaint was re-applied
+            // deterministically and then preserved forever by the
+            // differential branch, which never rewrites rows its hashes
+            // consider unchanged. That was the persistent duplicated
+            // panel-title ghost. Absolute jumps are immune to wrap state.
             for (i, line) in current_lines.iter().enumerate() {
-                if i > 0 {
-                    self.buffer.extend_from_slice(b"\r\n");
-                }
+                use std::io::Write as _;
+                write!(&mut self.buffer, "\x1b[{};1H", i + 1)?;
                 self.buffer.extend_from_slice(line.as_bytes());
                 if !line.ends_with("\x1b[K") {
                     self.buffer.extend_from_slice(b"\x1b[K");
                 }
             }
-            self.buffer.extend_from_slice(b"\x1b[J");
+            self.buffer.extend_from_slice(b"\x1b[J\x1b[?2026l");
             writer.write_all(&self.buffer)?;
             self.prev_hashes = current_lines.iter().map(|line| fnv1a_hash(line)).collect();
             return Ok(());
@@ -258,7 +323,6 @@ impl PlainTerminal {
         let current_hashes: Vec<u64> = current_lines.iter().map(|line| fnv1a_hash(line)).collect();
         self.buffer.clear();
         let mut dirty_count = 0;
-        let mut last_written_line: Option<usize> = None;
 
         for (i, ((&curr, &hash), prev_hash)) in current_lines
             .iter()
@@ -268,24 +332,32 @@ impl PlainTerminal {
         {
             if hash != *prev_hash {
                 dirty_count += 1;
-                if last_written_line == Some(i.saturating_sub(1)) && i > 0 {
-                    // Contiguous dirty rows: emit CRLF directly (0 coordinate jump overhead)
-                    self.buffer.extend_from_slice(b"\r\n");
-                } else {
-                    // Non-contiguous gap: jump directly to row (i + 1), col 1
-                    use std::io::Write as _;
-                    write!(&mut self.buffer, "\x1b[{};1H", i + 1)?;
-                }
+                // Always use absolute cursor positioning. The old CRLF
+                // chaining assumed the previous row's cursor ended at
+                // column 1, but a full-width row auto-wraps the terminal
+                // cursor to the next line, so "\r\n" lands one row too far
+                // down and leaves stale rows (the idle flicker). Absolute
+                // jumps are immune to wrap.
+                use std::io::Write as _;
+                write!(&mut self.buffer, "\x1b[{};1H", i + 1)?;
                 self.buffer.extend_from_slice(curr.as_bytes());
                 if !curr.ends_with("\x1b[K") {
                     self.buffer.extend_from_slice(b"\x1b[K");
                 }
-                last_written_line = Some(i);
             }
         }
 
         if dirty_count > 0 {
-            writer.write_all(&self.buffer)?;
+            // Wrap the dirty payload in synchronized-update markers so the
+            // scattered cursor jumps + row fills commit atomically. Idle
+            // torch/grass animation keeps nearly every scene row dirty each
+            // frame; without 2026 Windows Terminal can paint between the
+            // jumps, which read as sub-millisecond transient lines.
+            let mut framed = Vec::with_capacity(self.buffer.len() + 16);
+            framed.extend_from_slice(b"\x1b[?2026h");
+            framed.extend_from_slice(&self.buffer);
+            framed.extend_from_slice(b"\x1b[?2026l");
+            writer.write_all(&framed)?;
             self.prev_hashes = current_hashes;
         }
 
@@ -320,6 +392,17 @@ impl Terminal for PlainTerminal {
         let mut stdout = io::stdout().lock();
         self.draw_into(frame, &mut stdout)?;
         stdout.flush()
+    }
+    fn next_event(&mut self) -> io::Result<Option<TerminalEvent>> {
+        use std::time::Duration;
+        if crossterm::event::poll(Duration::ZERO)? {
+            return Ok(match crossterm::event::read()? {
+                crossterm::event::Event::Key(key) => Some(TerminalEvent::Key(key)),
+                crossterm::event::Event::Mouse(mouse) => Some(TerminalEvent::Mouse(mouse)),
+                _ => None,
+            });
+        }
+        Ok(None)
     }
 }
 
@@ -699,14 +782,15 @@ mod tests {
         let mut out1 = Vec::new();
         term.draw_into(frame1, &mut out1).unwrap();
         assert!(!out1.is_empty());
-        assert!(out1.starts_with(b"\x1b[?25l\x1b[H"));
+        assert!(out1.starts_with(b"\x1b[?2026h\x1b[?25l\x1b[H"));
 
         // Identical frame produces zero output
         let mut out2 = Vec::new();
         term.draw_into(frame1, &mut out2).unwrap();
         assert_eq!(out2.len(), 0);
 
-        // Frame with only row 2 modified emits only row 2 jump and text
+        // Frame with only row 2 modified emits only row 2 jump and text,
+        // wrapped in synchronized-update markers (no mid-frame tearing)
         let frame2 = "Line 1\x1b[0m\x1b[K\nModified 2\x1b[0m\x1b[K\nLine 3\x1b[0m\x1b[K";
         let mut out3 = Vec::new();
         term.draw_into(frame2, &mut out3).unwrap();
@@ -714,14 +798,38 @@ mod tests {
         assert!(s3.contains("\x1b[2;1HModified 2\x1b[0m\x1b[K"));
         assert!(!s3.contains("Line 1"));
         assert!(!s3.contains("Line 3"));
+        assert!(s3.starts_with("\x1b[?2026h"));
+        assert!(s3.ends_with("\x1b[?2026l"));
 
-        // Contiguous dirty rows coalesce with CRLF without extra CUP jump
+        // Contiguous dirty rows each get their own absolute cursor jump; the
+        // old CRLF chaining mis-landed one row too far down on full-width
+        // rows (auto-wrap), leaving stale rows.
         let frame3 = "Line 1\x1b[0m\x1b[K\nChanged 2\x1b[0m\x1b[K\nChanged 3\x1b[0m\x1b[K";
         let mut out4 = Vec::new();
         term.draw_into(frame3, &mut out4).unwrap();
         let s4 = String::from_utf8(out4).unwrap();
-        assert!(s4.contains("\x1b[2;1HChanged 2\x1b[0m\x1b[K\r\nChanged 3\x1b[0m\x1b[K"));
-        assert!(!s4.contains("\x1b[3;1H"));
+        assert!(s4.contains("\x1b[2;1HChanged 2\x1b[0m\x1b[K"));
+        assert!(s4.contains("\x1b[3;1HChanged 3\x1b[0m\x1b[K"));
+        assert!(!s4.contains("\r\n"));
+    }
+
+    #[test]
+    fn full_redraw_uses_absolute_row_addressing_only() {
+        // Regression for the persistent duplicated panel-title ghost: the
+        // full-redraw branch (first frame, relaunch, resize) chained rows
+        // with \r\n, which mis-landed one row too far down in Windows
+        // ConPTY on full-width rows and permanently skewed the layout
+        // (the differential branch never rewrote rows it considered
+        // unchanged). Both branches must address rows absolutely.
+        let mut term = PlainTerminal::new();
+        let frame = "Top\x1b[0m\x1b[K\nMiddle\x1b[0m\x1b[K\nBottom\x1b[0m\x1b[K";
+        let mut out = Vec::new();
+        term.draw_into(frame, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("\x1b[1;1HTop\x1b[0m\x1b[K"));
+        assert!(s.contains("\x1b[2;1HMiddle\x1b[0m\x1b[K"));
+        assert!(s.contains("\x1b[3;1HBottom\x1b[0m\x1b[K"));
+        assert!(!s.contains("\r\n"));
     }
 
     #[test]

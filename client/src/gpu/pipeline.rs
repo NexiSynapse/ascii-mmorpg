@@ -9,14 +9,19 @@ use super::uniforms::{CameraUniforms, LightingUniforms};
 pub const RING_SIZE: usize = 2;
 pub const SSAA_FACTOR: u32 = 4;
 
-/// Adaptive SSAA: full 4x quality on small grids, 2x once the grid exceeds
-/// the 4x sweet spot. Halving SSAA quarters offscreen texels.
-pub fn adaptive_ssaa(width: u32, height: u32) -> u32 {
-    if width.saturating_mul(height) <= 4096 {
-        4
-    } else {
-        2
-    }
+/// Fixed 4x supersampling for every grid size.
+///
+/// Historical: an adaptive tier dropped to 2x for grids above 4096 cells to
+/// bound fill cost, but the ASCII compute pass's tap grid, shape-vector
+/// regions, and smooth-slope thresholds are all tuned to a 4x4 texel block per
+/// cell (its texel spans and threshold ratios have no meaning at other
+/// factors). At 2x the shader read half of its taps out of bounds, zeroing
+/// color/depth and leaving the scene partition filled only in its top-left
+/// quadrant. The tier was retired rather than re-tuned: offscreen targets at
+/// realistic partitions are tiny (4x at 128x36 cells = 512x144 texels), so the
+/// savings never justified a second, unvalidated glyph pipeline.
+pub fn adaptive_ssaa(_width: u32, _height: u32) -> u32 {
+    SSAA_FACTOR
 }
 
 #[repr(C)]
@@ -268,7 +273,8 @@ impl FrameSlot {
 pub struct GpuPipeline {
     pub width: u32,
     pub height: u32,
-    /// Active SSAA factor for the current grid (4 or 2, see `adaptive_ssaa`).
+    /// Active SSAA factor for the current grid (always 4; see `adaptive_ssaa`
+    /// for why the retired 2x tier never worked with the compute pass).
     pub ssaa: u32,
 
     // 3D Scene Pipeline
@@ -314,7 +320,7 @@ impl GpuPipeline {
     pub fn new(ctx: &GpuContext, width: u32, height: u32) -> Result<Self, String> {
         let width = width.max(16);
         let height = height.max(8);
-        let ssaa = adaptive_ssaa(width, height);
+        let ssaa = adaptive_ssaa(width, height); // always SSAA_FACTOR; single decision point
         let device = &ctx.device;
 
         // 1. Compile Shaders
@@ -710,7 +716,7 @@ impl GpuPipeline {
     pub fn resize(&mut self, ctx: &GpuContext, width: u32, height: u32) {
         let width = width.max(16);
         let height = height.max(8);
-        let ssaa = adaptive_ssaa(width, height);
+        let ssaa = adaptive_ssaa(width, height); // always SSAA_FACTOR (fixed tier)
         if self.width == width && self.height == height && self.ssaa == ssaa {
             return;
         }

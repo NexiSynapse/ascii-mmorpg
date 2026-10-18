@@ -48,6 +48,15 @@ pub enum Effect {
         direction: (f32, f32),
         grow: f32,
     },
+    /// Telegraph: a dashed ring that starts at `radius` and sweeps inward
+    /// (plus a slow rotation) reaching the origin exactly when the emitter
+    /// expires — the reference's "wind-up closes before the hit" language.
+    /// Glyph is `-`, rotated toward the ring tangent, so it reads as dashes
+    /// rather than a dotted circle.
+    Implosion {
+        count: usize,
+        radius: f32,
+    },
     Number {
         text: String,
         rise: f32,
@@ -148,6 +157,35 @@ pub fn layer(name: impl Into<String>, z: i32, emitters: &[Emitter], time: f32) -
                         emitter,
                         emitter.origin.0 + direction.0 * distance,
                         emitter.origin.1 + direction.1 * distance,
+                        glyph,
+                        age,
+                    );
+                }
+            }
+            Effect::Implosion { count, radius } => {
+                if *count == 0 || !radius.is_finite() || *radius < 0.0 {
+                    continue;
+                }
+                let n = (*count).min(MAX_CELLS);
+                let progress = (age / emitter.lifetime).clamp(0.0, 1.0);
+                let r = radius * (1.0 - progress);
+                if !r.is_finite() {
+                    continue;
+                }
+                for i in 0..n {
+                    // Slow swirl as the dashes tighten; each one orients
+                    // along the local ring tangent for a dash look.
+                    let degrees = i as f32 * 360.0 / n as f32 + age * 270.0;
+                    let radians = degrees.to_radians();
+                    let tangent = radians + std::f32::consts::FRAC_PI_2;
+                    let tx = tangent.cos();
+                    let ty = tangent.sin();
+                    let glyph = if tx.abs() > ty.abs() * 1.5 { '-' } else { '|' };
+                    push(
+                        &mut out,
+                        emitter,
+                        emitter.origin.0 + radians.cos() * r,
+                        emitter.origin.1 + radians.sin() * r,
                         glyph,
                         age,
                     );
@@ -367,5 +405,52 @@ mod tests {
         assert_eq!(layer("x", 0, &chain, 2.5).cells.len(), 1);
         assert_eq!(layer("x", 0, &chain, 3.1).cells.len(), 2);
         assert_eq!(layer("x", 0, &spike, 3.9).cells.len(), 2);
+    }
+
+    #[test]
+    fn implosion_sweeps_inward_and_spins() {
+        let im = [e(Effect::Implosion {
+            count: 8,
+            radius: 4.0,
+        })];
+        // Lifetime 4: at age 0.0 radius 4.0, at age 3.0 radius 1.0.
+        let early = layer("x", 0, &im, 1.0); // emitter start 1.0 → age 0
+        let late = layer("x", 0, &im, 4.0); // age 3.0
+        assert_eq!(early.cells.len(), 8);
+        assert_eq!(late.cells.len(), 8);
+        let span = |cells: &[AnimCell]| {
+            cells
+                .iter()
+                .map(|c| {
+                    let (dx, dy) = (c.x - 2, c.y - 3); // emitter origin (2,3)
+                    (dx * dx + dy * dy) as f32
+                })
+                .fold(0.0f32, f32::max)
+                .sqrt()
+        };
+        assert!(
+            span(&late.cells) < span(&early.cells) * 0.4,
+            "rings tighten"
+        );
+        // Spin + tighten: dash 0 starts east of the origin (age 0, angle 0°,
+        // radius 4.0) and ends north of it (age 3.0, angle 90°, radius 1.0;
+        // origin (2,3) - dash lands on (2,4)).
+        assert!(
+            late.cells.iter().any(|c| c.x == 2 && c.y == 4),
+            "dash lands north of origin after the swirl"
+        );
+    }
+
+    #[test]
+    fn implosion_glyphs_read_as_dashes() {
+        let im = [e(Effect::Implosion {
+            count: 8,
+            radius: 3.0,
+        })];
+        let mid = layer("x", 0, &im, 3.0);
+        assert!(mid
+            .cells
+            .iter()
+            .all(|c| c.cell.glyph == '-' || c.cell.glyph == '|'));
     }
 }

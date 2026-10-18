@@ -21,6 +21,7 @@
 //! - depth shading: ground brightness grows toward larger `y` (foreground);
 //! - one shared camera transform: every world layer scrolls together.
 
+use super::overlay::TextRun;
 use super::sprite;
 use super::{Anim, AnimCell, Axis, Camera, Cell, ColorTrack, Layer, Partition, Rgb, Scene, Track};
 use std::sync::OnceLock;
@@ -28,8 +29,9 @@ use std::sync::OnceLock;
 /// Legacy world grid used by [`scene_from_view`].
 pub const VIEW_W: i32 = 96;
 pub const VIEW_H: i32 = 30;
-/// Pinned HUD rows above the world and log rows below it.
-pub const HUD_H: i32 = 2;
+/// Pinned HUD rows above the world and log rows below it: zone readout
+/// (2 overlay rows) plus one legend row.
+pub const HUD_H: i32 = 3;
 pub const LOG_H: i32 = 2;
 
 /// Meadow extent: fixed world-space scenery so the camera scrolls over
@@ -75,20 +77,6 @@ pub struct BarStyle {
     pub bg: Rgb,
 }
 
-/// Centered single-line label.
-fn push_centered(layer: &mut Layer, y: i32, width: i32, text: &str, fg: Rgb, bg: Rgb, bold: bool) {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() || width <= 0 {
-        return;
-    }
-    let start = ((width - chars.len() as i32).max(0) / 2).max(0);
-    let clipped: String = chars.into_iter().take((width - start) as usize).collect();
-    if bold {
-        layer.push_text_bold(start, y, &clipped, fg, bg);
-    } else {
-        layer.push_text(start, y, &clipped, fg, bg);
-    }
-}
 fn layout(width: i32, height: i32, extra_hud: i32) -> (i32, i32, i32, i32) {
     let width = width.max(1);
     let height = height.max(3);
@@ -99,6 +87,29 @@ fn layout(width: i32, height: i32, extra_hud: i32) -> (i32, i32, i32, i32) {
     let hud = base + extra;
     let world = (height - hud - log).max(1);
     (width, hud, world, log)
+}
+
+/// Big overlay readout: 2x crisp text for boss/target/zone lines, drawn
+/// over the frame by the presenter (terminal grids cannot do per-region
+/// fonts). `center` picks centered (boss) vs x=1 (target, zone) anchoring.
+fn push_hud_text(scene: &mut Scene, y: i32, width: i32, text: &str, fg: Rgb, center: bool) {
+    let adv = 2.0;
+    let len = text.chars().count() as f32;
+    let x = if center {
+        ((width as f32 - len * adv) / 2.0).max(0.0)
+    } else {
+        1.0
+    };
+    let f = |c: u8| f32::from(c) / 255.0;
+    let bg = PANEL_BG;
+    scene.overlay_text.push(TextRun {
+        x,
+        y: y as f32,
+        text: text.to_string(),
+        size: 2.0,
+        fg: [f(fg.r), f(fg.g), f(fg.b)],
+        bg: [f(bg.r), f(bg.g), f(bg.b)],
+    });
 }
 
 fn fit_text(layer: &mut Layer, x: i32, y: i32, width: i32, text: &str, fg: Rgb, bold: bool) {
@@ -163,6 +174,26 @@ pub struct SceneView {
     /// Target panel under the boss bar (reference `Skeleton 55/55`).
     /// Selection semantics belong to the caller; `None` hides it.
     pub target: Option<TargetPanel>,
+    /// Presentation-side combat FX events (impact bursts + cast
+    /// telegraphs) the client observed. Order-stable; sampled at
+    /// `presentation_time_s`.
+    pub combat_fx: Vec<SceneFx>,
+    /// Current presentation seconds (the caller's `scene_at` clock). Drives
+    /// FX sampling and the target ring's dash rotation; deterministic per
+    /// instant, no retained state.
+    pub presentation_time_s: f32,
+}
+
+/// The melee-range target under the decal rule that mirrors the game's
+/// `Command::Attack`: the nearest living monster within `MELEE_RANGE`
+/// (Manhattan), first wins ties. `None` when no monster is in reach.
+fn melee_target<'a>(player: &SceneActor, actors: &'a [SceneActor]) -> Option<&'a SceneActor> {
+    let manhattan = |a: &SceneActor| (a.x - player.x).abs() + (a.y - player.y).abs();
+    actors
+        .iter()
+        .filter(|a| a.kind == ActorKind::Monster && a.hp > 0)
+        .filter(|a| manhattan(a) <= MELEE_RANGE)
+        .min_by_key(|a| manhattan(a))
 }
 
 /// Lighting/ground/weather preset per zone.
@@ -189,6 +220,45 @@ pub struct TargetPanel {
     pub hp: i32,
     pub max_hp: i32,
 }
+
+/// Presentation-side combat FX event: the client-side state behind the
+/// combat-readability pack (impact bursts + cast telegraphs). Origins are
+/// world cell coordinates; `born_s` is on the view's own presentation
+/// timeline (the same clock `presentation_time_s` ticks). The bridge stays
+/// stateless — clients observe messages and feed these in, exactly like
+/// the terminal GPU renderer does.
+#[derive(Clone, Debug)]
+pub struct SceneFx {
+    /// Ground anchor of the event in world cells.
+    pub origin: (f32, f32),
+    /// When the event was observed, in presentation seconds.
+    pub born_s: f32,
+    /// Telegraph sweep radius (max ring radius for the burst phase too).
+    pub radius: f32,
+    /// Single hue per damage/event school (reference: FX are solid
+    /// single-color ink on the dark stage).
+    pub color: Rgb,
+    /// Seconds of dashed inward sweep before the burst resolves; 0.0 fires
+    /// the burst immediately.
+    pub telegraph_s: f32,
+    /// Damage digits raised off the impact ("" for none).
+    pub digits: String,
+}
+
+/// Melee decal range mirroring the terminal game's combat rule (shared
+/// `combat::MELEE_RANGE`). Kept as a local constant so the engine stays
+/// dependency-free; gameplay authority always belongs to the caller.
+const MELEE_RANGE: i32 = 6;
+
+/// Solid white-hot core lifetime at the start of every burst (reference
+/// bursts begin as a bright solid mass before rings/scatter appear).
+pub const FX_CORE_S: f32 = 0.18;
+
+/// Ring/ember burst lifetime after any telegraph.
+pub const FX_BURST_S: f32 = 0.45;
+
+const STAGE_BG: Rgb = Rgb::new(7, 6, 5);
+const STAGE_FG: Rgb = Rgb::new(10, 9, 8);
 
 const BG: Rgb = Rgb::new(5, 6, 12);
 
@@ -832,6 +902,24 @@ fn stamp_art(layer: &mut Layer, a: &SceneActor, source: &'static str, tint: Rgb,
     };
     let (ox, oy) = (a.x - w / 2, a.y - (h - 1));
     let palette = a.palette.unwrap_or(ColorTrack::Static(tint));
+    // Decode once: the loop below samples every frame per output cell, and
+    // `str::chars().nth()` re-walks the line on every probe (the dominant
+    // build cost at large grids). Indexing is frame-exact and far cheaper.
+    let decoded: Vec<Vec<Vec<char>>> = frames
+        .iter()
+        .map(|frame| frame.iter().map(|line| line.chars().collect()).collect())
+        .collect();
+    let probe = |fi: usize, sy: i32, ax: i32| -> char {
+        if sy < 0 || ax < 0 {
+            return ' ';
+        }
+        decoded
+            .get(fi)
+            .and_then(|frame| frame.get(sy as usize))
+            .and_then(|line| line.get(ax as usize))
+            .copied()
+            .unwrap_or(' ')
+    };
     let at = |fx: i32, fy: i32| -> char {
         if fx < 0 || fy < 0 || fx >= w || fy >= h {
             return ' ';
@@ -851,11 +939,7 @@ fn stamp_art(layer: &mut Layer, a: &SceneActor, source: &'static str, tint: Rgb,
         } else {
             source_x
         };
-        frames
-            .first()
-            .and_then(|frame| frame.get(source_y as usize))
-            .and_then(|line| line.chars().nth(art_x as usize))
-            .unwrap_or(' ')
+        probe(0, source_y, art_x)
     };
     for cy in 0..h as usize {
         for cx in 0..w as usize {
@@ -874,18 +958,13 @@ fn stamp_art(layer: &mut Layer, a: &SceneActor, source: &'static str, tint: Rgb,
             } else {
                 source_x as usize
             };
-            let glyphs: Vec<char> = frames
-                .iter()
-                .map(|frame| {
-                    frame
-                        .get(source_y as usize)
-                        .and_then(|line| line.chars().nth(art_x))
-                        .unwrap_or(' ')
-                })
-                .collect();
-            if glyphs.iter().all(|g| *g == ' ') {
+            // Blank in every phase: skip without allocating. Variance is
+            // probed the same way; the glyph Vec only exists for cells that
+            // actually animate (moving + varied).
+            if (0..decoded.len()).all(|fi| probe(fi, source_y, art_x as i32) == ' ') {
                 continue;
             }
+            let g0 = probe(0, source_y, art_x as i32);
             // Rim light: edge cells read luminous, interiors recede
             // (reference figures are dark shapes with lit outlines).
             let edge = at(cx as i32 - 1, cy as i32) == ' '
@@ -896,24 +975,27 @@ fn stamp_art(layer: &mut Layer, a: &SceneActor, source: &'static str, tint: Rgb,
             let mut cell = match palette {
                 ColorTrack::Gradient {
                     start, end, axis, ..
-                } => Cell::new(glyphs[0], start.scaled(shade), BG).with_fg_gradient(end, axis),
+                } => Cell::new(g0, start.scaled(shade), BG).with_fg_gradient(end, axis),
                 ColorTrack::Static(color) => {
                     let color = if a.palette.is_some() {
                         color
                     } else {
-                        material_ink(a.kind, glyphs[0], color)
+                        material_ink(a.kind, g0, color)
                     };
-                    Cell::new(glyphs[0], color.scaled(shade), BG)
+                    Cell::new(g0, color.scaled(shade), BG)
                 }
-                ColorTrack::Rainbow { .. } => Cell::new(glyphs[0], tint.scaled(shade), BG),
+                ColorTrack::Rainbow { .. } => Cell::new(g0, tint.scaled(shade), BG),
             };
             cell.bold = true;
             cell.offset_x = a.render_offset.0;
             cell.offset_y = a.render_offset.1;
-            let varied = frames.len() > 1 && glyphs.iter().any(|g| *g != glyphs[0]);
+            let varied = decoded.len() > 1
+                && (1..decoded.len()).any(|fi| probe(fi, source_y, art_x as i32) != g0);
             let anim = if a.motion_speed > 0.15 && varied {
                 Anim::still().with(Track::Cycle {
-                    frames: glyphs,
+                    frames: (0..decoded.len())
+                        .map(|fi| probe(fi, source_y, art_x as i32))
+                        .collect(),
                     fps: IDLE_FPS + (WALK_FPS - IDLE_FPS) * (a.motion_speed / 4.0).clamp(0.0, 1.0),
                 })
             } else if a.motion_speed <= 0.15 {
@@ -1046,6 +1128,7 @@ pub fn scene_from_view(view: &SceneView) -> (Scene, Camera) {
 pub struct StaticLayers {
     ground: Option<(i32, i32, ZoneKind, i32, i32, Layer)>,
     props: Option<(ZoneKind, Layer)>,
+    rain: Option<(i32, i32, i32, i32, Layer)>,
 }
 
 /// Light list for a view: landmark torches (or sconces) plus the player's
@@ -1149,11 +1232,184 @@ impl StaticLayers {
         self.props = Some((view.zone_kind, props.clone()));
         props
     }
+
+    /// Rain streaks, rebuilt only when the camera window moves. The streak
+    /// pattern is a pure function of world coords (the fall animates in
+    /// `compose`), so caching is frame-exact. This is the hottest build
+    /// cost at large grids: the loop scans the whole camera window plus
+    /// margin every frame (measured ~5ms in debug at 384x135).
+    pub fn rain_for(&mut self, cam_x: i32, cam_y: i32, width: i32, world_h: i32) -> Layer {
+        if let Some((rx, ry, rw, rh, layer)) = &self.rain {
+            if *rx == cam_x && *ry == cam_y && *rw == width && *rh == world_h {
+                return layer.clone();
+            }
+        }
+        let mut rain = Layer::new("rain", 1);
+        push_rain(
+            &mut rain,
+            cam_x - 8,
+            cam_x + width + 8,
+            cam_y - 8,
+            cam_y + world_h + 8,
+        );
+        self.rain = Some((cam_x, cam_y, width, world_h, rain.clone()));
+        rain
+    }
 }
 
 /// Build a scene for an arbitrary composed grid. `width`/`height` are the
 /// complete frame dimensions, including the pinned HUD and log. Small grids
 /// gracefully collapse those panels to one row while retaining a world row.
+/// Stage clearance (clarity pack B, windowed edition): a dark opaque floor
+/// patch near every actor so silhouettes and combat FX land on quiet
+/// negative space instead of tufts, flowers, and road cobbles. The outer
+/// shell dithers by world-coordinate hash for a ragged arena edge; props,
+/// actors, and plates above stay untouched (the stage renders directly
+/// over the ground layer, below props at the same z via insertion order).
+fn stage_pass(view: &SceneView) -> Layer {
+    let mut stage = Layer::new("stage", 0);
+    for actor in std::iter::once(&view.player).chain(view.actors.iter()) {
+        for dy in -3..=3 {
+            for dx in -3..=3 {
+                let dist = ((dx * dx + dy * dy) as f32).sqrt();
+                if dist > 3.3 {
+                    continue;
+                }
+                let x = actor.x + dx;
+                let y = actor.y + dy;
+                if dist > 2.4 && hash2(x, y, 997) % 2 == 0 {
+                    continue; // ragged outer shell
+                }
+                stage.push(AnimCell::still(
+                    x,
+                    y,
+                    Cell::new(' ', STAGE_FG, STAGE_BG)
+                        .with_offset(actor.render_offset.0, actor.render_offset.1),
+                ));
+            }
+        }
+    }
+    stage
+}
+
+/// Dashed orange decal ring under the melee-range target's feet (clarity
+/// pack C, windowed edition). Dashes march around the ring; the ground-plane
+/// ellipse squashes `ry` for the camera's foreshortened read.
+fn target_ring_pass(view: &SceneView) -> Option<Layer> {
+    let target = melee_target(&view.player, &view.actors)?;
+    let mut ring = Layer::new("target-ring", 1);
+    let samples: usize = 12;
+    let (rx, ry) = (1.9f32, 1.15f32);
+    let step = (view.presentation_time_s * 2.4).floor() as i32;
+    for i in 0..samples {
+        // Half the samples are gaps; the +1 phase shift each step makes
+        // the dashes march around the ring (reference telegraph motion).
+        if (i + step.unsigned_abs() as usize + 1) % 2 == 0 {
+            continue;
+        }
+        let angle = (i as f32 + step as f32) * 360.0 / samples as f32;
+        let radians = angle.to_radians();
+        ring.push(AnimCell::still(
+            target.x + (rx * radians.cos()).round() as i32,
+            target.y + (ry * radians.sin()).round() as i32,
+            Cell::new('=', Rgb::new(235, 150, 45), STAGE_BG)
+                .with_glow(0.7)
+                .with_offset(target.render_offset.0, target.render_offset.1),
+        ));
+    }
+    Some(ring)
+}
+
+/// Combat FX sampling (combat-readability pack, REPORT items #2 + #3):
+/// telegraphs sweep inward as dashes, then each burst resolves as a solid
+/// white-hot core, an expanding ring, and a scatter of fading embers, with
+/// optional damage digits rising off the impact. Pure: one explicit-seconds
+/// timeline, no retained state.
+fn fx_layer_pass(view: &SceneView) -> Layer {
+    let t = view.presentation_time_s;
+    let mut emitters: Vec<crate::fx::Emitter> = Vec::new();
+    let mut cores: Vec<crate::AnimCell> = Vec::new();
+    for event in &view.combat_fx {
+        let age = t - event.born_s;
+        if !(0.0..f32::INFINITY).contains(&age) {
+            continue;
+        }
+        if event.telegraph_s > 0.0 && age < event.telegraph_s {
+            emitters.push(crate::fx::Emitter {
+                origin: event.origin,
+                start: event.born_s,
+                lifetime: event.telegraph_s,
+                cell: Cell::new('-', event.color, BG).with_glow(0.9),
+                kind: crate::fx::Effect::Implosion {
+                    count: 12,
+                    radius: event.radius,
+                },
+            });
+            continue;
+        }
+        let born = event.born_s + event.telegraph_s;
+        let burst_age = t - born;
+        if (0.0..FX_CORE_S).contains(&burst_age) {
+            // White-hot solid core: the impact's first read is one bright
+            // mass, not a particle cloud.
+            let hot = event
+                .color
+                .lerp(Rgb::new(255, 250, 235), 0.65)
+                .scaled(1.0 - burst_age / FX_CORE_S);
+            cores.push(crate::AnimCell::still(
+                event.origin.0.round() as i32,
+                event.origin.1.round() as i32,
+                Cell::new('█', hot, STAGE_BG).with_glow(1.2).with_scale(1.6),
+            ));
+        }
+        let ember_fade = 0.55;
+        emitters.push(crate::fx::Emitter {
+            origin: event.origin,
+            start: born,
+            lifetime: FX_BURST_S,
+            cell: Cell::new('o', event.color, BG).with_glow(0.85),
+            kind: crate::fx::Effect::Ring {
+                count: 8,
+                radius: event.radius.max(1.4),
+            },
+        });
+        emitters.push(crate::fx::Emitter {
+            origin: event.origin,
+            start: born + 0.06,
+            lifetime: FX_BURST_S + 0.1,
+            cell: Cell::new('•', event.color, BG).with_glow(ember_fade),
+            kind: crate::fx::Effect::Burst {
+                count: 14,
+                speed: 3.2,
+                seed: hash2(
+                    (event.origin.0 * 10.0) as i32,
+                    (event.origin.1 * 10.0) as i32,
+                    71,
+                ),
+            },
+        });
+        if !event.digits.is_empty() {
+            let shift = event.digits.chars().count() as f32 / 2.0;
+            emitters.push(crate::fx::Emitter {
+                origin: (event.origin.0 - shift, event.origin.1 - 2.0),
+                start: born,
+                lifetime: 0.7,
+                cell: Cell::new('0', Rgb::new(255, 240, 200), BG).with_glow(1.0),
+                kind: crate::fx::Effect::Number {
+                    text: event.digits.clone(),
+                    rise: 1.1,
+                },
+            });
+        }
+    }
+    let mut layer = crate::fx::layer("fx", 2, &emitters, t);
+    layer.cells.reserve(cores.len());
+    for core in cores {
+        layer.push(core);
+    }
+    layer
+}
+
 pub fn scene_from_view_sized(view: &SceneView, width: i32, height: i32) -> (Scene, Camera) {
     scene_from_view_sized_cached(view, width, height, &mut StaticLayers::new())
 }
@@ -1167,7 +1423,7 @@ pub fn scene_from_view_sized_cached(
     height: i32,
     cache: &mut StaticLayers,
 ) -> (Scene, Camera) {
-    let extra_hud = (view.boss.is_some() as i32) * 2 + (view.target.is_some() as i32) * 2;
+    let extra_hud = (view.boss.is_some() as i32) * 3 + (view.target.is_some() as i32) * 3;
     let (width, hud_h, world_h, log_h) = layout(width, height, extra_hud);
     let dungeon = view.zone_kind == ZoneKind::Dungeon;
     // Camera first: ground and rain build only the visible range plus a
@@ -1191,7 +1447,8 @@ pub fn scene_from_view_sized_cached(
     hud.fill_rect(0, 0, width, hud_h, Cell::new(' ', HUD_DIM, PANEL_BG));
     let mut row = 0;
     if let Some(boss) = &view.boss {
-        if row + 1 < hud_h {
+        // Big label occupies two rows; bar cells sit under it.
+        if row + 2 < hud_h {
             let mut label = format!("{}  {}/{}", boss.name, boss.hp.max(0), boss.max_hp.max(1));
             if let Some(phase) = &boss.phase {
                 label = format!(
@@ -1202,18 +1459,17 @@ pub fn scene_from_view_sized_cached(
                     boss.max_hp.max(1)
                 );
             }
-            push_centered(
-                &mut hud,
+            push_hud_text(
+                &mut scene,
                 row,
                 width,
                 &label,
                 Rgb::new(255, 120, 110),
-                PANEL_BG,
                 true,
             );
             push_bar(
                 &mut hud,
-                row + 1,
+                row + 2,
                 width,
                 boss.hp,
                 boss.max_hp,
@@ -1223,16 +1479,15 @@ pub fn scene_from_view_sized_cached(
                     bg: PANEL_BG,
                 },
             );
-            row += 2;
+            row += 3;
         }
     }
     if let Some(target) = &view.target {
-        if row + 1 < hud_h {
-            fit_text(
-                &mut hud,
-                1,
+        if row + 2 < hud_h {
+            push_hud_text(
+                &mut scene,
                 row,
-                width - 2,
+                width,
                 &format!(
                     "Target: {}  {}/{}",
                     target.name,
@@ -1240,11 +1495,11 @@ pub fn scene_from_view_sized_cached(
                     target.max_hp.max(1)
                 ),
                 Rgb::new(235, 235, 235),
-                true,
+                false,
             );
             push_bar(
                 &mut hud,
-                row + 1,
+                row + 2,
                 width,
                 target.hp,
                 target.max_hp,
@@ -1254,23 +1509,22 @@ pub fn scene_from_view_sized_cached(
                     bg: PANEL_BG,
                 },
             );
-            row += 2;
+            row += 3;
         }
     }
-    if row < hud_h {
-        fit_text(
-            &mut hud,
-            1,
+    if row + 1 < hud_h {
+        push_hud_text(
+            &mut scene,
             row,
-            width - 2,
+            width,
             &format!(
                 "{}  HP {}/{}  Tick {}",
                 view.zone, view.player.hp, view.player.max_hp, view.tick
             ),
             HUD_FG,
-            true,
+            false,
         );
-        row += 1;
+        row += 2;
     }
     if row < hud_h {
         fit_text(
@@ -1278,7 +1532,7 @@ pub fn scene_from_view_sized_cached(
             1,
             row,
             width - 2,
-            "[WASD] move   [F] attack   [R] rest   [Q/Esc] quit",
+            "[WASD] move   [F] attack   [1-3] cast   [R] rest   [Q/Esc] quit",
             Rgb::new(110, 130, 150),
             false,
         );
@@ -1287,6 +1541,7 @@ pub fn scene_from_view_sized_cached(
 
     let ground = cache.ground_for(view, camera.x, camera.y, width, world_h);
     scene.layers.push(ground);
+    scene.layers.push(stage_pass(view));
 
     let props = cache.props_for(view);
     scene.layers.push(props);
@@ -1304,15 +1559,9 @@ pub fn scene_from_view_sized_cached(
     // Calm underground: no rain streaks in the vault (reference dungeon
     // footage holds still whole seconds; flashes live outside).
     if !dungeon {
-        let mut rain = Layer::new("rain", 1);
-        push_rain(
-            &mut rain,
-            camera.x - 8,
-            camera.x + width + 8,
-            camera.y - 8,
-            camera.y + world_h + 8,
-        );
-        scene.layers.push(rain);
+        scene
+            .layers
+            .push(cache.rain_for(camera.x, camera.y, width, world_h));
     }
 
     // Front air: drifting motes pass in front of actors (fireflies cross
@@ -1320,6 +1569,13 @@ pub fn scene_from_view_sized_cached(
     let mut air = Layer::new("air", 2);
     push_motes(&mut air, if dungeon { 10 } else { 44 });
     scene.layers.push(air);
+
+    // Combat FX above the actor bodies; the target decal below them (both
+    // tie z with existing layers, so insertion order pins draw order).
+    scene.layers.push(fx_layer_pass(view));
+    if let Some(ring) = target_ring_pass(view) {
+        scene.layers.push(ring);
+    }
 
     let mut log = Layer::new("log", 4);
     log.fill_rect(0, 0, width, log_h, Cell::new(' ', HUD_DIM, PANEL_BG));
@@ -1330,12 +1586,20 @@ pub fn scene_from_view_sized_cached(
 
     let hud_idx = scene.layer("hud").unwrap();
     let ground_idx = scene.layer("ground").unwrap();
+    let stage_idx = scene.layer("stage").unwrap();
     let props_idx = scene.layer("props").unwrap();
     let actors_idx = scene.layer("actors").unwrap();
     let labels_idx = scene.layer("labels").unwrap();
     let air_idx = scene.layer("air").unwrap();
     let log_idx = scene.layer("log").unwrap();
-    let mut world_layers = vec![ground_idx, props_idx, actors_idx, air_idx, labels_idx];
+    let mut world_layers = vec![
+        ground_idx, stage_idx, props_idx, actors_idx, air_idx, labels_idx,
+    ];
+    if let Some(ring_idx) = scene.layer("target-ring") {
+        world_layers.push(ring_idx);
+    }
+    let fx_idx = scene.layer("fx").unwrap();
+    world_layers.push(fx_idx);
     if !dungeon {
         world_layers.push(scene.layer("rain").unwrap());
     }
@@ -1482,6 +1746,8 @@ pub fn demo_view() -> SceneView {
             hp: 6,
             max_hp: 8,
         }),
+        combat_fx: Vec::new(),
+        presentation_time_s: 0.0,
     }
 }
 
@@ -1540,6 +1806,8 @@ pub fn dungeon_view() -> SceneView {
         zone_kind: ZoneKind::Dungeon,
         boss: None,
         target: None,
+        combat_fx: Vec::new(),
+        presentation_time_s: 0.0,
     }
 }
 
@@ -1591,8 +1859,12 @@ mod tests {
             rows.iter().any(|row| row.contains("Adventurer")),
             "nameplate floats above"
         );
+        let (vitals, _) = scene_from_view(&view);
         assert!(
-            rows.iter().any(|row| row.contains("HP 20/20")),
+            vitals
+                .overlay_text
+                .iter()
+                .any(|run| run.text.contains("HP 20/20")),
             "HUD shows player vitals"
         );
     }
@@ -1698,7 +1970,8 @@ mod tests {
     #[test]
     fn actor_models_stamp_multiple_distinct_cells() {
         let view = demo_view();
-        let (scene, camera) = scene_from_view_sized(&view, 64, 23);
+        // Tall frame: the 27-row warrior helm must fit, not clip.
+        let (scene, camera) = scene_from_view_sized(&view, 64, 40);
         let frame = compose(&scene, &camera, 0.0);
         let actor_glyphs = frame
             .rows()
@@ -1710,10 +1983,26 @@ mod tests {
             actor_glyphs >= 5,
             "model focal glyphs should all be visible"
         );
-        // Volumetric art: a warrior head/crown row, not a bare focal glyph.
+        // Boss-free tall view: HUD shrinks to 3 rows, so the scaled helm
+        // clears the world partition top edge.
+        let mut plain = demo_view();
+        plain.boss = None;
+        plain.target = None;
+        let (scene, camera) = scene_from_view_sized(&plain, 64, 44);
+        let rows = compose(&scene, &camera, 0.0).rows();
+        // Volumetric body around the focal chest: '@' plus brass '=' armor
+        // fittings nearby prove armor stamps, not a bare marker glyph.
+        // (Exact helm text does not survive 0.72 downscale mapping.)
+        let focal_row = rows
+            .iter()
+            .position(|row| row.contains('@'))
+            .expect("focal chest stamps");
         assert!(
-            frame.rows().iter().any(|row| row.contains("/▲")),
-            "warrior art top should be stamped"
+            rows[focal_row..]
+                .iter()
+                .take(4)
+                .any(|row| row.contains('=')),
+            "armor fittings render below the focal chest"
         );
     }
 
@@ -1735,16 +2024,32 @@ mod tests {
 
     #[test]
     fn boss_bar_shows_name_phase_and_proportional_fill() {
-        let rows = frame_rows(&demo_view(), 0.0);
+        let view = demo_view();
+        let (scene, camera) = scene_from_view(&view);
+        let texts: Vec<&str> = scene
+            .overlay_text
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect();
         assert!(
-            rows.iter()
-                .any(|row| row.contains("Dragon") && row.contains("phase 2")),
+            texts
+                .iter()
+                .any(|t| t.contains("Dragon") && t.contains("phase 2")),
             "boss label carries the phase"
         );
         assert!(
-            rows.iter().any(|row| row.contains("4990/6000")),
+            texts.iter().any(|t| t.contains("4990/6000")),
             "boss HP numbers render"
         );
+        assert!(
+            scene
+                .overlay_text
+                .iter()
+                .filter(|run| run.text.contains("Dragon"))
+                .all(|run| run.size == 2.0),
+            "boss readout renders big"
+        );
+        let rows = compose(&scene, &camera, 0.0).rows();
         let bar = rows
             .iter()
             .find(|row| row.starts_with('[') && row.ends_with(']') && row.len() > 20)
@@ -1760,13 +2065,18 @@ mod tests {
 
     #[test]
     fn target_panel_shows_selection_with_numbers() {
-        let rows = frame_rows(&demo_view(), 0.0);
+        let (scene, _) = scene_from_view(&demo_view());
+        let texts: Vec<&str> = scene
+            .overlay_text
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect();
         assert!(
-            rows.iter().any(|row| row.contains("Target: Mossling")),
+            texts.iter().any(|t| t.contains("Target: Mossling")),
             "target name renders"
         );
         assert!(
-            rows.iter().any(|row| row.contains("6/8")),
+            texts.iter().any(|t| t.contains("6/8")),
             "target HP numbers render"
         );
     }
@@ -1819,8 +2129,8 @@ mod tests {
             .iter()
             .find(|p| p.name == "world")
             .expect("world partition");
-        // 96x34 with boss + target: 6 HUD rows, 2 log, 26 world.
-        assert_eq!((world.y, world.h), (6, 26));
+        // 96x35 with boss + target: 9 HUD rows, 2 log, 24 world.
+        assert_eq!((world.y, world.h), (9, 24));
         // Mossling pips survive plate stacking (pips rows are registered
         // in the declutter set now).
         let rows = frame_rows(&view, 0.0);
@@ -1845,7 +2155,7 @@ mod tests {
         let (scene, camera) = scene_from_view(&demo_view());
         let frame = compose(&scene, &camera, 0.0);
         assert_eq!((frame.w, frame.h), (VIEW_W, HUD_H + VIEW_H + LOG_H));
-        assert_eq!((VIEW_W, VIEW_H, HUD_H), (96, 30, 2));
+        assert_eq!((VIEW_W, VIEW_H, HUD_H), (96, 30, 3));
     }
 
     #[test]
@@ -2272,5 +2582,154 @@ mod tests {
         }
         assert!(transparent > 0, "void mask must open dark gaps");
         assert!(road > 0, "road punches through the void");
+    }
+
+    /// Demo cast with the mossling parked beside the player (melee range).
+    fn melee_view() -> SceneView {
+        let mut view = demo_view();
+        view.actors[0].x = view.player.x + 2;
+        view.actors[0].y = view.player.y;
+        view.actors[0].hp = 8;
+        view
+    }
+
+    #[test]
+    fn stage_quiets_ground_around_every_actor() {
+        let view = melee_view();
+        let (scene, _) = scene_from_view_sized(&view, 96, 50);
+        let stage = scene
+            .layer("stage")
+            .and_then(|i| scene.layers.get(i))
+            .expect("stage layer");
+        assert!(!stage.cells.is_empty(), "stage stamped cells");
+        // Every stage cell belongs to an actor's arena (the fixture uses
+        // zero render offsets), and the floor is opaque, glyph-free dark.
+        for cell in &stage.cells {
+            assert!(
+                std::iter::once(&view.player)
+                    .chain(view.actors.iter())
+                    .any(|a| (cell.x - a.x).abs() <= 3 && (cell.y - a.y).abs() <= 3),
+                "stage cell ({},{}) away from every actor",
+                cell.x,
+                cell.y
+            );
+            assert_eq!(cell.cell.bg, STAGE_BG, "stage reads as dark floor");
+            assert_eq!(cell.cell.glyph, ' ', "stage is quiet (no glyph ink)");
+        }
+    }
+
+    #[test]
+    fn melee_target_wears_the_decal_ring_and_others_do_not() {
+        let view = melee_view();
+        let (scene, _) = scene_from_view_sized(&view, 96, 50);
+        let ring = scene
+            .layer("target-ring")
+            .and_then(|i| scene.layers.get(i))
+            .expect("melee target ring layer");
+        assert!(
+            (4..=8).contains(&ring.cells.len()),
+            "dashes, not a solid circle: {}",
+            ring.cells.len()
+        );
+        for cell in &ring.cells {
+            let dx = (cell.x - view.actors[0].x).abs();
+            let dy = (cell.y - view.actors[0].y).abs();
+            assert!(
+                dx <= 2 && dy <= 2,
+                "ring dash ({},{}) hugs the target",
+                cell.x,
+                cell.y
+            );
+            assert_eq!(cell.cell.glyph, '=');
+            assert!(cell.cell.glow > 0.3, "decal glows warm");
+        }
+        // Out of melee range: no ring at all (demo positions are 32 apart).
+        let (far, _) = scene_from_view(&demo_view());
+        assert!(far.layer("target-ring").is_none(), "no ring when no target");
+    }
+
+    #[test]
+    fn combat_fx_play_the_telegraph_then_burst_timeline() {
+        let mut view = demo_view();
+        view.combat_fx = vec![SceneFx {
+            origin: (view.player.x as f32, view.player.y as f32),
+            born_s: 0.0,
+            radius: 2.4,
+            color: Rgb::new(128, 184, 255),
+            telegraph_s: 0.9,
+            digits: String::new(),
+        }];
+        let sampled = |t: f32| {
+            let mut v = view.clone();
+            v.presentation_time_s = t;
+            let (scene, _) = scene_from_view(&v);
+            scene
+                .layer("fx")
+                .and_then(|i| scene.layers.get(i))
+                .expect("fx layer")
+                .clone()
+        };
+        // Wind-up: inward-sweeping dashes with remaining glow, no core yet.
+        let telegraph = sampled(0.4);
+        assert!(!telegraph.cells.is_empty(), "telegraph dashes present");
+        assert!(
+            telegraph
+                .cells
+                .iter()
+                .all(|c| c.cell.glyph == '-' || c.cell.glyph == '|'),
+            "dashes read as strokes, not dots"
+        );
+        assert!(
+            telegraph.cells.iter().all(|c| c.cell.glow > 0.3),
+            "telegraph ink still glows mid-sweep"
+        );
+        // Impact phase at 0.1 s into the burst: core + expanding ring.
+        let mid = sampled(1.0);
+        assert!(
+            mid.cells.iter().any(|c| c.cell.glyph == '█'),
+            "burst opens with the solid core"
+        );
+        assert!(
+            mid.cells.iter().any(|c| c.cell.glyph == 'o'),
+            "expanding ring follows the core"
+        );
+        // The core never lingers.
+        let after = sampled(1.2);
+        assert!(
+            !after.cells.iter().any(|c| c.cell.glyph == '█'),
+            "core fades quickly"
+        );
+    }
+
+    #[test]
+    fn combat_fx_raise_damage_digits() {
+        let mut view = demo_view();
+        view.presentation_time_s = 0.05;
+        let moss = view.actors[0].clone();
+        view.combat_fx = vec![SceneFx {
+            origin: (moss.x as f32, moss.y as f32),
+            born_s: 0.0,
+            radius: 1.6,
+            color: Rgb::new(250, 140, 40),
+            telegraph_s: 0.0,
+            digits: "5".into(),
+        }];
+        let (scene, _) = scene_from_view(&view);
+        let fx = scene
+            .layer("fx")
+            .and_then(|i| scene.layers.get(i))
+            .expect("fx layer");
+        assert!(
+            fx.cells.iter().any(|c| c.cell.glyph == '5'),
+            "hit digit rises"
+        );
+        assert!(
+            fx.cells.iter().all(|c| c.cell.fg.g > c.cell.fg.b),
+            "ember hue stays warm"
+        );
+        assert!(
+            fx.cells.iter().any(|c| c.cell.glyph == '█'),
+            "instant hit shows the core"
+        );
     }
 }

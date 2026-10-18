@@ -8,3 +8,8 @@
 # Local agent/runtime state and dependencies; never publish private workspace data.
 /.opencode/
 /AGENTS.md
+
+# Regenerable video-analysis artifacts (scripts + REPORT.md are tracked).
+/video-tools/out/
+/__pycache__/
+**/__pycache__/

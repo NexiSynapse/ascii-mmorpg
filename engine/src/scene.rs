@@ -1,4 +1,4 @@
-use super::{Layer, Partition, Rgb};
+use super::{overlay::TextRun, Layer, Partition, Rgb};
 
 /// Everything needed to render one moment: the layer stack plus the
 /// partitions that slice the frame (three.js analogy: `Scene`).
@@ -11,6 +11,9 @@ pub struct Scene {
     /// Global tint wash, applied after glow (reference amber washes during
     /// bursts/boss phases). `None` (default) leaves the frame untouched.
     pub wash: Option<Wash>,
+    /// Crisp overlay text (boss/target readouts) drawn big over the frame.
+    /// Headless composition ignores it; the presenter tessellates it.
+    pub overlay_text: Vec<TextRun>,
 }
 
 /// Scene-wide background tint: every opaque background gains

@@ -5,13 +5,14 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use ascii_mmorpg_shared::collision::terrain_seed;
-use ascii_mmorpg_shared::{EntityId, EntityKind, Point, WorldSnapshot};
+use ascii_mmorpg_shared::{in_melee_range, EntityId, EntityKind, Point, WorldSnapshot};
 use glam::{Mat4, Vec2, Vec3};
 
 use super::context::GpuContext;
 use super::mesh::{Frustum, MeshBuffer, SceneBatches};
 use super::pipeline::{GpuCell, GpuPipeline};
 use super::uniforms::{CameraUniforms, GpuPointLight, LightingUniforms};
+use crate::camera::CameraState;
 use crate::renderer::WeatherMode;
 
 pub struct GpuRenderer {
@@ -19,11 +20,18 @@ pub struct GpuRenderer {
     pub pipeline: GpuPipeline,
     pub mesh: MeshBuffer,
     pub batches: SceneBatches,
-    /// Display (terminal) grid in cells. The GPU renders this grid natively
-    /// (1:1, no downscale) so zoomed-out terminals stay sharp; large grids
-    /// use 2x SSAA instead of 4x to bound fill cost (see `adaptive_ssaa`).
+    /// Display (terminal) grid in cells. Used only for the composed HUD frame
+    /// dimensions; the GPU renders the scene partition natively so the blit
+    /// fills it exactly (see `scene_partition_dims`).
     pub width: i16,
     pub height: i16,
+    /// Render grid in cells: the scene partition inside the composed HUD
+    /// frame (`scene_partition_dims` of `width` x `height`). Rendering the
+    /// full terminal grid instead would be top-left cropped by the HUD blit,
+    /// breaking the scene's fill and aspect. SSAA stays 4x at every grid
+    /// size (see `adaptive_ssaa` for why the 2x tier had to go).
+    pub scene_width: i16,
+    pub scene_height: i16,
     pub weather: WeatherMode,
     pub active_modal: crate::ui::ActiveModal,
     pub last_player_pos: Option<Point>,
@@ -34,6 +42,39 @@ pub struct GpuRenderer {
     pub smooth_player_pos: Option<Vec2>,
     animation_started: Instant,
     last_render_instant: Option<Instant>,
+    pub camera: CameraState,
+    /// Combat FX (video-tools REPORT #2 impact bursts + #3 telegraphs),
+    /// spawned from combat messages the renderer observes in the snapshot.
+    /// Presentation only — positions/hues come from real game state, and
+    /// server authority is never touched.
+    combat_fx: Vec<CombatFx>,
+    seen_combat_events: Vec<String>,
+}
+
+/// Reserved entity id stamped on FX geometry so compute-pass gates treat
+/// the quads as entity cells (survive stage clearance, single-hue pop) and
+/// the metadata stays distinct from real actors.
+const FX_ENTITY_ID: u64 = 254;
+
+/// Lifetime seconds of the solid-core -> ring -> ember burst phase.
+const FX_BURST_SECONDS: f32 = 0.45;
+
+/// Seconds the telegraph ring sweeps before a queued cast resolves into
+/// its burst (reference: dashes are drawn pre-hit).
+const FX_TELEGRAPH_SECONDS: f32 = 0.9;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CombatFx {
+    /// World position (mesh scale): ground anchor of the burst.
+    pos: [f32; 3],
+    /// Single hue per damage/event type (clarity study: FX are bright
+    /// saturated single-hue ink on a dark carpet).
+    color: [f32; 4],
+    born: f32,
+    /// Telegraph lead-in; 0.0 = instant burst.
+    telegraph: f32,
+    /// Max ring radius in world units.
+    radius: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -47,8 +88,12 @@ impl GpuRenderer {
     pub fn new(width: i16, height: i16, weather: WeatherMode) -> Result<Self, String> {
         let width = width.max(20);
         let height = height.max(10);
+        let (scene_width, scene_height) =
+            crate::ui::scene_partition_dims(width as u16, height as u16);
+        let scene_width = scene_width.max(20) as i16;
+        let scene_height = scene_height.max(10) as i16;
         let ctx = GpuContext::init()?;
-        let pipeline = GpuPipeline::new(&ctx, width as u32, height as u32)?;
+        let pipeline = GpuPipeline::new(&ctx, scene_width as u32, scene_height as u32)?;
         let mesh = MeshBuffer::new();
         let batches = SceneBatches::new();
 
@@ -59,6 +104,8 @@ impl GpuRenderer {
             batches,
             width,
             height,
+            scene_width,
+            scene_height,
             weather,
             active_modal: crate::ui::ActiveModal::None,
             last_player_pos: None,
@@ -69,18 +116,38 @@ impl GpuRenderer {
             smooth_player_pos: None,
             animation_started: Instant::now(),
             last_render_instant: None,
+            camera: CameraState::default(),
+            combat_fx: Vec::new(),
+            seen_combat_events: Vec::new(),
         })
+    }
+
+    pub fn orbit_camera(&mut self, dx: i16, dy: i16) {
+        self.camera.orbit_cells(dx, dy);
+    }
+
+    pub fn reset_camera(&mut self) {
+        self.camera.reset();
     }
 
     pub fn resize(&mut self, width: i16, height: i16) {
         let width = width.max(20);
         let height = height.max(10);
+        let (scene_width, scene_height) =
+            crate::ui::scene_partition_dims(width as u16, height as u16);
+        let scene_width = scene_width.max(20) as i16;
+        let scene_height = scene_height.max(10) as i16;
         if self.width == width && self.height == height {
             return;
         }
+        if self.scene_width != scene_width || self.scene_height != scene_height {
+            self.scene_width = scene_width;
+            self.scene_height = scene_height;
+            self.pipeline
+                .resize(&self.ctx, scene_width as u32, scene_height as u32);
+        }
         self.width = width;
         self.height = height;
-        self.pipeline.resize(&self.ctx, width as u32, height as u32);
     }
 
     pub fn weather(&self) -> WeatherMode {
@@ -109,6 +176,17 @@ impl GpuRenderer {
         let (camera_uniforms, lighting) =
             self.build_scene_frame_realtime(world, frame, delta_seconds, elapsed_seconds);
 
+        // Character-clarity pass: project one floating label per actor (the
+        // player's label tracks the smoothed render position, exactly where
+        // the mesh was drawn).
+        let labels = Self::compute_scene_labels(
+            world,
+            self.smooth_player_pos,
+            &camera_uniforms,
+            self.scene_width as f32,
+            self.scene_height as f32,
+        );
+
         let cells = match self.pipeline.render_and_readback_batched(
             &self.ctx,
             &self.mesh,
@@ -122,7 +200,7 @@ impl GpuRenderer {
             }
         };
 
-        self.format_frame_with_hud(&cells, world)
+        self.format_frame_with_hud(&cells, world, &labels)
     }
 
     /// Evaluates whether the player is currently walking based on position changes
@@ -233,6 +311,7 @@ impl GpuRenderer {
         }
 
         let mut batch_data = Vec::with_capacity(snapshots.len());
+        let mut batch_player_focus = Vec::with_capacity(snapshots.len());
         let mut last_pos = self.last_player_pos;
         let mut walk_phase = self.player_walk_phase;
         let mut smooth_cam = self.smooth_cam_pos;
@@ -261,12 +340,13 @@ impl GpuRenderer {
             smooth_player = Some(smooth_player.map_or(target_pos, |p| {
                 p.lerp(target_pos, damping_factor(28.8, 0.05))
             }));
+            batch_player_focus.push(smooth_player.unwrap());
 
             let mut mesh = MeshBuffer::new();
             let mut batches = SceneBatches::new();
             let (cam, light) = Self::populate_scene_smoothed(
-                self.width,
-                self.height,
+                self.scene_width,
+                self.scene_height,
                 self.weather,
                 snapshot,
                 snapshot.tick.max(i as u64),
@@ -296,8 +376,20 @@ impl GpuRenderer {
         };
 
         let mut output = Vec::with_capacity(cell_batches.len());
-        for (cells, snapshot) in cell_batches.iter().zip(snapshots.iter()) {
-            output.push(self.format_frame_with_hud(cells, snapshot));
+        for (((cells, snapshot), (_, _, cam, _)), focus) in cell_batches
+            .iter()
+            .zip(snapshots.iter())
+            .zip(batch_data.iter())
+            .zip(batch_player_focus.iter())
+        {
+            let labels = Self::compute_scene_labels(
+                snapshot,
+                Some(*focus),
+                cam,
+                self.scene_width as f32,
+                self.scene_height as f32,
+            );
+            output.push(self.format_frame_with_hud(cells, snapshot, &labels));
         }
         output
     }
@@ -371,9 +463,9 @@ impl GpuRenderer {
             }
         };
 
-        Self::populate_scene_smoothed_at_time(
-            self.width,
-            self.height,
+        let uniforms = Self::populate_scene_smoothed_at_time(
+            self.scene_width,
+            self.scene_height,
             self.weather,
             world,
             animation_time,
@@ -383,7 +475,150 @@ impl GpuRenderer {
             &mut self.mesh,
             &mut self.batches,
             Some(&actor_walk_phases),
-        )
+            self.camera,
+        );
+
+        // Combat FX (video-tools REPORT #2 impact bursts + #3 telegraphs):
+        // observation, spawn, and stamping all key off `animation_time`, so
+        // the deterministic path stays deterministic and the realtime path
+        // is frame-rate independent.
+        self.process_combat_events(world, animation_time, player_render_pos, deterministic);
+        self.stamp_combat_fx(animation_time);
+        uniforms
+    }
+
+    /// Watches the snapshot's combat log for events the renderer can show
+    /// presentation-side: melee hits (`You hit {name} for {n} damage...`)
+    /// spawn an ember burst at the named target; spell casts (`You cast
+    /// {spell}; ...`) play the reference's telegraph-then-impact sequence
+    /// at the caster — dashes sweeping for `FX_TELEGRAPH_SECONDS`, then the
+    /// burst. Dedup by exact message so replayed/snapshot worlds cannot
+    /// double-spawn.
+    fn process_combat_events(
+        &mut self,
+        world: &WorldSnapshot,
+        animation_time: f32,
+        player_focus: Vec2,
+        deterministic: bool,
+    ) {
+        if deterministic {
+            // Deterministic test/demo builds skip observation so their mesh
+            // output stays a pure function of the standalone world snapshot.
+            return;
+        }
+        for message in &world.messages {
+            if self.seen_combat_events.iter().any(|seen| seen == message) {
+                continue;
+            }
+            if let Some(fx) =
+                Self::combat_fx_from_message(message, world, player_focus, animation_time)
+            {
+                self.combat_fx.push(fx);
+            }
+            self.seen_combat_events.push(message.clone());
+        }
+        if self.seen_combat_events.len() > 64 {
+            self.seen_combat_events
+                .drain(..self.seen_combat_events.len() - 64);
+        }
+        if self.combat_fx.len() > 16 {
+            self.combat_fx.drain(..self.combat_fx.len() - 16);
+        }
+        // Drop expired bursts.
+        self.combat_fx
+            .retain(|fx| animation_time - fx.born < fx.telegraph + FX_BURST_SECONDS);
+    }
+
+    /// Message -> FX translation; None for non-combat lines. Melee hits
+    /// resolve the target's world position by display name (presentation
+    /// ambiguity only: duplicate mob names pick the first).
+    fn combat_fx_from_message(
+        message: &str,
+        world: &WorldSnapshot,
+        player_focus: Vec2,
+        animation_time: f32,
+    ) -> Option<CombatFx> {
+        const EMBER: [f32; 4] = [0.98, 0.55, 0.16, 1.0];
+        const ARC: [f32; 4] = [0.97, 0.66, 0.18, 1.0];
+        const LIGHTNING: [f32; 4] = [0.50, 0.72, 1.0, 1.0];
+        const SPIRIT: [f32; 4] = [0.55, 0.95, 1.0, 1.0];
+        const NEUTRAL: [f32; 4] = [0.80, 0.80, 0.86, 1.0];
+
+        let world_pos = |x: f32, z: f32| [x, 0.15, z];
+        if let Some(rest) = message.strip_prefix("You hit ") {
+            let name_end = rest.find(" for ")?;
+            let name = rest[..name_end].trim();
+            if let Some(target) = world.entities.iter().find(|entity| entity.name == name) {
+                return Some(CombatFx {
+                    pos: world_pos(
+                        target.position.x as f32 * 0.8,
+                        target.position.y as f32 * 0.8,
+                    ),
+                    color: EMBER,
+                    born: animation_time,
+                    telegraph: 0.0,
+                    radius: 0.8,
+                });
+            }
+            return None;
+        }
+        if let Some(rest) = message.strip_prefix("You cast ") {
+            let spell = rest
+                .split(';')
+                .next()
+                .unwrap_or(rest)
+                .trim()
+                .to_ascii_lowercase();
+            let (color, radius, telegraph) = if spell.contains("thunder") {
+                (LIGHTNING, 1.9, FX_TELEGRAPH_SECONDS)
+            } else if spell.contains("iron") || spell.contains("will") {
+                (SPIRIT, 1.1, 0.6)
+            } else if spell.contains("cleave") {
+                (ARC, 1.0, 0.7)
+            } else {
+                (NEUTRAL, 0.9, FX_TELEGRAPH_SECONDS)
+            };
+            return Some(CombatFx {
+                pos: world_pos(player_focus.x, player_focus.y),
+                color,
+                born: animation_time,
+                telegraph,
+                radius,
+            });
+        }
+        None
+    }
+
+    /// Stamps this frame's telegraph dashes and burst geometry.
+    fn stamp_combat_fx(&mut self, animation_time: f32) {
+        for fx in &self.combat_fx {
+            let age = animation_time - fx.born;
+            if age < 0.0 {
+                continue;
+            }
+            // Class 0 on purpose: the post pass tints edge cells 60% toward
+            // the class color, and FX quads are so small that nearly every
+            // cell is an edge — the class tint would swamp the authored
+            // per-school hue. Class 0 keeps emissive albedo verbatim.
+            self.mesh.set_entity_context(FX_ENTITY_ID, 0);
+            if fx.telegraph > 0.0 && age < fx.telegraph {
+                let sweep = age / fx.telegraph;
+                // Dashes sweep inward + rotate while the wind-up runs.
+                let radius = fx.radius * (1.0 - 0.25 * sweep);
+                self.mesh
+                    .add_ground_ring(fx.pos, radius, fx.color, sweep * 1.5, 10);
+            } else {
+                let burst_age = if fx.telegraph > 0.0 {
+                    age - fx.telegraph
+                } else {
+                    age
+                };
+                let progress = burst_age / FX_BURST_SECONDS;
+                self.mesh
+                    .add_impact_burst(fx.pos, progress, fx.color, fx.radius.max(0.8));
+            }
+            self.mesh.set_entity_context(0, 0);
+        }
     }
 
     /// Populates scene geometry and fills hardware instance batches for a given target buffer set.
@@ -434,6 +669,7 @@ impl GpuRenderer {
             mesh,
             batches,
             None,
+            CameraState::default(),
         )
     }
 
@@ -450,21 +686,26 @@ impl GpuRenderer {
         mesh: &mut MeshBuffer,
         batches: &mut SceneBatches,
         actor_walk_phases: Option<&HashMap<EntityId, f32>>,
+        camera_state: CameraState,
     ) -> (CameraUniforms, LightingUniforms) {
         let px = player_render_pos.x;
         let pz = player_render_pos.y;
 
-        // 1. Setup Camera (Isometric 2.5D perspective looking North towards -Z).
-        // Framed closer than the original wide shot so actors read at default
-        // terminal zoom: narrower FOV + lower eye keeps entities several cells
-        // tall without changing world scale.
-        let cam_eye = Vec3::new(cam_pos.x, 9.8, cam_pos.y + 11.5);
+        // 1. Setup the OSRS-style elevated orbit camera. The camera follows the
+        // smoothed player focus, while yaw/pitch remain client-local and are
+        // changed only by holding right mouse and dragging.
+        let horizontal = camera_state.distance * camera_state.pitch.cos();
+        let cam_eye = Vec3::new(
+            cam_pos.x + camera_state.yaw.sin() * horizontal,
+            camera_state.pitch.sin() * camera_state.distance,
+            cam_pos.y + camera_state.yaw.cos() * horizontal,
+        );
         let cam_target = Vec3::new(cam_pos.x, 0.8, cam_pos.y);
         let cam_up = Vec3::new(0.0, 1.0, 0.0);
 
         let view = Mat4::look_at_rh(cam_eye, cam_target, cam_up);
         let aspect = (width as f32 / height as f32) * 0.48;
-        let proj = Mat4::perspective_rh(38.0f32.to_radians(), aspect, 0.1, 100.0);
+        let proj = Mat4::perspective_rh(34.0f32.to_radians(), aspect, 0.1, 100.0);
         let view_proj = proj * view;
         let inv_view_proj = view_proj.inverse();
         let frustum = Frustum::from_view_proj(&view_proj);
@@ -593,22 +834,22 @@ impl GpuRenderer {
                     let label = entity.name.to_ascii_lowercase();
                     if label.contains("warrior") {
                         mesh.add_skeleton_warrior([ex, 0.0, ez], gait_phase, 0.0);
-                        0.72 // armored champion with broad shield and crest
+                        0.88 // readable OSRS-style player-sized champion
                     } else if label.contains("skeleton") {
                         mesh.add_skeleton([ex, 0.0, ez], gait_phase, 0.0);
-                        0.70 // lean undead frame
+                        0.84 // lean undead frame, still readable at top-down zoom
                     } else {
                         mesh.add_mossling([ex, 0.0, ez], gait_phase);
-                        0.78 // stocky, low-slung beast
+                        0.90 // stocky, low-slung beast
                     }
                 }
                 EntityKind::Npc => {
                     mesh.add_herbalist([ex, 0.0, ez], time);
-                    0.72 // human height; staff and lantern scale with the body
+                    0.88 // human height; staff and lantern scale with the body
                 }
                 EntityKind::Player => {
                     mesh.add_humanoid([ex, 0.0, ez], 0.0, 0.0, 0.0);
-                    0.72
+                    0.90
                 }
                 EntityKind::Item => {
                     let hover = (time * 3.0 + ex).sin() * 0.15;
@@ -629,8 +870,12 @@ impl GpuRenderer {
 
         mesh.set_entity_context(world.player.id, 1);
         let player_vertices = mesh.vertices.len();
-        mesh.add_humanoid([px, 0.0, pz], 0.0, walk_phase, 0.0);
-        mesh.scale_vertices_since(player_vertices, [px, 0.0, pz], 0.72);
+        // The humanoid part geometry faces +Z (toward the yaw-0 camera eye);
+        // passing the camera yaw keeps the player's head and body facing the
+        // viewer as the orbit camera swings. Presentation-only: yaw never
+        // enters snapshots or the wire protocol.
+        mesh.add_humanoid([px, 0.0, pz], camera_state.yaw, walk_phase, 0.0);
+        mesh.scale_vertices_since(player_vertices, [px, 0.0, pz], 0.90);
         mesh.set_entity_context(0, 0);
 
         // 4. Instanced Props with View-Frustum Culling (Asciicker plane culling optimization)
@@ -662,6 +907,13 @@ impl GpuRenderer {
                 let seed = terrain_seed(gx, gy);
                 let tree_wx = gx * 11 + (seed % 5) as i16;
                 let tree_wy = gy * 9 + ((seed / 7) % 5) as i16;
+                // Trees stop at the shoreline: the beach and the open water
+                // south of the walkable bound (see add_terrain's ocean band)
+                // must stay clear — a pine standing in the surf rasterizes
+                // as letter noise across the sea.
+                if tree_wy >= 32 {
+                    continue;
+                }
                 if tree_wx.abs() > 4
                     && seed % 9 == 0
                     && (tree_wx, tree_wy) != (-7, -2)
@@ -682,21 +934,28 @@ impl GpuRenderer {
             }
         }
 
-        // Colonnade Pillars: West (-10, -5) -> [-8.0, -4.0], East (-6, -5) -> [-4.8, -4.0]
-        // Generous bounds so landmark props survive the closer default framing.
         let pillars = [([-8.0, 0.0, -4.0], 1.0), ([-4.8, 0.0, -4.0], 0.76)];
         for (pos, height_scale) in pillars {
-            if frustum.test_sphere(Vec3::from(pos) + Vec3::new(0.0, 1.5, 0.0), 4.5) {
+            if frustum.test_sphere(Vec3::from(pos) + Vec3::new(0.0, 1.5, 0.0), 7.0) {
                 batches.add_pillar(pos, height_scale);
             }
         }
 
-        // Meadow grass: denser crossed-blade field (~50% coverage). Profiled as
-        // vertex-cheap under 4x SSAA; reduce modulus or range if batch timing regresses.
+        // Meadow grass: sparse crossed-blade tufts (1 in 5 tiles, ~20%
+        // coverage). The old per-cell field put stroke glyphs ('|', '/', '\')
+        // on most of the screen (video-tools REPORT #1: reference ground is a
+        // quiet punctuation carpet with occasional tufts, not a blade forest).
+        // Vertex-cheap; reduce modulus or range if batch timing regresses.
         for gx in (cam_tile_x - 18)..=(cam_tile_x + 18) {
             for gy in (cam_tile_y - 14)..=(cam_tile_y + 14) {
+                // Grass stops at the beach line: blades over the wet sand or
+                // the ocean read as texture soup on the water (user-reported
+                // "grass texture everywhere" on the shore view).
+                if gy >= 32 {
+                    continue;
+                }
                 let seed = terrain_seed(gx, gy);
-                if seed % 2 != 0 {
+                if seed % 5 != 0 {
                     continue;
                 }
                 let x = gx as f32 * 0.8 + (seed % 7) as f32 * 0.08;
@@ -723,10 +982,100 @@ impl GpuRenderer {
         cells: &[GpuCell],
         camera: &CameraUniforms,
     ) -> Option<Vec3> {
-        let idx = screen_y * self.width as usize + screen_x;
+        let idx = screen_y * self.scene_width as usize + screen_x;
         let cell = cells.get(idx)?;
         let depth = cell.depth();
         Some(camera.unproject_screen_to_world(screen_x as f32, screen_y as f32, depth))
+    }
+
+    /// Character-clarity pass (video-tools REPORT clarity study): one
+    /// projected floating label per actor — dark-backed nameplate anchors
+    /// over heads, HP digits, and the dashed ring under the melee target.
+    /// The target rule mirrors `Command::Attack`'s presentation-side view:
+    /// the nearest living monster in melee range is what the next `F` hits.
+    /// Uses the same `view_proj` the mesh pass used, so plates land on heads.
+    fn compute_scene_labels<'a>(
+        world: &'a WorldSnapshot,
+        player_render_pos: Option<Vec2>,
+        camera_uniforms: &CameraUniforms,
+        scene_width: f32,
+        scene_height: f32,
+    ) -> Vec<crate::ui::SceneLabel<'a>> {
+        let view_proj = Mat4::from_cols_array_2d(&camera_uniforms.view_proj);
+        let target_id = world
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.kind == EntityKind::Monster
+                    && entity.stats.is_alive()
+                    && in_melee_range(world.player.position, entity.position)
+            })
+            .min_by_key(|entity| {
+                (entity.position.x - world.player.position.x).abs()
+                    + (entity.position.y - world.player.position.y).abs()
+            })
+            .map(|entity| entity.id);
+
+        let project = |world_pos: Vec3| -> Option<(f32, f32)> {
+            let clip = view_proj * world_pos.extend(1.0);
+            if clip.w <= 0.0 {
+                return None;
+            }
+            let ndc = clip.truncate() / clip.w;
+            // Small margin so actors grazing the edge still get plates.
+            if ndc.x < -1.05 || ndc.x > 1.05 || ndc.y < -1.05 || ndc.y > 1.05 {
+                return None;
+            }
+            Some((
+                (ndc.x * 0.5 + 0.5) * scene_width,
+                (0.5 - ndc.y * 0.5) * scene_height,
+            ))
+        };
+
+        let player_focus = player_render_pos.unwrap_or_else(|| {
+            Vec2::new(
+                world.player.position.x as f32 * 0.8,
+                world.player.position.y as f32 * 0.8,
+            )
+        });
+
+        let mut labels = Vec::with_capacity(world.entities.len() + 1);
+        for actor in world.entities.iter().chain(std::iter::once(&world.player)) {
+            let is_player = actor.id == world.player.id;
+            let (x, z) = if is_player {
+                (player_focus.x, player_focus.y)
+            } else {
+                (actor.position.x as f32 * 0.8, actor.position.y as f32 * 0.8)
+            };
+            let head_y = match actor.kind {
+                EntityKind::Item => 0.6,
+                EntityKind::Monster => 2.0,
+                _ => 2.35,
+            };
+            let (Some((col, feet_row)), Some((_, head_row))) = (
+                project(Vec3::new(x, 0.1, z)),
+                project(Vec3::new(x, head_y, z)),
+            ) else {
+                continue;
+            };
+            let hp = match actor.kind {
+                EntityKind::Item | EntityKind::Player => None,
+                _ => Some((
+                    actor.stats.hp.max(0) as u32,
+                    actor.stats.max_hp.max(0) as u32,
+                )),
+            };
+            labels.push(crate::ui::SceneLabel {
+                col,
+                feet_row,
+                head_row,
+                name: actor.name.as_str(),
+                hp,
+                is_player,
+                is_target: Some(actor.id) == target_id,
+            });
+        }
+        labels
     }
 
     /// High-performance zero-allocation ANSI string formatter (native 1:1 grid).
@@ -736,11 +1085,16 @@ impl GpuRenderer {
     /// escape on nearly every cell, bloating frames (~2x bytes) and choking
     /// Windows ConPTY parsing at zoomed-out grids. 5-bit steps are visually
     /// near-identical for glyph art but collapse long runs into one escape.
-    fn format_frame_with_hud(&self, cells: &[GpuCell], world: &WorldSnapshot) -> String {
+    fn format_frame_with_hud(
+        &self,
+        cells: &[GpuCell],
+        world: &WorldSnapshot,
+        labels: &[crate::ui::SceneLabel<'_>],
+    ) -> String {
         // Lower GPU cells to shared scene cells and compose the full frame in
         // one Ratatui buffer (scene + HUD + overlay), exactly like the CPU
         // path. Channel quantization is preserved for ANSI run-merging.
-        let width = self.width as usize;
+        let scene_width = self.scene_width as usize;
         let scene: Vec<crate::partitions::SceneCell> = cells
             .iter()
             .map(|cell| crate::partitions::SceneCell {
@@ -761,13 +1115,16 @@ impl GpuRenderer {
         let mut hud = crate::ui::RatatuiHud::new();
         hud.render_composed_frame(crate::ui::ComposedScene {
             world,
+            // The composed HUD frame always spans the full terminal; the
+            // scene grid is the smaller partition `blit_scene` fills exactly.
             width: self.width.max(20) as u16,
             height: self.height.max(10) as u16,
             weather: self.weather,
             backend_name: "WGPU 3D BATCHED PIPELINE",
             modal: self.active_modal,
             cells: &scene,
-            cells_width: width.max(1),
+            cells_width: scene_width.max(1),
+            labels,
         })
     }
 }
@@ -1198,12 +1555,12 @@ f 2 5 4 3
     }
 
     #[test]
-    fn large_terminal_renders_natively_with_reduced_ssaa() {
-        // Native 1:1 cell grid at any zoom (no downscale blur).
+    fn ssaa_is_fixed_4x_for_every_grid_size() {
+        // The former adaptive 2x tier broke the compute pass's 4x-locked tap
+        // grid (half-block coverage artifact); SSAA is now 4x everywhere.
         assert_eq!(crate::gpu::pipeline::adaptive_ssaa(80, 30), 4);
-        // Zoomed-out grids keep full cell resolution; only sub-pixel samples
-        // drop 4x -> 2x to bound fill cost.
-        assert_eq!(crate::gpu::pipeline::adaptive_ssaa(220, 70), 2);
+        assert_eq!(crate::gpu::pipeline::adaptive_ssaa(128, 36), 4);
+        assert_eq!(crate::gpu::pipeline::adaptive_ssaa(220, 70), 4);
     }
 
     #[test]
@@ -1212,17 +1569,31 @@ f 2 5 4 3
             eprintln!("Skipping: no GPU adapter on host");
             return;
         };
+        // Terminal dims stay visible for the composed HUD frame.
         assert_eq!((renderer.width, renderer.height), (220, 70));
+        // The GPU renders the scene partition (220 - 28 side panel cols,
+        // 70 - 8 HUD rows) so its blit fills the partition exactly; the HUD
+        // bars fill the remainder. Never a downscaled render either.
         assert_eq!(
             (renderer.pipeline.width, renderer.pipeline.height),
-            (220, 70),
-            "GPU must render the native grid, never a downscaled one"
+            (192, 62),
+            "GPU must render the scene partition at native cell resolution"
         );
-        assert_eq!(renderer.pipeline.ssaa, 2);
+        assert_eq!(renderer.pipeline.ssaa, 4);
         let world = sample_world();
         let frame = renderer.render_frame(&world, 0);
         // 70 scene rows + HUD block must still fill the display grid.
         assert!(frame.lines().count() >= 70, "output must fill display grid");
+    }
+
+    #[test]
+    fn scene_partition_dims_match_composed_layout() {
+        // Wide terminal: side panel consumes 28 columns, HUD bars 8 rows.
+        assert_eq!(crate::ui::scene_partition_dims(120, 30), (92, 22));
+        // Narrow terminal: no side panel; the blit keeps the full width.
+        assert_eq!(crate::ui::scene_partition_dims(60, 30), (60, 22));
+        // Minimums stay safe; the composed frame clamps to the same bounds.
+        assert_eq!(crate::ui::scene_partition_dims(40, 10), (40, 4));
     }
 
     #[test]
@@ -1236,5 +1607,340 @@ f 2 5 4 3
         let frame = renderer.render_frame(&world, 0);
         assert!(frame.contains("PAUSED"), "paused frame must show the menu");
         assert!(frame.contains("Resume play"));
+    }
+
+    #[test]
+    fn ocean_renders_when_the_player_reaches_the_south_map_edge() {
+        // The southern ocean lives beyond WORLD_BOUNDS.max_y (mesh z = 28.0
+        // at the renderer's 0.8 scale). A player standing near the boundary
+        // must get open water inside the terrain radius.
+        let mut world = sample_world();
+        world.player.position = Point { x: 2, y: 33 };
+        let mut mesh = MeshBuffer::new();
+        let mut batches = SceneBatches::new();
+        let _ = GpuRenderer::populate_scene(
+            128,
+            36,
+            WeatherMode::Rain,
+            &world,
+            0,
+            0.0,
+            &mut mesh,
+            &mut batches,
+        );
+        let water = mesh
+            .vertices
+            .iter()
+            .filter(|v| v.material_id >= 5.8 && v.material_id <= 6.2)
+            .count();
+        assert!(water > 0, "ocean geometry must exist south of the boundary");
+
+        let shore = 28.0;
+        for v in mesh
+            .vertices
+            .iter()
+            .filter(|v| v.material_id >= 5.8 && v.material_id <= 6.2)
+        {
+            assert!(
+                v.position[2] >= shore - 1e-4,
+                "water must stay south of the shoreline: {:?}",
+                v.position
+            );
+        }
+
+        // Interior semantics: the terrain window always extends to its
+        // radius, so even the inland sample world gets far-south water
+        // vertices — but they must start well beyond the meadow view, while
+        // the near-edge build above gets water within a screen-reachable
+        // band south of the player (player z = 33 * 0.8 = 26.4).
+        let mut inland = MeshBuffer::new();
+        let mut inland_batches = SceneBatches::new();
+        let _ = GpuRenderer::populate_scene(
+            128,
+            36,
+            WeatherMode::Rain,
+            &sample_world(),
+            0,
+            0.0,
+            &mut inland,
+            &mut inland_batches,
+        );
+        let interior_player_z = 2.0 * 0.8;
+        let water_z = |mesh: &MeshBuffer| {
+            mesh.vertices
+                .iter()
+                .filter(|v| v.material_id >= 5.8 && v.material_id <= 6.2)
+                .map(|v| v.position[2])
+                .fold(f32::NAN, f32::min)
+        };
+        let near_min_z = water_z(&mesh);
+        assert!(
+            !near_min_z.is_nan() && near_min_z <= 26.4 + 4.0,
+            "near-edge player must get water within a few cells south"
+        );
+        let inland_min_z = water_z(&inland);
+        assert!(
+            !inland_min_z.is_nan() && inland_min_z > 28.0 && inland_min_z < 30.0,
+            "inland terrain window must contain water only at the boundary rows, got min z {inland_min_z}"
+        );
+        assert!(
+            inland_min_z > interior_player_z + 24.0,
+            "inland ocean water should sit far south of the meadow view: {inland_min_z}"
+        );
+    }
+
+    #[test]
+    fn shore_view_outputs_rolling_wave_glyph_language() {
+        // End-to-end ASCII proof: standing on the beach, the south half of
+        // the scene rasterizes into the material-6 wave language ('~' '='
+        // ramp lines and '*' foam caps driven by the rolling swell + foam
+        // shading), far more often than the meadow-interior view, which
+        // cannot see the ocean at all. Two frames built in one process keep
+        // the known run-to-run GPU tie-flip noise irrelevant at the margin.
+        let Ok(mut edge) = GpuRenderer::new(120, 30, WeatherMode::Rain) else {
+            eprintln!("Skipping shore_view_outputs_rolling_wave_glyph_language: no GPU adapter");
+            return;
+        };
+        let mut shore_world = sample_world();
+        shore_world.player.position = Point { x: 2, y: 33 }; // ~2 cells north of the shoreline
+        let shore_frame = edge.render_frame(&shore_world, 0);
+        drop(edge);
+
+        let Ok(mut inland) = GpuRenderer::new(120, 30, WeatherMode::Rain) else {
+            eprintln!("Skipping shore_view_outputs_rolling_wave_glyph_language: no GPU adapter");
+            return;
+        };
+        let inland_frame = inland.render_frame(&sample_world(), 0);
+        drop(inland);
+
+        // Strip ANSI payloads (both color "…m" and cursor "…H" sequences)
+        // crudely: everything after the first letter of the sequence body is
+        // frame payload text; digits that survive malformed splits contain
+        // no wave-language glyphs.
+        let wave_count = |frame: &str| {
+            frame
+                .split("\x1b[")
+                .map(|chunk| chunk.split_once('m').map(|(_, rest)| rest).unwrap_or(chunk))
+                .flat_map(|text| text.chars())
+                .filter(|c| matches!(c, '~' | '=' | '*'))
+                .count()
+        };
+        let shore_waves = wave_count(&shore_frame);
+        let inland_waves = wave_count(&inland_frame);
+        eprintln!("wave glyph counts: shore {shore_waves} vs inland {inland_waves}");
+        assert!(
+            shore_waves > inland_waves + 200,
+            "rolling wave/foam language must dominate the shoreline view: shore {shore_waves} vs inland {inland_waves}"
+        );
+    }
+
+    #[test]
+    fn scene_labels_project_onto_actor_cells() {
+        // Character-clarity pass: labels use the same view_proj the mesh
+        // pass used, so plates land on heads. The melee-range Mossling is
+        // the marked target (the rule mirrors Command::Attack), the
+        // out-of-range Skeleton is not, and the player's plate skips the
+        // HP row (the top HUD bar already shows vitals).
+        let eye = Vec3::new(0.9, 16.1, 13.4);
+        let view = Mat4::look_at_rh(eye, Vec3::new(3.2, 1.0, 1.6), Vec3::Y);
+        let proj = Mat4::perspective_rh(34.0f32.to_radians(), 0.48, 0.1, 100.0);
+        let camera_uniforms = CameraUniforms {
+            view_proj: (proj * view).to_cols_array_2d(),
+            inv_view_proj: [[0.0; 4]; 4],
+            camera_pos: [eye.x, eye.y, eye.z, 0.0],
+            time: 0.0,
+            weather_mode: 0,
+            width: 100,
+            height: 40,
+        };
+        let mut world = sample_world();
+        // The shipped 34°/0.48 camera frame is narrow; pull the second mob
+        // near-frame for the projection assertions while keeping it outside
+        // melee range (manhattan 4 vs the Mossling's 1).
+        world.entities[1].position = Point { x: 6, y: 2 };
+        let labels = GpuRenderer::compute_scene_labels(&world, None, &camera_uniforms, 100.0, 40.0);
+
+        let player = labels.iter().find(|l| l.is_player).expect("player label");
+        assert!(
+            (15.0..=30.0).contains(&player.col),
+            "player feet project near the camera focus column: {player:?}"
+        );
+        assert!(player.head_row < player.feet_row, "head above feet");
+        assert!(player.hp.is_none(), "player plates skip the HP row");
+
+        let mossling = labels
+            .iter()
+            .find(|l| l.name == "Mossling")
+            .expect("melee monster label");
+        assert!(
+            mossling.is_target,
+            "melee-range monster is the marked target"
+        );
+        assert_eq!(mossling.hp, Some((8, 8)), "monster plates carry HP digits");
+
+        let skeleton = labels
+            .iter()
+            .find(|l| l.name == "Skeleton")
+            .expect("far monster label");
+        assert!(
+            !skeleton.is_target,
+            "out-of-range monster is not the target"
+        );
+        assert!(
+            (65.0..=90.0).contains(&skeleton.col),
+            "second mob projects on the opposite flank: {skeleton:?}"
+        );
+
+        assert!(
+            labels
+                .iter()
+                .all(|l| (0.0..=100.0).contains(&l.col) && (0.0..=40.0).contains(&l.feet_row)),
+            "labels stay on the scene grid"
+        );
+    }
+
+    #[test]
+    fn combat_messages_translate_into_fx_specs() {
+        let world = sample_world();
+        let focus = Vec2::new(1.6, 1.6);
+
+        let hit = GpuRenderer::combat_fx_from_message(
+            "You hit Mossling for 5 damage.",
+            &world,
+            focus,
+            3.0,
+        )
+        .expect("hit message spawns impact FX");
+        assert_eq!(hit.pos, [2.4, 0.15, 1.6], "burst anchors at the target");
+        assert_eq!(hit.telegraph, 0.0, "melee hits burst instantly");
+        assert_eq!(hit.born, 3.0, "FX timelines key off animation time");
+
+        let cast = GpuRenderer::combat_fx_from_message(
+            "You cast Cleave; spell effects are queued for the next combat slice.",
+            &world,
+            focus,
+            4.0,
+        )
+        .expect("cast message spawns telegraph FX");
+        assert!(cast.telegraph > 0.0, "casts sweep a pre-hit ring first");
+        assert_eq!(cast.pos, [focus.x, 0.15, focus.y], "caster is the anchor");
+
+        let thunder = GpuRenderer::combat_fx_from_message(
+            "You cast Thunder Mark; spell effects are queued for the next combat slice.",
+            &world,
+            focus,
+            5.0,
+        )
+        .expect("thunder message spawns FX");
+        assert_ne!(thunder.color, cast.color, "single hue per spell school");
+        assert!(
+            thunder.radius > cast.radius,
+            "AoE radius (2 cells) out-scales the melee arc"
+        );
+        assert_ne!(cast.color, hit.color, "spell arcs differ from melee embers");
+
+        assert_eq!(
+            GpuRenderer::combat_fx_from_message("You hit Nobody for 5 damage.", &world, focus, 6.0),
+            None,
+            "hits against unknown names stay quiet"
+        );
+        assert_eq!(
+            GpuRenderer::combat_fx_from_message("Blocked by a pine.", &world, focus, 7.0),
+            None,
+            "non-combat lines stay quiet"
+        );
+    }
+
+    #[test]
+    fn combat_fx_spawn_once_and_expire_from_snapshot_messages() {
+        let Ok(mut renderer) = GpuRenderer::new(60, 24, WeatherMode::Snow) else {
+            eprintln!("Skipping combat_fx_spawn_once_and_expire: no GPU adapter on host");
+            return;
+        };
+        let mut world = sample_world();
+        world.messages.push("You hit Mossling for 5 damage.".into());
+
+        let _ = renderer.build_scene_frame_with_timing(&world, 0, 0.05, 1.0, false);
+        assert_eq!(
+            renderer.combat_fx.len(),
+            1,
+            "hit message spawns exactly one FX"
+        );
+        assert_eq!(renderer.combat_fx[0].pos, [2.4, 0.15, 1.6]);
+        assert!(
+            renderer.mesh.vertices.iter().any(|v| {
+                v.entity_id == FX_ENTITY_ID as f32
+                    && v.material_id == 4.0
+                    && (v.position[0] - 2.4).abs() < 1.0
+                    && (v.position[2] - 1.6).abs() < 1.0
+            }),
+            "burst geometry is emissive FX-ink around the target"
+        );
+
+        // Replaying the same snapshot must not double-spawn...
+        let _ = renderer.build_scene_frame_with_timing(&world, 1, 0.05, 1.05, false);
+        assert_eq!(renderer.combat_fx.len(), 1, "deduplicated by message");
+
+        // ...and expired bursts drop off the stack.
+        let _ = renderer.build_scene_frame_with_timing(&world, 2, 0.05, 2.0, false);
+        assert!(
+            renderer.combat_fx.is_empty(),
+            "FX lifetime is telegraph + burst seconds"
+        );
+    }
+
+    #[test]
+    fn impact_burst_follows_core_then_ring_then_ember_timeline() {
+        let mut mesh = MeshBuffer::new();
+        mesh.set_entity_context(FX_ENTITY_ID, 3);
+        let center = [5.0, 0.15, 7.0];
+        let color = [0.98, 0.55, 0.16, 1.0];
+
+        mesh.add_impact_burst(center, 0.0, color, 0.8);
+        let early_len = mesh.vertices.len();
+        assert!(early_len > 0, "progress 0 already shows the solid core");
+        assert!(
+            mesh.vertices.iter().all(|v| {
+                v.material_id == 4.0 && v.entity_id == FX_ENTITY_ID as f32 && v.position[1] < 0.6
+            }),
+            "early burst is a compact low emissive mass"
+        );
+
+        mesh.add_impact_burst(center, 0.95, color, 0.8);
+        let late_count = mesh.vertices.len() - early_len;
+        assert!(late_count > 0, "late burst adds race + ember ink");
+        let mut early_top = f32::MIN;
+        for vertex in &mesh.vertices[..early_len] {
+            early_top = early_top.max(vertex.position[1]);
+        }
+        let mut late_top = f32::MIN;
+        let mut late_bottom = f32::MAX;
+        for vertex in &mesh.vertices[early_len..] {
+            late_top = late_top.max(vertex.position[1]);
+            late_bottom = late_bottom.min(vertex.position[1]);
+        }
+        assert!(
+            late_top > early_top + 0.4,
+            "embers rise well above the initial core ({late_top} vs {early_top})"
+        );
+        assert!(late_bottom > -0.01, "FX never sinks under the ground plane");
+
+        mesh.add_ground_ring(center, 1.4, color, 0.5, 10);
+        let ring: Vec<_> = mesh.vertices[early_len + late_count..]
+            .iter()
+            .map(|v| {
+                let dx = v.position[0] - center[0];
+                let dz = v.position[2] - center[2];
+                ((dx * dx + dz * dz).sqrt(), v.position[1])
+            })
+            .collect();
+        assert!(!ring.is_empty(), "telegraph ring stamps dashes");
+        for (dist, y) in ring {
+            assert!(
+                (1.0..=1.75).contains(&dist),
+                "dash sits on the ring band: {dist}"
+            );
+            assert!(y < 0.4, "dashes hug the ground");
+        }
     }
 }

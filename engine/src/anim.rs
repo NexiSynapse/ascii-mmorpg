@@ -140,12 +140,15 @@ pub fn sample(anim: &Anim, x: f32, y: f32, t: f32) -> Sample {
                         Axis::Y => y,
                     };
                     let sway = TAU * (pos / wavelength - t / period) + phase;
-                    let shift = (amp * sway.sin()).round() as i32;
+                    // One sin per cell: shift and brighten share the value
+                    // (the old code evaluated it twice for the same cell).
+                    let s = sway.sin();
+                    let shift = (amp * s).round() as i32;
                     match axis {
                         Axis::X => out.dx += shift,
                         Axis::Y => out.dy += shift,
                     }
-                    out.bright *= 1.0 + brighten * sway.sin();
+                    out.bright *= 1.0 + brighten * s;
                 }
             }
             Track::Cycle { frames, fps } => {

@@ -47,6 +47,166 @@ pub struct ComposedScene<'a> {
     pub cells: &'a [crate::partitions::SceneCell],
     /// Scene grid width in cells.
     pub cells_width: usize,
+    /// Projected floating nameplates/target ring (character-clarity pass).
+    /// The CPU renderer passes `&[]` (it has no camera projection).
+    pub labels: &'a [SceneLabel<'a>],
+}
+
+/// Scene-partition dimensions inside the composed frame for a terminal of
+/// `width` x `height` cells. The HUD bars take 8 rows (top bar 3, log strip 4,
+/// legend 1) and wide terminals reserve a 28-column side panel, so renderers
+/// must size the scene grid to these dims — a full-terminal render would be
+/// top-left cropped by `blit_scene` and miss the partition's aspect.
+///
+/// Must stay in lockstep with the constraints in `render_composed_frame`
+/// (`Length(3) + Min(4) + Length(4) + Length(1)` rows, `Length(28)` panel).
+pub fn scene_partition_dims(width: u16, height: u16) -> (u16, u16) {
+    let width = width.max(40);
+    let height = height.max(10);
+    let scene_h = height.saturating_sub(8).max(4);
+    let scene_w = if width >= 64 {
+        width.saturating_sub(28).max(20)
+    } else {
+        width
+    };
+    (scene_w, scene_h)
+}
+
+/// A projected floating label for one actor, in scene-partition cell
+/// coordinates (character-clarity study, `video-tools/REPORT.md`): the
+/// reference game gives every character a dark-backed nameplate over its
+/// head and marks the current target with a dashed ring on the ground.
+#[derive(Clone, Copy, Debug)]
+pub struct SceneLabel<'a> {
+    /// Feet anchor column (the cell the actor stands on).
+    pub col: f32,
+    /// Feet anchor row.
+    pub feet_row: f32,
+    /// Head row (the plate floats one row above it).
+    pub head_row: f32,
+    /// Actor display name.
+    pub name: &'a str,
+    /// Some((hp, max_hp)) for combat actors; items/players skip the bar.
+    pub hp: Option<(u32, u32)>,
+    /// The local player's own label (bold, drawn topmost).
+    pub is_player: bool,
+    /// The actor the player's next attack would hit — dashed marker ring.
+    pub is_target: bool,
+}
+
+/// Draws the in-world character-clarity pass into the composed buffer:
+/// dashed target ring first (under everything), then nameplates — the
+/// local player's last so it wins overlaps, mirroring the reference's
+/// label stacking. Everything clips to the scene partition.
+pub fn draw_scene_labels(buf: &mut Buffer, scene_area: Rect, labels: &[SceneLabel<'_>]) {
+    for label in labels.iter().filter(|l| l.is_target) {
+        draw_target_ring(buf, scene_area, label.col, label.feet_row);
+    }
+    for label in labels.iter().filter(|l| !l.is_player) {
+        draw_nameplate(buf, scene_area, label);
+    }
+    for label in labels.iter().filter(|l| l.is_player) {
+        draw_nameplate(buf, scene_area, label);
+    }
+}
+
+/// Writes one clipped scene-partition cell, keeping whatever background the
+/// scene already painted unless the caller's style sets one.
+fn put_scene_cell(buf: &mut Buffer, scene_area: Rect, x: i32, y: i32, ch: char, style: Style) {
+    if x < scene_area.x as i32
+        || y < scene_area.y as i32
+        || x >= (scene_area.x + scene_area.width) as i32
+        || y >= (scene_area.y + scene_area.height) as i32
+    {
+        return;
+    }
+    if let Some(cell) = buf.cell_mut((x as u16, y as u16)) {
+        cell.set_char(ch);
+        cell.set_style(style);
+    }
+}
+
+/// Solid near-black plate with the actor name; combat actors add an HP
+/// mini-bar row with digits (reference plates: white-on-black + HP readout).
+fn draw_nameplate(buf: &mut Buffer, scene_area: Rect, label: &SceneLabel<'_>) {
+    let plate = Style::default().bg(Color::Black);
+    let name_style = if label.is_player {
+        plate
+            .fg(Color::Rgb(240, 240, 245))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        plate.fg(Color::Rgb(230, 230, 236))
+    };
+    let name_chars: Vec<char> = label.name.chars().collect();
+    let name_len = name_chars.len();
+    let name_w = name_len as i32 + 2;
+    let bar_w = 6usize;
+    let hp_w = label.hp.map_or(0, |(hp, max_hp)| {
+        format!("{hp}/{max_hp}").len() as i32 + bar_w as i32 + 3
+    });
+    let width = name_w.max(hp_w);
+    let center_x = scene_area.x as i32 + label.col.round() as i32;
+    let name_y = scene_area.y as i32 + label.head_row.round() as i32 - 1;
+
+    // Name centered inside the plate, plate centered on the feet anchor.
+    let lead_pad = (width as usize - name_len) / 2;
+    let mut name_row = String::new();
+    name_row.push_str(&" ".repeat(lead_pad));
+    name_row.extend(name_chars.iter());
+    while name_row.chars().count() < width as usize {
+        name_row.push(' ');
+    }
+    let name_x = center_x - width / 2;
+    for (i, ch) in name_row.chars().enumerate() {
+        put_scene_cell(buf, scene_area, name_x + i as i32, name_y, ch, name_style);
+    }
+
+    if let Some((hp, max_hp)) = label.hp {
+        let digits = format!("{hp}/{max_hp}");
+        let fill = if max_hp > 0 {
+            (hp.min(max_hp) as f32 / max_hp as f32 * bar_w as f32).round() as usize
+        } else {
+            0
+        };
+        let mut content = String::from("[");
+        for i in 0..bar_w {
+            content.push(if i < fill { '█' } else { '░' });
+        }
+        content.push_str("] ");
+        content.push_str(&digits);
+        let row_w = content.chars().count() as i32 + 2;
+        let row_x = center_x - row_w / 2;
+        for (i, ch) in content.chars().enumerate() {
+            let style = plate.fg(match ch {
+                '█' => Color::Rgb(225, 70, 55),
+                '░' => Color::Rgb(90, 60, 55),
+                _ => Color::Rgb(225, 225, 232),
+            });
+            put_scene_cell(buf, scene_area, row_x + i as i32, name_y + 1, ch, style);
+        }
+    }
+}
+
+/// Dashed ellipse marker on the ground under the current melee target
+/// (reference 42 PM combat: orange dashes around the target's feet).
+fn draw_target_ring(buf: &mut Buffer, scene_area: Rect, col: f32, feet_row: f32) {
+    let style = Style::default()
+        .fg(Color::Rgb(255, 178, 64))
+        .add_modifier(Modifier::BOLD);
+    let steps = 28;
+    for i in (0..steps).step_by(2) {
+        let angle = i as f32 * std::f32::consts::TAU / steps as f32;
+        let x = col + 3.5 * angle.cos();
+        let y = feet_row + 1.0 + 1.15 * angle.sin();
+        put_scene_cell(
+            buf,
+            scene_area,
+            scene_area.x as i32 + x.round() as i32,
+            scene_area.y as i32 + y.round() as i32,
+            '=',
+            style,
+        );
+    }
 }
 
 /// Comprehensive dark fantasy MMORPG HUD powered by Ratatui.
@@ -158,6 +318,7 @@ impl RatatuiHud {
             modal,
             cells: scene,
             cells_width: scene_width,
+            labels,
         } = spec;
         self.update_messages(&world.messages);
 
@@ -188,6 +349,9 @@ impl RatatuiHud {
             (rows[1], None)
         };
         crate::partitions::blit_scene(&mut buf, scene_area, scene, scene_width);
+        // Character-clarity pass: dashed target ring + dark-backed floating
+        // nameplates over every actor (video-tools REPORT clarity study).
+        draw_scene_labels(&mut buf, scene_area, labels);
         if let Some(side) = side_area {
             self.render_side_panel(&mut buf, side, world);
         }
@@ -203,7 +367,7 @@ impl RatatuiHud {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Rgb(80, 75, 70)))
             .title(Span::styled(
-                " 📜 Log ",
+                " Log ",
                 Style::default()
                     .fg(Color::Rgb(210, 175, 110))
                     .add_modifier(Modifier::BOLD),
@@ -238,13 +402,17 @@ impl RatatuiHud {
         Paragraph::new(vec![
             Line::from(vec![Span::styled(
                 format!(
-                    "POS ({},{}) TICK {}",
-                    world.player.position.x, world.player.position.y, world.tick
+                    "POS ({},{}) TICK {} {}",
+                    world.player.position.x, world.player.position.y, world.tick, backend_short
                 ),
                 Style::default().fg(Color::Rgb(200, 210, 225)),
             )]),
+            // GRID mirrors what ConPTY/crossterm report as the terminal
+            // size this frame. If it ever disagrees with the physical
+            // window, Windows resized the buffer without ConPTY relaying
+            // it — permanent size-mismatch diagnostic on screen.
             Line::from(vec![Span::styled(
-                format!("WX {weather_label} {backend_short}"),
+                format!("WX {} GRID {}x{}", weather_label, area.width, area.height),
                 Style::default().fg(Color::Rgb(140, 190, 230)),
             )]),
         ])
@@ -284,7 +452,7 @@ impl RatatuiHud {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Rgb(80, 75, 70)))
             .title(Span::styled(
-                " 🗺 Minimap ",
+                " Minimap ",
                 Style::default()
                     .fg(Color::Rgb(140, 240, 160))
                     .add_modifier(Modifier::BOLD),
@@ -296,7 +464,7 @@ impl RatatuiHud {
         }
 
         let mut lines = vec![Line::from(vec![
-            Span::styled("📍 ", Style::default().fg(Color::Rgb(240, 210, 140))),
+            Span::styled("[at] ", Style::default().fg(Color::Rgb(240, 210, 140))),
             Span::styled(
                 format!("({},{})", world.player.position.x, world.player.position.y),
                 Style::default()
@@ -335,7 +503,7 @@ impl RatatuiHud {
         }
 
         lines.push(Line::from(vec![Span::styled(
-            "🎯 Threats",
+            "! Threats",
             Style::default()
                 .fg(Color::Rgb(220, 140, 120))
                 .add_modifier(Modifier::BOLD),
@@ -355,9 +523,9 @@ impl RatatuiHud {
         backend_name: &str,
     ) {
         let (weather_str, weather_color) = match weather {
-            WeatherMode::Rain => ("🌧 Rain", Color::Rgb(100, 180, 240)),
-            WeatherMode::Snow => ("❄ Snow", Color::Rgb(220, 240, 255)),
-            WeatherMode::Storm => ("⚡ Storm", Color::Rgb(255, 220, 80)),
+            WeatherMode::Rain => ("Rain", Color::Rgb(100, 180, 240)),
+            WeatherMode::Snow => ("Snow", Color::Rgb(220, 240, 255)),
+            WeatherMode::Storm => ("Storm", Color::Rgb(255, 220, 80)),
         };
 
         let p = &world.player;
@@ -377,13 +545,13 @@ impl RatatuiHud {
 
         let title_line = Line::from(vec![
             Span::styled(
-                "🌲 Whispering Forest ",
+                "Whispering Forest ",
                 Style::default()
                     .fg(Color::Rgb(220, 190, 120))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("📍 ({}, {}) ", p.position.x, p.position.y),
+                format!("({}, {}) ", p.position.x, p.position.y),
                 Style::default().fg(Color::Rgb(140, 180, 210)),
             ),
             Span::styled(
@@ -480,7 +648,7 @@ impl RatatuiHud {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Rgb(80, 75, 70)))
             .title(Span::styled(
-                " 📜 Action & Combat Log ",
+                " Action & Combat Log ",
                 Style::default()
                     .fg(Color::Rgb(210, 175, 110))
                     .add_modifier(Modifier::BOLD),
@@ -497,7 +665,7 @@ impl RatatuiHud {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Rgb(80, 75, 70)))
             .title(Span::styled(
-                " 🎯 Nearby Threats ",
+                " Nearby Threats ",
                 Style::default()
                     .fg(Color::Rgb(220, 140, 120))
                     .add_modifier(Modifier::BOLD),
@@ -529,13 +697,13 @@ impl RatatuiHud {
         let start_idx = msgs.len().saturating_sub(visible);
         for &msg in &msgs[start_idx..] {
             let (prefix, color) = if msg.contains("hit") || msg.contains("damage") {
-                ("⚔ ", Color::Rgb(255, 130, 80))
+                ("> ", Color::Rgb(255, 130, 80))
             } else if msg.contains("slain") || msg.contains("died") {
-                ("💀 ", Color::Rgb(240, 80, 120))
+                ("X ", Color::Rgb(240, 80, 120))
             } else if msg.contains("Blocked") {
-                ("⚠ ", Color::Rgb(240, 190, 70))
+                ("!! ", Color::Rgb(240, 190, 70))
             } else if msg.contains("Connected") || msg.contains("ready") {
-                ("✨ ", Color::Rgb(100, 210, 255))
+                ("* ", Color::Rgb(100, 210, 255))
             } else {
                 ("• ", Color::Rgb(180, 190, 205))
             };
@@ -574,7 +742,7 @@ impl RatatuiHud {
                 let dist = (dx.abs() + dy.abs()).max(1);
 
                 threat_spans.push(Line::from(vec![
-                    Span::styled("💀 ", Style::default().fg(Color::Rgb(240, 90, 90))),
+                    Span::styled("!! ", Style::default().fg(Color::Rgb(240, 90, 90))),
                     Span::styled(
                         format!("{} ({}m)", e.name, dist),
                         Style::default()
@@ -670,7 +838,7 @@ impl RatatuiHud {
 
         if !found_monster && max_lines > 0 {
             threat_spans.push(Line::from(vec![Span::styled(
-                "✨ Area peaceful.",
+                "* Area peaceful.",
                 Style::default().fg(Color::Rgb(120, 180, 140)),
             )]));
             if threat_spans.len() < max_lines {
@@ -826,7 +994,7 @@ impl RatatuiHud {
             .border_type(BorderType::Double)
             .border_style(Style::default().fg(Color::Rgb(215, 175, 95)))
             .title(Span::styled(
-                " 🎒 Inventory & Equipment [I to Close] ",
+                " Inventory & Equipment [I to Close] ",
                 Style::default()
                     .fg(Color::Rgb(255, 215, 115))
                     .add_modifier(Modifier::BOLD),
@@ -950,7 +1118,7 @@ impl RatatuiHud {
             .border_type(BorderType::Double)
             .border_style(Style::default().fg(Color::Rgb(140, 180, 230)))
             .title(Span::styled(
-                " 📜 Character Sheet & Attributes [C to Close] ",
+                " Character Sheet & Attributes [C to Close] ",
                 Style::default()
                     .fg(Color::Rgb(180, 215, 255))
                     .add_modifier(Modifier::BOLD),
@@ -967,7 +1135,7 @@ impl RatatuiHud {
         let stats_col = vec![
             Line::from(vec![
                 Span::styled(
-                    format!("🛡 {}", p.name),
+                    format!("[{}]", p.name),
                     Style::default()
                         .fg(Color::Rgb(240, 210, 140))
                         .add_modifier(Modifier::BOLD),
@@ -1040,7 +1208,7 @@ impl RatatuiHud {
 
         let attr_col = vec![
             Line::from(vec![Span::styled(
-                "⚔ Attributes & Modifiers:",
+                "Attributes & Modifiers:",
                 Style::default()
                     .fg(Color::Rgb(220, 190, 120))
                     .add_modifier(Modifier::BOLD),
@@ -1076,7 +1244,7 @@ impl RatatuiHud {
             .border_type(BorderType::Double)
             .border_style(Style::default().fg(Color::Rgb(100, 190, 120)))
             .title(Span::styled(
-                " 🗺 Overworld Map: Whispering Forest [M to Close] ",
+                " Overworld Map: Whispering Forest [M to Close] ",
                 Style::default()
                     .fg(Color::Rgb(140, 240, 160))
                     .add_modifier(Modifier::BOLD),
@@ -1103,7 +1271,7 @@ impl RatatuiHud {
                 Style::default().fg(Color::Rgb(100, 160, 110)),
             )]),
             Line::from(vec![Span::styled(
-                "  | ♠ 🏛RUIN        ☼TORCH    ♠ ♠ ♠ |",
+                "  | ♠ ^RUIN        ☼TORCH    ♠ ♠ ♠ |",
                 Style::default().fg(Color::Rgb(160, 150, 120)),
             )]),
             Line::from(vec![Span::styled(
@@ -1123,10 +1291,7 @@ impl RatatuiHud {
 
         let legend_lines = vec![
             Line::from(vec![
-                Span::styled(
-                    "📍 Position: ",
-                    Style::default().fg(Color::Rgb(160, 160, 160)),
-                ),
+                Span::styled("Position: ", Style::default().fg(Color::Rgb(160, 160, 160))),
                 Span::styled(
                     format!("({}, {})", px, py),
                     Style::default()
@@ -1135,23 +1300,23 @@ impl RatatuiHud {
                 ),
             ]),
             Line::from(vec![
-                Span::styled("🧭 Zone: ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled("Zone: ", Style::default().fg(Color::Rgb(160, 160, 160))),
                 Span::styled(
                     "Ancient Fortress Woods",
                     Style::default().fg(Color::Rgb(140, 190, 230)),
                 ),
             ]),
             Line::from(vec![Span::styled(
-                "🏛 Ruins: (-8, -5)  |  ⛩ Gate: (2, -12)",
+                "Ruins: (-8, -5)   |  Gate: (2, -12)",
                 Style::default().fg(Color::Rgb(180, 170, 150)),
             )]),
             Line::from(vec![Span::styled(
-                "🌊 River: y ~ 8     |  ☼ Torches: (-6, 2)",
+                "River: y ~ 8      |  ☼ Torches: (-6, 2)",
                 Style::default().fg(Color::Rgb(100, 180, 240)),
             )]),
             Line::from(vec![Span::styled(
                 format!(
-                    "👾 Hostiles: {} in radar reach",
+                    "Hostiles: {} in radar reach",
                     world
                         .entities
                         .iter()
@@ -1534,6 +1699,7 @@ mod tests {
             modal: ActiveModal::None,
             cells: &scene,
             cells_width: 80,
+            labels: &[],
         });
         assert_eq!(playing.lines().count(), 30);
         assert!(playing.contains("Whispering Forest"));
@@ -1549,6 +1715,7 @@ mod tests {
             modal: ActiveModal::Paused,
             cells: &scene,
             cells_width: 80,
+            labels: &[],
         });
         assert_eq!(paused.lines().count(), 30);
         assert!(paused.contains("PAUSED"));
@@ -1573,9 +1740,63 @@ mod tests {
             modal: ActiveModal::None,
             cells: &scene,
             cells_width: 50,
+            labels: &[],
         });
         assert_eq!(rendered.lines().count(), 30);
         assert!(!rendered.contains("Minimap"));
         assert!(rendered.contains("Whispering Forest"));
+    }
+
+    #[test]
+    fn scene_labels_draw_plates_hpdigits_and_target_ring() {
+        // Character-clarity pass (video-tools REPORT study): every actor
+        // floats a dark-backed plate; the melee target gets a dashed ground
+        // ring; the composed frame stays exactly terminal-sized.
+        let mut hud = RatatuiHud::new();
+        let world = sample_world();
+        let player_name = "Adventurer";
+        let mob_name = "Skeleton Warrior";
+        let scene = vec![crate::partitions::SceneCell {
+            glyph: '.',
+            fg: (8, 16, 16),
+            bg: Some((0, 0, 0)),
+        }];
+        let labels = vec![
+            crate::ui::SceneLabel {
+                col: 10.0,
+                feet_row: 15.0,
+                head_row: 6.0,
+                name: player_name,
+                hp: None,
+                is_player: true,
+                is_target: false,
+            },
+            crate::ui::SceneLabel {
+                col: 30.0,
+                feet_row: 15.0,
+                head_row: 7.0,
+                name: mob_name,
+                hp: Some((12, 95)),
+                is_player: false,
+                is_target: true,
+            },
+        ];
+        let frame = hud.render_composed_frame(ComposedScene {
+            world: &world,
+            width: 80,
+            height: 30,
+            weather: WeatherMode::Rain,
+            backend_name: "WGPU 3D",
+            modal: ActiveModal::None,
+            cells: &scene,
+            cells_width: 1,
+            labels: &labels,
+        });
+        assert_eq!(frame.lines().count(), 30);
+        assert!(frame.contains(player_name), "player plate name drawn");
+        assert!(frame.contains(mob_name), "actor plate name drawn");
+        assert!(frame.contains("12/95"), "hp digits drawn on the plate");
+        assert!(frame.contains('█'), "hp mini-bar drawn");
+        assert!(frame.contains('='), "dashed target ring drawn");
     }
 }
