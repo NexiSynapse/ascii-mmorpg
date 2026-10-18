@@ -801,7 +801,9 @@ impl GpuRenderer {
         if world.player.stats.is_alive() {
             let player_flicker = (time * 8.0).sin() * 0.12;
             lights.push(GpuPointLight {
-                position: [px + 0.4, 1.2, pz + 0.2, 9.5],
+                // Compact reference-scale pool; avoid washing half the
+                // viewport while preserving the local lantern read.
+                position: [px + 0.4, 1.2, pz + 0.2, 5.0],
                 color: [1.0, 0.82, 0.45, 1.2 + player_flicker],
             });
         }
@@ -810,11 +812,11 @@ impl GpuRenderer {
         let gate_flicker1 = (time * 9.5).sin() * 0.15;
         let gate_flicker2 = (time * 11.2).cos() * 0.15;
         lights.push(GpuPointLight {
-            position: [-2.2, 2.6, -9.6 + 0.65, 8.5],
+            position: [-2.2, 2.6, -9.6 + 0.65, 4.6],
             color: [1.0, 0.62, 0.20, 1.4 + gate_flicker1],
         });
         lights.push(GpuPointLight {
-            position: [2.2, 2.6, -9.6 + 0.65, 8.5],
+            position: [2.2, 2.6, -9.6 + 0.65, 4.6],
             color: [1.0, 0.62, 0.20, 1.4 + gate_flicker2],
         });
 
@@ -831,28 +833,28 @@ impl GpuRenderer {
                 EntityKind::Npc => {
                     let herb_flicker = (time * 7.0 + ex).sin() * 0.1;
                     lights.push(GpuPointLight {
-                        position: [ex + 0.35, 1.7, ez + 0.15, 8.0],
+                        position: [ex + 0.35, 1.7, ez + 0.15, 4.4],
                         color: [0.95, 0.80, 0.35, 1.3 + herb_flicker], // Warm golden amber lantern glow
                     });
                 }
                 EntityKind::Monster => {
                     let pulse = (time * 4.5 + ex * 1.7).sin() * 0.15;
                     lights.push(GpuPointLight {
-                        position: [ex, 0.85, ez, 6.5],
+                        position: [ex, 0.85, ez, 3.8],
                         color: [0.88, 0.22, 0.14, 1.05 + pulse], // Sinister crimson-amber ground glow
                     });
                 }
                 EntityKind::Item => {
                     let shimmer = (time * 5.2 + ez * 2.1).cos() * 0.18;
                     lights.push(GpuPointLight {
-                        position: [ex, 0.45, ez, 5.0],
+                        position: [ex, 0.45, ez, 3.0],
                         color: [0.25, 0.78, 0.95, 1.15 + shimmer], // Ethereal celestial cyan shimmering glow
                     });
                 }
                 EntityKind::Player if entity.id != world.player.id => {
                     let other_flicker = (time * 7.8 + ex).sin() * 0.12;
                     lights.push(GpuPointLight {
-                        position: [ex + 0.4, 1.2, ez + 0.2, 9.0],
+                        position: [ex + 0.4, 1.2, ez + 0.2, 5.0],
                         color: [1.0, 0.82, 0.45, 1.2 + other_flicker], // Adventurer's warm lantern glow
                     });
                 }
@@ -1187,11 +1189,12 @@ impl GpuRenderer {
 
     /// High-performance zero-allocation ANSI string formatter (native 1:1 grid).
     ///
-    /// Foreground/background channels are quantized to 32 levels before
-    /// run-merging: smooth GPU gradients otherwise emit a fresh truecolor
-    /// escape on nearly every cell, bloating frames (~2x bytes) and choking
-    /// Windows ConPTY parsing at zoomed-out grids. 5-bit steps are visually
-    /// near-identical for glyph art but collapse long runs into one escape.
+    /// Foreground/background channels are quantized before run-merging:
+    /// smooth GPU gradients otherwise emit a fresh truecolor escape on
+    /// nearly every cell, bloating frames (~2x bytes) and choking Windows
+    /// ConPTY parsing at zoomed-out grids. The quantizer is two-tier
+    /// (see `quantize_channel`): 2-level steps under 32 so dark halos
+    /// keep their values, 32-level steps above for run-merging.
     fn format_frame_with_hud(
         &self,
         cells: &[GpuCell],
@@ -1246,16 +1249,43 @@ fn attack_phase_at(age_seconds: f32, duration_seconds: f32) -> f32 {
     (age_seconds / duration_seconds).clamp(0.0, 1.0)
 }
 
-/// Quantizes a 0-255 channel to 32 levels for ANSI run-merging.
+/// Quantizes a 0-255 channel for ANSI run-merging, with a perceptual dark
+/// floor: the plain `(v >> 3) << 3` crushed every value 0..7 to zero, which
+/// erased the soft torch/lantern/spell background halos (the shader lowers
+/// `bg_rgb` to roughly luma times 0.12, which lands almost entirely below
+/// 8/255 in a dark scene). Values under level 32 keep 2-unit steps so
+/// dark-carpet saturation and glow halos survive encoding; the rest keeps
+/// the 32-level run-merging quantization.
 #[inline]
 fn quantize_channel(value: u32) -> u32 {
-    (value.min(255) >> 3) << 3
+    let v = value.min(255);
+    if v < 32 {
+        (v >> 1) << 1
+    } else {
+        (v >> 3) << 3
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sample_world;
+
+    #[test]
+    fn quantizer_keeps_dark_halos_but_run_merges_bright() {
+        // The old `(v >> 3) << 3` collapsed every value 0..7 to zero, which
+        // erased the soft background washes (`bg_rgb = luma * 0.12` sits
+        // almost entirely below 8/255 in a dark scene) before ANSI encode.
+        // The dark floor now keeps 2-level steps; bright ranges unchanged.
+        assert_eq!(quantize_channel(0), 0);
+        assert_eq!(quantize_channel(3), 2);
+        assert_eq!(quantize_channel(7), 6);
+        assert_eq!(quantize_channel(15), 14);
+        assert_eq!(quantize_channel(31), 30);
+        assert_eq!(quantize_channel(32), 32);
+        assert_eq!(quantize_channel(40), 40);
+        assert_eq!(quantize_channel(255), 248);
+    }
 
     #[test]
     fn test_gpu_renderer_creation_and_render() {

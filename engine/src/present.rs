@@ -6,9 +6,11 @@
 //! for live scenes plus key input (see the `play` example).
 
 pub mod atlas;
+pub mod gpu3d;
 
 use super::overlay::{tessellate, text_quads, OverlayVert, Stroke, TextRun};
 use super::{compose, Camera, Frame, Scene};
+use crate::raster::{Camera3, DepthOpts, Mesh, Vec3};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
@@ -59,6 +61,23 @@ pub fn run(scene: Scene, camera: Camera, opts: PresentOptions) -> Result<u64, St
 /// seconds, plus key input. Games implement this over their simulation (the
 /// `play` example drives a local server `Simulation`); static demos use
 /// [`run`] instead.
+/// The GPU raster contract handed over by a [`SceneSource`] after its
+/// `scene_at_size` call (the source advances its simulation there, so the
+/// meshes/camera are the frame's truth). `layer_slot` names the placeholder
+/// layer index the source pushed in the scene; the presenter runs the GPU
+/// pass and swaps the resolved layer into that slot before `compose` runs.
+pub struct GpuWorld {
+    pub meshes: Vec<Mesh>,
+    pub camera: Camera3,
+    /// Flat-shading sun direction (normalized inside the pass).
+    pub sun: Vec3,
+    pub opts: DepthOpts,
+    /// Layer depth tag for the produced layer.
+    pub z: i32,
+    /// Index of the placeholder `scene.layers` entry to replace.
+    pub layer_slot: usize,
+}
+
 pub trait SceneSource {
     /// Current scene and camera. Called once per presented frame.
     fn scene_at(&mut self, t: f32) -> (Scene, Camera);
@@ -66,6 +85,14 @@ pub trait SceneSource {
     /// preserves sources that use a fixed world/UI layout.
     fn scene_at_size(&mut self, t: f32, _width: u32, _height: u32) -> (Scene, Camera) {
         self.scene_at(t)
+    }
+    /// Meshes for the GPU raster path. Called right after `scene_at_size`
+    /// of the same frame; `None` keeps every source on the CPU raster.
+    /// Sources that skip the CPU fill in `scene_at_size` return `Some`
+    /// here and let the presenter swap the GPU-resolved world into their
+    /// placeholder layer slot (see [`GpuWorld`]).
+    fn gpu_world(&mut self) -> Option<GpuWorld> {
+        None
     }
     /// Key press (`pressed`) / release. Esc/Q and close always exit in
     /// addition to this; return value is reserved (currently ignored).
@@ -230,6 +257,8 @@ struct Gpu {
     overlay_cap: usize,
     grid_w: u32,
     grid_h: u32,
+    /// GPU triangle raster for the 3D world (`SceneSource::gpu_world`).
+    world3d: gpu3d::World3d,
 }
 
 struct App {
@@ -623,6 +652,7 @@ impl App {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let world3d = gpu3d::World3d::new(&device)?;
         let overlay_cap = 4096usize;
         let overlay_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("overlay"),
@@ -647,6 +677,7 @@ impl App {
             overlay_cap,
             grid_w,
             grid_h,
+            world3d,
         });
         Ok(())
     }
@@ -681,7 +712,22 @@ impl App {
         };
         let t = self.started.elapsed().as_secs_f32();
         let t0 = std::time::Instant::now();
-        let (scene, camera) = self.source.scene_at_size(t, gpu.grid_w, gpu.grid_h);
+        let (mut scene, camera) = self.source.scene_at_size(t, gpu.grid_w, gpu.grid_h);
+        // GPU world raster: the source (e.g. `play`) skipped the CPU fill
+        // and pushed a placeholder layer; run the triangle pass and swap
+        // the resolved layer in before compose. `None` = CPU raster frame.
+        let mut gpu3d_ms: Option<std::time::Duration> = None;
+        if let Some(world) = self.source.gpu_world() {
+            let t3d = std::time::Instant::now();
+            let layer = gpu
+                .world3d
+                .run(&gpu.device, &gpu.queue, &world)
+                .map_err(|e| format!("gpu world raster: {e}"))?;
+            if world.layer_slot < scene.layers.len() {
+                scene.layers[world.layer_slot] = layer;
+            }
+            gpu3d_ms = Some(t3d.elapsed());
+        }
         let t1 = std::time::Instant::now();
         let frame = compose(&scene, &camera, t);
         let t2 = std::time::Instant::now();
@@ -846,8 +892,9 @@ impl App {
         self.presented += 1;
         if std::env::var("PRESENT_PROFILE").is_ok() && self.presented % 60 == 0 {
             eprintln!(
-                "[profile] build={:?} compose={:?} inst={:?} n={} grid={}x{}",
+                "[profile] build={:?} world3d={:?} compose={:?} inst={:?} n={} grid={}x{}",
                 t1.duration_since(t0),
+                gpu3d_ms.unwrap_or_default(),
                 t2.duration_since(t1),
                 inst_d,
                 inst_count,

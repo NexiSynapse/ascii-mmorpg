@@ -176,7 +176,9 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
         let water_NdotL = max(dot(wave_norm, normalize(lighting.sun_dir.xyz)), 0.0);
         let water_H = normalize(normalize(lighting.sun_dir.xyz) + V);
         let water_spec = pow(max(dot(wave_norm, water_H), 0.0), 32.0) * 0.6;
-        var water_color = water_base * (lighting.ambient_color.rgb + lighting.sun_color.rgb * water_NdotL) + vec3<f32>(water_spec);
+        var water_color = water_base
+            * ((lighting.ambient_color.rgb + lighting.sun_color.rgb * water_NdotL) * 1.6)
+            + vec3<f32>(water_spec);
         let fresnel = pow(1.0 - max(dot(V, wave_norm), 0.0), 3.0) * 0.10;
         water_color += vec3<f32>(0.35, 0.50, 0.70) * fresnel;
         // Foam: whitecaps where the rolling swell tops out (plus a little
@@ -242,7 +244,11 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
     // silhouette off the dark ground.
     if (in.entity_id > 0.5) {
         let facing = max(dot(N, V), 0.0);
-        diffuse_light += vec3<f32>(1.0, 0.95, 0.85) * pow(facing, 2.0) * 0.30;
+        // Trimmed pops (clearness study: the old 0.30/0.35 adds blew the
+        // player model to a clipped near-white blob once the surrounding
+        // carpet went reference-dark; the rim must keep the silhouette
+        // lifted, not clip the body).
+        diffuse_light += vec3<f32>(1.0, 0.95, 0.85) * pow(facing, 2.0) * 0.24;
     }
 
     // Final lit color
@@ -250,16 +256,19 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
 
     if (in.entity_id > 0.5) {
         let rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);
-        lit_color += vec3<f32>(0.85, 0.90, 1.0) * rim * 0.35;
+        lit_color += vec3<f32>(0.85, 0.90, 1.0) * rim * 0.28;
     }
 
-    // Calm Atmospheric Distance Fog (calm twilight deep indigo falloff).
-    // Tuned 16/42 to preserve more midground terrain before the void gate.
+    // Calm Atmospheric Distance Fog (near-black void falloff).
+    // The reference horizon (Videos 1, 2, 5, 6) falls to pure empty ' '
+    // beyond the midground: fog luma must sit safely below the 0.04 Band-0
+    // gate, so distant terrain resolves to space instead of band-1
+    // punctuation speckle across the horizon.
     let dist_to_cam = length(camera.camera_pos.xyz - in.world_pos);
     let fog_start = 16.0;
     let fog_end = 42.0;
     let fog_factor = clamp((dist_to_cam - fog_start) / (fog_end - fog_start), 0.0, 1.0);
-    let fog_color = vec3<f32>(0.06, 0.08, 0.12);
+    let fog_color = vec3<f32>(0.006, 0.009, 0.016);
     lit_color = mix(lit_color, fog_color, fog_factor);
 
     out.color = vec4<f32>(lit_color, in.color.a);
@@ -298,6 +307,7 @@ struct CellBuffer {
 @group(0) @binding(3) var<storage, read_write> cell_output: CellBuffer;
 
 struct ConfigUniform {
+    inv_view_proj: mat4x4<f32>,
     width: u32,
     height: u32,
     time: f32,
@@ -305,6 +315,17 @@ struct ConfigUniform {
 };
 
 @group(0) @binding(4) var<uniform> config: ConfigUniform;
+
+// Screen cell -> world position via the averaged device depth of that
+// cell's SSAA taps (same unprojection Asciicker-style math the CPU side
+// uses). Lets the glyph/dither hashes lock to world-governed coordinates.
+fn unproject_world(x: u32, y: u32, depth: f32) -> vec3<f32> {
+    let ndc_x = (f32(x) + 0.5) / f32(config.width) * 2.0 - 1.0;
+    let ndc_y = 1.0 - (f32(y) + 0.5) / f32(config.height) * 2.0;
+    let clip = vec4<f32>(ndc_x, ndc_y, depth, 1.0);
+    let w = config.inv_view_proj * clip;
+    return w.xyz / max(abs(w.w), 1e-6);
+}
 
 fn hash2(x: u32, y: u32) -> u32 {
     var h = x * 374761393u + y * 668265263u;
@@ -322,6 +343,11 @@ fn qid(v: f32) -> u32 {
 fn material_glyph(material: u32, band: u32, x: u32, y: u32, foliage: bool) -> u32 {
     let v = hash2(x, y) % 4u;
     if (material == 0u) { // terrain: keep the ground readable without a solid block of '@'
+        // Dark-field carpet gate: unlit terrain/road/sand should not emit a
+        // glyph on every cell — match the meadow's sparse-tuft behavior so
+        // the carpet reads as near-black with isolated punctuation. Bright
+        // bands (6+: cobblestone light pools) keep full texture.
+        if (band <= 2u && hash2(x, y) % 4u != 0u) { return 32u; }
         if (band == 0u) { return 32u; }  // ' '
         if (band == 1u) {
             if (v == 0u) { return 46u; }  // '.'
@@ -341,39 +367,31 @@ fn material_glyph(material: u32, band: u32, x: u32, y: u32, foliage: bool) -> u3
             if (v == 2u) { return 61u; }  // '='
             return 34u;                   // '"'
         }
-        // Bright bands stay quiet (strokes, then shaded blocks for light
-        // pools) so letter-detailed actors and props pop by contrast.
-        if (band == 4u) {
-            if (v == 0u) { return 61u; }  // '='
-            if (v == 1u) { return 45u; }  // '-'
-            if (v == 2u) { return 126u; } // '~'
-            return 58u;                   // ':'
-        }
-        if (band == 5u) {
-            if (v == 0u) { return 43u; }  // '+'
-            if (v == 1u) { return 61u; }  // '='
-            if (v == 2u) { return 42u; }  // '*'
-            return 111u;                  // 'o' pebble
-        }
+        // Bright bands stay quiet (strokes, then rounded cobblestone
+        // glyphs for light pools) so letter-detailed actors and props
+        // pop by contrast. Reference roads/stone (Videos 1, 2, 4, 5)
+        // never use block-shade glyphs: torch-lit stone resolves as
+        // rounded loop glyphs with dark gaps between stones, never an
+        // ANSI progress bar.
         if (band == 6u) {
-            if (v == 0u) { return 9617u; } // 'â–‘'
-            if (v == 1u) { return 9618u; } // 'â–’'
-            if (v == 2u) { return 9617u; } // 'â–‘'
-            return 9618u;                  // 'â–’'
+            if (v == 0u) { return 111u; } // 'o'
+            if (v == 1u) { return 99u; }  // 'c'
+            if (v == 2u) { return 48u; }  // '0'
+            return 81u;                   // 'Q' cobble
         }
         if (band == 7u) {
-            if (v == 0u) { return 9618u; } // 'â–’'
-            if (v == 1u) { return 9619u; } // 'â–“'
-            if (v == 2u) { return 9618u; } // 'â–’'
-            return 9619u;                  // 'â–“'
+            if (v == 0u) { return 48u; }  // '0'
+            if (v == 1u) { return 81u; }  // 'Q'
+            if (v == 2u) { return 111u; } // 'o'
+            return 99u;                   // 'c'
         }
         if (band == 8u) {
-            if (v == 0u) { return 9619u; } // 'â–“'
-            if (v == 1u) { return 9608u; } // 'â–ˆ'
-            if (v == 2u) { return 9619u; } // 'â–“'
-            return 9608u;                  // 'â–ˆ'
+            if (v == 0u) { return 81u; }  // 'Q'
+            if (v == 1u) { return 79u; }  // 'O'
+            if (v == 2u) { return 48u; }  // '0'
+            return 111u;                  // 'o'
         }
-        return 9608u;                     // 'â–ˆ' torch-core ground
+        return 81u;                       // 'Q' torch-core stone
     }
     if (material == 8u) { // cobblestone road: sparse broken marks
         if (band == 0u) { return 32u; }
@@ -512,11 +530,13 @@ fn material_glyph(material: u32, band: u32, x: u32, y: u32, foliage: bool) -> u3
         if (v == 2u) { return 37u; }      // '%'
         return 87u;                       // 'W'
     }
-    if (material == 3u) { // foliage & meadow grass: wind only for non-entity scenery
-        // Actor material-3 surfaces keep the same organic glyph family, but their
-        // wind phase is pinned to zero. This separates foliage animation from
-        // static character/staff surfaces without adding another material pass.
+    if (material == 3u) { // foliage & meadow grass: wind only for scenery
+        // Actor material-3 surfaces keep the same organic glyph family, but
+        // their wind phase is pinned to zero. World cells use the quiet sparse
+        // tuft gate from main's dark-field optimization, locked to world
+        // coordinates so camera motion cannot make the carpet swim.
         let wind_val = select(0.0, sin(config.time * 0.95 + f32(x) * 0.08 + f32(y) * 0.05), foliage);
+        if (foliage && band <= 3u && hash2(x, y) % 4u != 0u) { return 32u; }
         if (band == 0u) { return 32u; }  // ' '
         if (band == 1u) {
             if (wind_val > 0.35) {
@@ -770,6 +790,7 @@ fn shape_glyph(
     // corners (Harri's widened directional table). Computed in cs_main.
     e0: f32, e1: f32, e2: f32, e3: f32, e4: f32, e5: f32,
     edge_mag: f32,
+    dark_field_terrain: bool,
     smooth_slope: bool,
     water_surface: bool,
     edge_hash: u32,
@@ -849,7 +870,13 @@ fn shape_glyph(
     // a minimum, and smooth slopes (steady coarse AND fine gradients, e.g.
     // the nearest-ground strip) are excluded outright. Volumetric texture
     // keeps the quiet areas.
-    if (edge_mag > 0.12 && !smooth_slope) {
+    // Dark entity-0 terrain should not turn weak heightfield curvature into
+    // a punctuation sheet. Keep the normal edge threshold for lit terrain
+    // and actors, but demand a materially stronger edge in the dark field
+    // (local luma < 0.08 sRGB, selected by cs_main) so only real contours
+    // survive the stroke path.
+    let stroke_edge_gate = select(0.12, 1.0, dark_field_terrain);
+    if (edge_mag > stroke_edge_gate && !smooth_slope) {
         // Water never takes stroke overrides: the wobble normals of the
         // rolling swell are shading, not silhouettes, so '/' '\' '|'
         // creases speckle the open sea as noise. Wave language stays in
@@ -1060,6 +1087,23 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let entity_edge_y = entity_id != 0u
         && (qid(top_meta.g) != entity_id || qid(bottom_meta.g) != entity_id);
 
+    // Dark-field predicate: stationary terrain (entity 0) below the 0.08 sRGB
+    // local-luma gate. Weak heightfield curvature on dark carpet must not
+    // resolve to punctuation strokes; only real silhouettes survive.
+    let luma_early = dot(avg_color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let dark_field_terrain = entity_id == 0u && luma_early < 0.08;
+
+    // World-locked glyph hash ("shower-door" fix): the reference terrain is
+    // glyph-locked to world tiles — sliding the camera by one cell must not
+    // re-randomize a tile's volume glyph. Stationary geometry (entity_id 0)
+    // unprojects its averaged depth to a world tile key; actors keep the
+    // screen hash so their glyph detail tracks the pose.
+    let wpos = unproject_world(x, y, avg_nd.w);
+    let world_gx = u32(max(floor(wpos.x * 2.5) + 4096.0, 0.0));
+    let world_gy = u32(max(floor(wpos.z * 2.5) + 4096.0, 0.0));
+    let gx_hash = select(x, world_gx, entity_id == 0u);
+    let gy_hash = select(y, world_gy, entity_id == 0u);
+
     let neigh_depth_x = abs(nd_r.w - nd_l.w);
     let neigh_depth_y = abs(nd_b.w - nd_t.w);
     let neigh_norm_x = length(nd_r.xyz - nd_l.xyz);
@@ -1086,8 +1130,12 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     var glyph: u32 = 32u; // ' ' default
     var is_edge = false;
 
-    // Detect structural edges (silhouettes and creases)
-    if (edge_mag > 0.38 && avg_nd.w < 0.999 && !smooth_slope) {
+    // Detect structural edges (silhouettes and creases). Dark-field terrain
+    // needs a materially stronger edge before a stroke fires: weak
+    // heightfield curvature on the dark carpet must stay volumetric texture,
+    // not rules — only real silhouettes (edge_mag > ~0.95) survive there.
+    let stroke_edge_gate_outer = select(0.38, 0.95, dark_field_terrain);
+    if (edge_mag > stroke_edge_gate_outer && avg_nd.w < 0.999 && !smooth_slope) {
         is_edge = true;
         let edge_hash = hash2(x, y) % 3u;
         if (edge_y > edge_x * 1.6) {
@@ -1126,7 +1174,9 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     if (!is_edge) {
         let luma = dot(avg_color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-        let dither = bayer4(x, y) * 0.05;
+        // Dither is world-locked for terrain too: the Bayer pattern rides
+        // the world tile, so the noise field no longer swims under pans.
+        let dither = bayer4(gx_hash, gy_hash) * 0.05;
 
         // True aerial horizon void gate: only gates the extreme sky/map boundary approaching depth 1.0 (>= 0.9996).
         // Preserves 100% of visible terrain, foliage, and scenery across the top half of the screen.
@@ -1165,7 +1215,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
             band = 9u;
         }
 
-        let volumetric_glyph = material_glyph(material_id, band, x, y, entity_id == 0u);
+        let volumetric_glyph = material_glyph(material_id, band, gx_hash, gy_hash, entity_id == 0u);
         if (far_void && sharpened_luma < 0.08) {
             glyph = 32u;
         } else if (sharpened_luma >= 0.04) {
@@ -1173,6 +1223,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 shape_s0, shape_s1, shape_s2, shape_s3, shape_s4, shape_s5,
                 e0c, e1c, e2c, e3c, e4c, e5c,
                 edge_mag,
+                dark_field_terrain,
                 smooth_slope,
                 material_id == 6u,
                 hash2(x, y) % 3u,
@@ -1230,6 +1281,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     // surfaces (entity_id != 0) and the outline block above are untouched.
     var entity_near = false;
     var entity_dist = 99;
+    var glow_accum = vec3<f32>(0.0);
     for (var dy = -3; dy <= 3; dy = dy + 1) {
         for (var dx = -3; dx <= 3; dx = dx + 1) {
             let near_x = clamp(base_x + 2 + dx * 4, 0, tex_w - 1);
@@ -1239,6 +1291,19 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 entity_near = true;
                 let near_dist = max(abs(dx), abs(dy));
                 entity_dist = min(entity_dist, near_dist);
+            }
+            // Radial background bloom (reference torch/lantern halos):
+            // emissive surfaces (material 4 — torches, spell cores,
+            // lantern glow) spill a soft quadratic halo onto the
+            // background channel of surrounding cells, matching the
+            // engine's compose::apply_glow spill. The channel quantizer
+            // now keeps 2-level steps in the dark floor, so these halos
+            // survive ANSI encoding instead of collapsing to zero.
+            if (qid(near_meta.r) == 4u) {
+                let near_col = textureLoad(color_tex, vec2<i32>(near_x, near_y), 0).rgb;
+                let d = sqrt(f32(dx * dx + dy * dy));
+                let falloff = clamp(1.0 - d / 4.2, 0.0, 1.0);
+                glow_accum = glow_accum + near_col * (falloff * falloff * 0.08);
             }
         }
     }
@@ -1313,7 +1378,21 @@ mod tests {
         // Strokes require a geometric discontinuity; smooth fog gradients
         // must fall back to volumetric texture, never full-width rules.
         // Marginal treeline shimmer needs a strong step, not a bare pass.
-        assert!(ASCII_POST_WGSL.contains("if (edge_mag > 0.12 && !smooth_slope)"));
+        // The outer edge gate raises its threshold for dark-field terrain
+        // (0.38 -> 0.95) so weak heightfield curvature on the dark carpet
+        // stays volumetric texture; the inner gate (0.12 -> 1.0) covers the
+        // shape_glyph path for non-edge cells.
+        assert!(ASCII_POST_WGSL
+            .contains("let stroke_edge_gate_outer = select(0.38, 0.95, dark_field_terrain);"));
+        assert!(ASCII_POST_WGSL.contains(
+            "if (edge_mag > stroke_edge_gate_outer && avg_nd.w < 0.999 && !smooth_slope)"
+        ));
+        assert!(ASCII_POST_WGSL
+            .contains("let stroke_edge_gate = select(0.12, 1.0, dark_field_terrain);"));
+        assert!(ASCII_POST_WGSL.contains("if (edge_mag > stroke_edge_gate && !smooth_slope)"));
+        assert!(ASCII_POST_WGSL
+            .contains("let dark_field_terrain = entity_id == 0u && luma_early < 0.08;"));
+        assert!(ASCII_POST_WGSL.contains("dark_field_terrain,"));
         assert!(ASCII_POST_WGSL.contains("coarse_d > fine_d * 2.0"));
         // Ragged treelines: every third horizontal-stroke cell keeps
         // volumetric texture instead of ruling the screen. Bottom sills
@@ -1324,6 +1403,45 @@ mod tests {
         assert!(ASCII_POST_WGSL.contains("fn qid(v: f32) -> u32"));
         assert!(ASCII_POST_WGSL.contains("let entity_id = qid(center_meta.g);"));
         assert!(!ASCII_POST_WGSL.contains("fn luma_at"));
+    }
+
+    #[test]
+    fn terrain_glyphs_lock_to_world_tiles_and_resolve_stone_cobbles() {
+        // World-locked glyph hash (the recorded "shower-door" shimmer):
+        // stationary terrain/road/bark unproject their averaged depth to a
+        // world tile key for glyph variants and Bayer dither, so a camera
+        // pan no longer re-randomizes every ground glyph. Actors stay on
+        // the screen hash.
+        assert!(ASCII_POST_WGSL.contains("fn unproject_world("));
+        assert!(ASCII_POST_WGSL.contains("let gx_hash = select(x, world_gx, entity_id == 0u);"));
+        assert!(ASCII_POST_WGSL.contains("let gy_hash = select(y, world_gy, entity_id == 0u);"));
+        assert!(ASCII_POST_WGSL
+            .contains("material_glyph(material_id, band, gx_hash, gy_hash, entity_id == 0u)"));
+        assert!(ASCII_POST_WGSL.contains("bayer4(gx_hash, gy_hash)"));
+        // Distance fog sinks below the 0.04 Band-0 gate so the horizon
+        // resolves to pure ' ' (reference Videos 1/2/5/6), not band-1
+        // punctuation speckle.
+        assert!(SCENE_3D_WGSL.contains("let fog_color = vec3<f32>(0.006, 0.009, 0.016);"));
+        // Stone (material 0) bands 6-9 emit rounded cobble/loop glyphs
+        // instead of ░▒▓█ shade blocks; the only remaining block ramp is
+        // the unknown-material fallback.
+        assert!(ASCII_POST_WGSL.contains("'Q' cobble"));
+        assert!(
+            ASCII_POST_WGSL.contains("return 81u;                       // 'Q' torch-core stone"),
+            "material-0 ramp must end on a cobble glyph"
+        );
+        assert!(
+            !ASCII_POST_WGSL.contains("torch-core ground"),
+            "material-0 must no longer end on a full block glyph"
+        );
+        // The terminal world keeps the same pure-black negative space as the
+        // windowed presenter. Actor class accents stay in the foreground;
+        // no ambient or emissive wash is allowed to paint empty cells.
+        assert!(ASCII_POST_WGSL.contains("var bg_rgb = vec3<f32>(0.0);"));
+        assert!(
+            ASCII_POST_WGSL.contains("fg_rgb = mix(fg_rgb, vec3<f32>(0.60, 1.00, 0.35), 0.60);")
+        );
+        assert!(!ASCII_POST_WGSL.contains("tonemapped * 0.12 + glow_accum"));
     }
 
     #[test]
@@ -1372,9 +1490,11 @@ mod tests {
         assert!(SCENE_3D_WGSL.contains("mix(water_color, vec3<f32>(0.88, 0.94, 1.0), foam * 0.85)"));
         assert!(SCENE_3D_WGSL.contains("select(0.88, 1.0, foam > 0.15)"));
         assert!(SCENE_3D_WGSL.contains("clamp((in.world_pos.z - 28.0) / 14.0, 0.0, 1.0)"));
-        // Quiet-sea tuning (user report: "grass texture everywhere" â€” the
+        // Quiet-sea tuning (user report: "grass texture everywhere" — the
         // sky-reflection lift held distant water in mid bands): spec 0.6,
-        // fresnel 0.10.
+        // fresnel 0.10, and a 1.6x water light gain keeping the wave
+        // language at reference brightness while the global ambient/sun
+        // rebalance (GPU datum below the sRGB target) darkens the carpet.
         assert!(SCENE_3D_WGSL.contains("0.0), 32.0) * 0.6;"));
         assert!(SCENE_3D_WGSL
             .contains("let fresnel = pow(1.0 - max(dot(V, wave_norm), 0.0), 3.0) * 0.10;"));
@@ -1397,14 +1517,17 @@ mod tests {
         // add kciter's headlight term ("the light comes from the direction
         // you are looking") so camera-facing surfaces keep their definition,
         // and get a rim light that lifts the silhouette off the dark ground.
+        // The adds are trimmed (0.24/0.28) so actors stay the clear local
+        // pop without clipping to a near-white blob once the surrounding
+        // carpet matches the reference darkness.
         assert!(SCENE_3D_WGSL.contains("let cel_steps = 4.0;"));
         assert!(SCENE_3D_WGSL.contains(
             "let sun_ndl = select(NdotL, floor(NdotL * cel_steps) / cel_steps, in.entity_id > 0.5);"
         ));
         assert!(SCENE_3D_WGSL
-            .contains("diffuse_light += vec3<f32>(1.0, 0.95, 0.85) * pow(facing, 2.0) * 0.30;"));
+            .contains("diffuse_light += vec3<f32>(1.0, 0.95, 0.85) * pow(facing, 2.0) * 0.24;"));
         assert!(SCENE_3D_WGSL.contains("let rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);"));
-        assert!(SCENE_3D_WGSL.contains("lit_color += vec3<f32>(0.85, 0.90, 1.0) * rim * 0.35;"));
+        assert!(SCENE_3D_WGSL.contains("lit_color += vec3<f32>(0.85, 0.90, 1.0) * rim * 0.28;"));
     }
 
     #[test]

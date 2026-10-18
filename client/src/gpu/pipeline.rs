@@ -47,6 +47,7 @@ impl GpuCell {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct PostConfigUniform {
+    inv_view_proj: [[f32; 4]; 4],
     width: u32,
     height: u32,
     time: f32,
@@ -883,6 +884,11 @@ impl GpuPipeline {
         queue.write_buffer(&slot.lighting_buffer, 0, bytemuck::bytes_of(lighting));
 
         let config = PostConfigUniform {
+            // The compute pass unprojects each cell's averaged depth back to
+            // world space so glyph/dither hashes can lock to world tiles for
+            // stationary geometry (no "shower-door" shimmer while the camera
+            // pans). Same matrix the scene shader uses.
+            inv_view_proj: camera.inv_view_proj,
             width: self.width,
             height: self.height,
             time: camera.time,

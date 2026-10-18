@@ -964,7 +964,7 @@ impl PointLight {
 /// Samples per character cell on each axis. Four-by-four keeps diagonal
 /// silhouettes and small props from collapsing into a single block while the
 /// final output remains one native terminal glyph per cell.
-const SAMPLE_GRID: usize = 4;
+pub(crate) const SAMPLE_GRID: usize = 4;
 
 /// Material families deliberately extend the old global luminance ramp rather
 /// than letting every surface collapse to the same ten characters.
@@ -987,7 +987,7 @@ const WORLD_BLACK: Rgb = Rgb::new(0, 0, 0);
 /// surface to one global luminance ramp: each class gets its own glyph
 /// language and density thresholds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MaterialKind {
+pub(crate) enum MaterialKind {
     Generic,
     Foliage,
     Bark,
@@ -1000,7 +1000,7 @@ enum MaterialKind {
 }
 
 impl MaterialKind {
-    fn classify(c: Rgb) -> Self {
+    pub(crate) fn classify(c: Rgb) -> Self {
         let r = c.r as i16;
         let g = c.g as i16;
         let b = c.b as i16;
@@ -1037,7 +1037,7 @@ impl MaterialKind {
         Self::Generic
     }
 
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         match self {
             Self::Generic => 0,
             Self::Foliage => 1,
@@ -1051,7 +1051,7 @@ impl MaterialKind {
         }
     }
 
-    fn from_index(index: usize) -> Self {
+    pub(crate) fn from_index(index: usize) -> Self {
         match index {
             1 => Self::Foliage,
             2 => Self::Bark,
@@ -1084,21 +1084,21 @@ impl MaterialKind {
 /// (0..1 floats), flat-face view normal, and its luminance. A `SAMPLE_GRID` by
 /// `SAMPLE_GRID` block resolves to one cell.
 #[derive(Clone, Copy)]
-struct Sample {
-    depth: f32,
-    r: f32,
-    g: f32,
-    b: f32,
-    lum: f32,
-    lum_sq: f32,
-    normal_x: f32,
-    normal_y: f32,
-    normal_z: f32,
-    material: MaterialKind,
+pub(crate) struct Sample {
+    pub(crate) depth: f32,
+    pub(crate) r: f32,
+    pub(crate) g: f32,
+    pub(crate) b: f32,
+    pub(crate) lum: f32,
+    pub(crate) lum_sq: f32,
+    pub(crate) normal_x: f32,
+    pub(crate) normal_y: f32,
+    pub(crate) normal_z: f32,
+    pub(crate) material: MaterialKind,
 }
 
 impl Sample {
-    fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self {
             depth: f32::INFINITY,
             r: 0.0,
@@ -1147,10 +1147,18 @@ pub fn render_layer_with_lights(
         }
     }
 
+    resolve_layer(&buf, cam, opts, z)
+}
+
+/// Resolve + rim for a full supersampled buffer. Shared by the CPU fill
+/// ([`render_layer`]) and the GPU raster path (`present::gpu3d`), so both
+/// produce the same glyph language by construction.
+pub(crate) fn resolve_layer(buf: &[Sample], cam: &Camera3, opts: &DepthOpts, z: i32) -> Layer {
+    let w2 = cam.width.max(1) as usize * SAMPLE_GRID;
     let mut layer = Layer::new("mesh3d", z);
     for cy in 0..cam.height.max(1) {
         for cx in 0..cam.width.max(1) {
-            if let Some(cell) = resolve_cell(&buf, w2, cx, cy, opts) {
+            if let Some(cell) = resolve_cell(buf, w2, cx, cy, opts) {
                 layer.push(AnimCell::still(cx, cy, cell));
             }
         }
@@ -1163,9 +1171,11 @@ pub fn render_layer_with_lights(
 /// brighter foreground, so actors read against ground of similar tone.
 /// This is what separates the legs from the slab in the viewer: same glyph
 /// family, ~1.45x the light. Interior cells are untouched.
-fn apply_rim(layer: &mut Layer, w: i32, h: i32) {
+pub(crate) fn apply_rim(layer: &mut Layer, w: i32, h: i32) {
     // Boolean occupancy grid: the naive any-scan per neighbor is O(n²)
     // over ~2k cells every frame, so index into a flat grid instead.
+    // Crate-visible so the GPU raster path (`present::gpu3d`) shares the
+    // same rim pass.
     let wu = w.max(1) as usize;
     let hu = h.max(1) as usize;
     let mut covered = vec![false; wu * hu];
@@ -1177,27 +1187,25 @@ fn apply_rim(layer: &mut Layer, w: i32, h: i32) {
     let is_covered = |x: i32, y: i32| {
         x >= 0 && y >= 0 && x < w && y < h && covered[y as usize * wu + x as usize]
     };
-    // Snapshot positions first: brightening must not cascade to neighbors.
-    let silhouette: Vec<(i32, i32)> = layer
-        .cells
-        .iter()
-        .map(|c| (c.x, c.y))
-        .filter(|&(x, y)| {
-            !is_covered(x - 1, y)
-                || !is_covered(x + 1, y)
-                || !is_covered(x, y - 1)
-                || !is_covered(x, y + 1)
-        })
-        .collect();
-    for (x, y) in silhouette {
-        if let Some(cell) = layer.cells.iter_mut().find(|c| c.x == x && c.y == y) {
-            cell.cell.fg = cell.cell.fg.scaled(1.45);
+    // Direct mutable iteration: O(n) instead of O(n²) linear search per
+    // silhouette cell. The `covered` grid gives O(1) neighbor checks.
+    for c in layer.cells.iter_mut() {
+        let (x, y) = (c.x, c.y);
+        if x < 0 || y < 0 || x >= w || y >= h {
+            continue;
+        }
+        if !is_covered(x - 1, y)
+            || !is_covered(x + 1, y)
+            || !is_covered(x, y - 1)
+            || !is_covered(x, y + 1)
+        {
+            c.cell.fg = c.cell.fg.scaled(1.45);
         }
     }
 }
 
 /// Camera basis: forward/right/up for the yaw/pitch pose.
-fn basis(cam: &Camera3) -> (Vec3, Vec3, Vec3) {
+pub(crate) fn basis(cam: &Camera3) -> (Vec3, Vec3, Vec3) {
     let (sy, cy) = cam.yaw.sin_cos();
     let (sp, cp) = cam.pitch.sin_cos();
     let fwd = Vec3::new(sy * cp, sp, cy * cp);
@@ -1230,24 +1238,10 @@ fn rasterize_tri(
         Vec3::new(d.dot(right), d.dot(up), d.dot(fwd))
     });
 
-    // Flat diffuse from the world-space face normal. Two-sided (|dot|):
-    // builders don't agree on winding, and closed solids viewed from
-    // outside show outward faces either way, so the absolute value lights
-    // them exactly as an outward normal would.
     let n = (tri.v[1] - tri.v[0]).cross(tri.v[2] - tri.v[0]).norm();
-    let diff = opts.ambient + (1.0 - opts.ambient) * n.dot(sun).abs().min(1.0);
-    let moon = opts.moon_tint;
-    let moon_strength = opts.moonlight_strength.clamp(0.0, 1.0);
-    let shade = |c: u8, tint: u8| {
-        let base = f32::from(c) / 255.0 * diff;
-        let tint_factor = f32::from(tint) / 255.0;
-        base * (1.0 - moon_strength + moon_strength * tint_factor)
-    };
-    let (mut sr, mut sg, mut sb) = (
-        shade(tri.albedo.r, moon.r),
-        shade(tri.albedo.g, moon.g),
-        shade(tri.albedo.b, moon.b),
-    );
+    // Keep the no-light CPU path exactly aligned with the GPU pre-pass. Local
+    // point lights are then added only for the explicit CPU fallback.
+    let (mut sr, mut sg, mut sb, _) = shade_face(tri, sun, opts.ambient);
     // Coarse face-centre point lighting is intentional for this 4x
     // character-cell raster: it keeps local sources stable instead of
     // producing per-pixel shimmer while still brightening actual surfaces.
@@ -1315,7 +1309,7 @@ fn rasterize_tri(
 /// Sutherland–Hodgman clip of one triangle against the near plane
 /// (`vz >= near` survives). Yields 0, 1, or 2 triangles; view-space
 /// positions interpolate linearly, which is exact for planes.
-fn clip_near(tri: [Vec3; 3], near: f32) -> Vec<[Vec3; 3]> {
+pub(crate) fn clip_near(tri: [Vec3; 3], near: f32) -> Vec<[Vec3; 3]> {
     let cross = |a: Vec3, b: Vec3| {
         // Intersection of segment a→b with the near plane. Called only for
         // straddling edges, so the denominator is never zero.
@@ -1343,6 +1337,22 @@ fn clip_near(tri: [Vec3; 3], near: f32) -> Vec<[Vec3; 3]> {
         4 => vec![[poly[0], poly[1], poly[2]], [poly[0], poly[2], poly[3]]],
         _ => Vec::new(),
     }
+}
+
+/// Flat diffuse shading of one face: shared by the CPU fill
+/// ([`rasterize_tri`]) and the GPU raster path (`present::gpu3d`, which
+/// pre-shades on the CPU so the shader is a pure projection + depth test).
+/// Two-sided lighting (|dot|): builders don't agree on winding, and closed
+/// solids viewed from outside show outward faces either way, so the
+/// absolute value lights them exactly as an outward normal would.
+pub(crate) fn shade_face(tri: &Tri, sun: Vec3, ambient: f32) -> (f32, f32, f32, f32) {
+    let n = (tri.v[1] - tri.v[0]).cross(tri.v[2] - tri.v[0]).norm();
+    let diff = ambient + (1.0 - ambient) * n.dot(sun).abs().min(1.0);
+    let sr = f32::from(tri.albedo.r) / 255.0 * diff;
+    let sg = f32::from(tri.albedo.g) / 255.0 * diff;
+    let sb = f32::from(tri.albedo.b) / 255.0 * diff;
+    let lum = 0.2126 * sr + 0.7152 * sg + 0.0722 * sb;
+    (sr, sg, sb, lum)
 }
 
 /// Barycentric fill of one projected triangle with perspective-correct
@@ -1433,7 +1443,13 @@ fn fill_tri(
 /// stable local variation, or a depth edge glyph where the block spans a
 /// step; distance-aware detail and fog throughout.
 /// `None` when no sample hit (void shows through).
-fn resolve_cell(buf: &[Sample], w2: usize, cx: i32, cy: i32, opts: &DepthOpts) -> Option<Cell> {
+pub(crate) fn resolve_cell(
+    buf: &[Sample],
+    w2: usize,
+    cx: i32,
+    cy: i32,
+    opts: &DepthOpts,
+) -> Option<Cell> {
     let mut hits = 0u32;
     let mut lum = 0.0f32;
     let mut r = 0.0f32;

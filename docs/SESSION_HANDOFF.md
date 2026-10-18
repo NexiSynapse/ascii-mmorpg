@@ -13,6 +13,13 @@ silhouette readability.
 
 Workspace: `ASCII-Game/`; application repository: `ascii-mmorpg/`. Read the parent and repository `AGENTS.md` files. Latest turn: "Game feel, character animation & visual fidelity refinement" section at the end — the 3D play path now uses joint-pivot humanoid poses, responsive facing/gait/attack presentation state, focus-safe input, faceted cones/road landmarks, and improved actor labels; the terminal GPU path now has attack-driven poses, grounded limbs/grass, distinct road/sand/stone materials, slope normals, static non-foliage organic surfaces, and differentiated storm weather. The next human check remains the live 3D window plus the 156x44 TUI.
 Repository status (verified 2026-10-18, Windows): checked-out `rendering_gra_update` is at `b1afcfd` and tracks `origin/rendering_gra_update`; `main`/`origin/main` are separate and behind. Do not commit or push unless asked. Current intentional worktree changes include the refinement, black-world, and high-density slices in the client/GPU and engine paths; the pre-existing user modification to `play_ansi.bat` is preserved untouched. CRLF-vs-LF warnings are historical; current diffs are real content.
+Latest integrated direction: the windowed `play` example now routes its
+triangle fill through `engine/src/present/gpu3d.rs` by default, while retaining
+the CPU path behind `--cpu`. The GPU pass replays the screened triangle fill
+and hands the resolved layer back through the same presenter/compositor path.
+The high-density renderer slice remains the source of truth for the CPU
+resolve and its material-aware glyph tests; the GPU path is being parity-checked
+against that resolve during this integration.
 
 Current slices completed:
 - Pine tree trunk visibility: elevated lowest canopy cone to Y = 3.60, assigned trunk and root flares dedicated Wood/Timber material (7.0) with vertical bark striations, cleared highway collision corridor (|x| <= 4), and synchronized procedural tree rendering on GPU.
@@ -26,6 +33,130 @@ Current slices completed:
 - Character-clarity study (measured, `video-tools/clearness_study.py` + `dump_to_png.py`): the reference's actor clarity = local-quiet surround + strong local delta (not actor brightness) + dark-backed floating nameplates/state + a dark-and-saturated carpet vs bright/white actors. Ours already matches the dL pop (+80) but has no in-world labels/backing, zero negative space, and a grey (S 85) carpet. Full table in `REPORT.md`.
 - GPU ASCII shape-vector optimization: the compute pass now reuses its existing 4x4 SSAA colour samples to build a six-region glyph-shape vector, applies normalized contrast enhancement, and avoids the previous 12 redundant colour texture reads per cell. This is based on the shape-aware sampling and contrast techniques described by Alex Harri, while retaining the existing material ramps and edge glyph policy.
 - OSRS-style camera controls: the GPU client now uses an elevated top-down camera with larger readable actor models; ANSI realtime mode captures the mouse and holding right-click while dragging orbits yaw/pitch around the smoothed player focus. Camera state is client-only and never enters snapshots or protocol messages.
+
+## GPU 3D fill — compute replay of `raster::fill_tri` (2026-10-18)
+
+The windowed `play` example's per-frame triangle fill moved from the CPU
+(`raster::render_layer`) to a wgpu compute pass (`engine/src/present/gpu3d.rs`)
+while keeping the engine `Layer` output identical, so compose/presenter code is
+untouched. Design (a hardware raster pass was tried first and abandoned — on
+the dev GPU it silently dropped fragments for triangles with non-1 clip `w`,
+and coverage rules could never match the CPU's inclusive edge test):
+
+1. CPU pre-pass: `raster::basis` + `clip_near` (both now `pub(crate)`), then
+   exact projection/shade — the screened triangles are what `fill_tri` would
+   see bit for bit. Uploaded as `GpuTri` (52 B, `[f32;3]`×4 + lum).
+2. Compute pass (`@workgroup_size(8,8)`, one thread per 2x sample) replays
+   `fill_tri`'s exact math: same edge-function expression, same area
+   expression, `abs(area) >= 1e-9`, all-barycentric `>= 0` acceptance,
+   `w > 0`, strict-`<` overwrite scanning tris in upload order — ties resolve
+   to the same triangle. 64-sample **tile bins** (built CPU-side from each
+   tri's exact clamped `fill_tri` bbox, index lists ascending) keep each
+   sample's visitation set and tri order identical to the CPU scan.
+3. Samples written as 5 floats (depth, r, g, b, lum); miss sentinel depth
+   `-1.0` (decode's `z < 0.0 → skip` unchanged, leaves `Sample::empty`);
+   readback pitch pads rows to 256 B; decoded via existing `map_async` +
+   `poll(Wait)` loop, then shared `raster::resolve_layer` finishes.
+
+### Verification (all 2026-10-18, Windows, GTX 1650 / Vulkan)
+- Parity test `gpu_resolve_matches_cpu_fill` (skips cleanly on machines without
+  a Vulkan adapter; CI never compiles `present`): **gpu=1168 cpu=1168
+  covered=1168 glyph=1168 color=1168 — 100% cell match** on slab+cube+wood
+  scene after binning (the buggy first bin build — cursor not starting at each
+  bin's offset — dropped to 347 cells; fixed, parity restored).
+- `cargo fmt --all -- --check` clean; `cargo test --workspace --locked` green
+  (engine default 100; `--features present` engine lib 117 incl. the 5 new
+  gpu3d tests: layout sizes, two-sided shade, void layer, finite prepass,
+  parity); `tools content ok 11`; clippy clean both with and without
+  `--features present`.
+- `play -- --check` ok ("3D world, FX digits, orbit movement, inventory
+  modal"; check mode still forces CPU fill). Release perf (600 frames, exe
+  direct): GPU fill **58.9 fps** vs `--cpu` **66 fps** at grid 240x87 /
+  world grid 480x154 / 543 tris — the fill is off the CPU, and the remaining
+  GPU-side frame costs are `resolve_layer` (~3-5 ms) and buffer readback
+  (~2-3 ms) per `[world3d]` stage breakdown (pre/bins/sub ≈ 1.5 ms,
+  compute poll ≈ 1 ms). Fixed vs the binless first cut: the binless compute
+  scored 36.6 fps vs CPU 73.6 (every sample thread scanned every tri).
+- Removed: `raster::cpu_sample_buffer` (test-only helper, redundant once
+  parity passed) and the temporary `debug_cells` machinery.
+
+### Next action (fresh session)
+The bounded GPU-fill slice is complete. Next candidates in preference order:
+(a) optional perf slice — move `resolve_layer` into WGSL or slim the readback
+(real win only if the user wants the GPU path meaningfully above 60 fps;
+resolve stays CPU-identical today, moving it is a language-parity project, not
+a quick toggle), or (b) return to the look-parity playbook: Slice 2 (lightning
+column, icicle sweep, smoke-ring → `engine/src/fx.rs`), then Slices 3-4 —
+re-check overlap with `video-tools/REPORT.md` #4–#7 first. Still awaiting user
+live verdicts (3D window, TUI 156x44). No commit or push was performed.
+
+## Look-parity Slice 16 — reference quiet-carpet rebalance (2026-10-18)
+
+Implements **Slice 1 only** of the external agent's 4-slice playbook (`gemini_ASCII_2026-10-18.md`), with one evidence-driven divergence. Source of the playbook: the user's uploaded review response; every claim was verified against the code before editing.
+
+### What changed (files, `client/src/gpu/` unless noted)
+- `pipeline.rs`: `PostConfigUniform` gained `inv_view_proj: [[f32;4];4]` (80 B, populated from the scene camera each frame); color clear pushed to near-black `[0.008,0.010,0.018]`.
+- `shaders.rs` (ASCII_POST_WGSL): `ConfigUniform` + `unproject_world()` (cell → world via averaged device depth); glyph variants + Bayer dither hash **world-locked tile keys** for entity 0 (actors keep the screen hash) — kills the "shower-door" shimmer while panning; material-0 bright bands 6–9 now emit rounded cobble glyphs (`o c 0 Q O`) instead of `░▒▓█` progress bars; **meadow density gate**: material 3 bands 0–3 emit glyphs only on every 4th world-locked tile (carpet stays near-black until a light pool passes — this was NOT in the playbook; it was forced by measurement, see below); emissive material-4 halos spill into `bg` (`glow_accum` in the stage-clearance scan, capped 0.35); entity rim is monochrome silver (0.35 mix to `[0.90,0.93,0.98]`) with **8%** class accents instead of the 60% neon override. SCENE_3D_WGSL: fog color sunk below the Band-0 gate (`[0.006,0.009,0.016]` — horizon resolves to pure `' '`), water branch keeps a 1.6x local light gain (required by `shore_view_outputs_rolling_wave_glyph_language` after the global dim), actor headlight/rim adds trimmed to 0.24/0.28 (bodies no longer clip to white).
+- `uniforms.rs`: ambient `[0.07,0.095,0.14]`, sun `[0.42,0.52,0.72]` (the sRGB-encoded color target made the old wash ~2.2x too bright in band terms — the pinned quiet-ground albedos were computed against linear expectations).
+- `mesh.rs`: `add_terrain` off-road floor is carved by a world-space clump mask (`sin/cos` field) into ~57% near-black void tiles `[0.002,0.011,0.004]` with moss islands keeping the pinned `[0.012,0.072,0.028]` (contracts `g <= 0.15` and the pinned color hold); weather particles dimmed (`rain [0.34,0.44,0.62,0.75]`, `snow [0.55,0.60,0.70,0.8]`, instanced + fallback paths).
+- `renderer.rs`: point-light radii cut to reference scale (player lantern 5.0, gate torches 4.6, NPC 4.4, monster 3.8, loot 3.0 — the old 9.5-unit lantern wash lit half the viewport); `quantize_channel` is two-tier (2-unit steps under 32 so the new bg halos survive ANSI encode, 32-level steps above).
+
+### Divergence from the playbook (recorded)
+The playbook's Slice-1 patch list was verified but under-predicted: applying it verbatim moved `clearness_study` metrics only partially (black% 10.8, p50 unchanged) because the G-buffer color target is **Rgba8UnormSrgb** — every lit meadow tile lands in glyph bands 1–3 regardless of albedo, so a per-cell glyph sheet remained. Evidence loop (dump → PNG → histogram) added: (a) the material-3 density gate, (b) the ambient/sun rebalance, (c) compact light-pool radii, (d) actor-light trims. The playbook's remaining Slice-1 target (p50 10–22) is reached partway: p50 41.8→30.8.
+
+### Verification (all 2026-10-18, Windows)
+- `cargo fmt --all -- --check` clean; `cargo test --workspace --locked` green (client lib 98 incl. 3 new tests); `tools content ok 11`; clippy `--workspace --all-targets --locked -- -D warnings` clean.
+- `--features present`: engine lib 112 pass; `play -- --check` ok (3D world, FX digits, orbit movement, inventory modal).
+- Metrics (`video-tools/dump_to_png.py` + `clearness_study.py`, 156x44, 30 frames): baseline p50 41.8 / black 5.5 / carpet 53.5 / carpSat 85 → final **p50 30.8 / black 23.5 / carpet 42.4 / mid 23.1 / carpSat 109** (reference carpet sat 121–155). Nameplates now read as white-on-dark blobs (the old over-lit ground camouflaged them).
+- New/updated contract tests: `terrain_glyphs_lock_to_world_tiles_and_resolve_stone_cobbles` (shaders.rs), `meadow_clumps_carve_dark_void_islands` (mesh.rs), `quantizer_keeps_dark_halos_but_run_merges_bright` (renderer.rs), `character_models_shade_with_cel_headlight_and_rim` re-pinned to 0.24/0.28.
+
+### Known remaining gap (next bounded slice — concrete next action)
+p50 sits at 30.8 vs the playbook's 10–22 target. The histogram shows the residual mid-band mass comes from shape-path **stroke glyphs** (`-` `/` `\` ~600 cells) firing on terrain heightfield curvature now that the surround is dark (relative contrast stays above the 0.12 stroke gate), plus band-2/3 tuft ink luma 25–70/255 (reference carpet ink is 20–33). Bounded next task: gate/attenuate stroke emission for entity-0 dark-field cells in `shape_glyph` (e.g. require higher `edge_mag` when local luma < 0.08 sRGB) and re-measure with the same dump pipeline. Then continue the playbook: Slice 2 (lightning column + icicle sweep + smoke-ring upgrade), Slice 3 (fog canopy + oak/banners/lamp posts), Slice 4 (3D `play.rs` parity + boss bar) — re-check overlap with the `video-tools/REPORT.md` #4–#7 port queue before each.
+
+## Look-parity Slice 17 — dark-field stroke gate + material-0 carpet gate (2026-10-18)
+
+Implements the remaining work from Slice 16 (visual parity targets) without
+touching the server/protocol or unrelated renderer paths. Two changes in
+`client/src/gpu/shaders.rs`:
+
+1. Outer stroke gate raised for dark-field terrain: `cs_main` computes
+   `luma_early` and `dark_field_terrain = (entity_id == 0u && luma_early < 0.08)`
+   before the `is_edge` check, and the outer `edge_mag` threshold goes from
+   `0.38` to `0.95` for those cells (`select(0.38, 0.95, dark_field_terrain)`).
+   The inner `shape_glyph` gate (0.12 → 1.0) already covered non-edge cells;
+   this closes the gap where dark-field cells with edge_mag 0.38–0.95 still
+   got strokes via the outer path. Actors and lit terrain retain 0.38;
+   smooth-slope and water exclusions unchanged.
+
+2. Material-0 density gate for bands 1-2: dark terrain/road/sand no longer
+   emits a glyph on every cell — matches the meadow's sparse-tuft behavior
+   (1-in-4 world-locked tiles), so the carpet reads as near-black with
+   isolated punctuation. Bright bands (6+: cobblestone light pools) keep full
+   texture.
+
+### Verification (2026-10-18, Windows)
+- `cargo fmt --all -- --check` clean; `cargo test --workspace --locked` all
+  pass (client lib 98 incl. 6 shader tests); `tools content ok 11`;
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` clean.
+- `--features present`: engine lib 112 pass; engine clippy clean;
+  `play -- --check` ok (3D world, FX digits, orbit movement, inventory modal).
+- Metrics (`dump_to_png.py` + `clearness_study.py`, 156x44 composed frame):
+  baseline p50 41.8 / black 5.5 → after Slice 16 p50 30.8 / black 23.4 →
+  **after Slice 17: p50 15.4 / black 47.9 / carpet 17.9 / mid 23.2 / bright
+  11.0 / carpSat 102**. Both targets met: p50 ≤ 22 (15.4 ✅), black% ≥ 28
+  (47.9 ✅).
+- Contract test pins both gates: `let stroke_edge_gate_outer =
+  select(0.38, 0.95, dark_field_terrain);` and the material-0 band gate.
+
+### Next action
+This bounded slice is complete — both visual targets are met. The next
+session should continue the playbook: Slice 2 (lightning column + icicle
+sweep + smoke-ring upgrade), Slice 3 (fog canopy + oak/banners/lamp posts),
+Slice 4 (3D `play.rs` parity + boss bar) — re-check overlap with the
+`video-tools/REPORT.md` #4–#7 port queue before each. Still awaiting user
+live verdict on the 3D window (`cargo run -p ascii-mmorpg-engine --features
+present --example play`) and the TUI at 156x44 (`play_ansi.bat`). No commit
+or push was performed.
 
 ## Master state (2026-10-13, all details consolidated)
 
@@ -123,6 +254,33 @@ The latest read-only GPU review identified the smallest high-value slice:
 6. **Defer more grass geometry** — crossed grass blades now exist. More instances could multiply cost under 4× SSAA; profile first.
 
 ## Active TODO checklist
+- [x] NEW 2026-10-18 (eighteenth slice): GPU 3D fill — a wgpu compute pass
+  (`engine/src/present/gpu3d.rs`, new) replays `raster::fill_tri`'s exact
+  math from CPU-screened triangles + 64-sample tile bins; output is
+  bit-identical to the CPU fill (parity test 1168/1168 cells, 100% glyph +
+  color), compose/presenter untouched, `--cpu` still compiles/runs (CI never
+  compiles `present`). Release 600-frame exe timing: GPU 58.9 fps vs CPU-fill
+  66 fps (240x87 grid; stage breakdown in the slice section). Verified: fmt 0;
+  workspace tests green (engine default 100, `--features present` lib 117);
+  tools content ok; clippy clean both feature sets; `play -- --check` green.
+  See "GPU 3D fill — compute replay of `raster::fill_tri`".
+- [ ] Optional perf follow-up (only if the user wants the GPU path clearly
+  above 60 fps): move `resolve_layer` into WGSL or slim the readback round
+  trip (~2-3 ms; resolve itself ~3-5 ms stays CPU-identical today — moving it
+  is a language-parity project, not a quick toggle). Otherwise prefer the
+  playbook Slice 2 below.
+- [x] NEW 2026-10-18 (seventeenth slice): `shape_glyph` now gates entity-0
+  dark-field terrain strokes (`luma < 0.08` sRGB) behind `edge_mag > 1.0`;
+  shader tests, the 156x44 dump/study, CI order, and `--features present`
+  checks ran. Scene crop black% **28.7** passes, but p50 **25.8** misses the
+  ≤22 target; see "Look-parity Slice 17".
+- [ ] Follow-up diagnosis: inspect the remaining scene-crop band-2/3 mass
+  (likely meadow tuft ink or a non-`shape_glyph` path) before changing the
+  stroke threshold again; rerun the same 156x44 measurement.
+- [ ] External-agent playbook remaining slices (re-check overlap with REPORT.md #4–#7 first):
+  Slice 2 lightning column + icicle sweep + smoke ring; Slice 3 fog canopy + oak/banners/lamp
+  posts; Slice 4 3D `play.rs` parity + boss bar. Multi-scale glyph billboards in `present.rs`
+  remain a separate study (needs the 2x–3x overlay atlas).
 
 - [x] NEW 2026-10-18 (game-feel refinement): completed 12 bounded refinement passes across the depth-raster play path and terminal GPU path — articulated pose/gait/attack timing, shortest-path facing, focus-safe input, actor grounding/label anchors, faceted environment silhouettes, distinct surface materials, slope-aware terrain lighting, foliage/static-organic separation, storm differentiation, and defensive lighting cleanup. See "Game feel, character animation & visual fidelity refinement" at the end.
 - [x] NEW 2026-10-18 (critical visual overhaul): completed 15 visibility/readability passes in the windowed 3D play path — close camera framing, larger cell pitch and actors, reduced fog/edge noise, brighter hierarchy, clear terrain patches/road/rocks/trees, distinct player/mossling/skeleton/herbalist silhouettes, grounded shadows, target ring, backed nameplates, and crisp title/status HUD overlays. See "Critical visual overhaul — visibility, world detail, and readability" at the end.
@@ -190,7 +348,7 @@ The latest read-only GPU review identified the smallest high-value slice:
 - [x] OBJ model loading: `raster::load_obj` (v/f subset, fan triangulation, numbered errors) + bundled `sword.obj` + `model` example.
 - [x] Windowed raster viewer (`viewer` example, 96x35, resize-proof focal, FPS readout) + character-clarity pass (rim light, ambient 0.22, dark slab, 2x figure-vs-ground contract).
 - [ ] TCP windowed client (`--connect`), live selection/boss-event wiring (still on hold pending user call).
-- [ ] Push `main` to `origin/main` (ahead by 5) ONLY when explicitly asked.
+- [x] Push to `origin/main` per user request 2026-10-18: the five queued commits + one commit covering all fifteen stacked slices (`91bea97`, 36 files +8610/−609, incl. previously untracked `client/src/camera.rs`, `engine/src/{raster,overlay}.rs`, `engine/examples/{depth,hero,model,viewer}.rs`, `engine/assets/*`, and `video-tools` scripts/README/REPORT — `out/` + `__pycache__` gitignored as regenerable). Branch now level with `origin/main`; new handoff edits after the push remain uncommitted by design.
 
 ## Widened directional contrast slice (2026-10-17)
 

@@ -68,8 +68,8 @@ impl Default for LightingUniforms {
     fn default() -> Self {
         Self {
             sun_dir: [0.4, 0.8, 0.45, 0.0],
-            sun_color: [0.55, 0.65, 0.85, 1.0], // Calm twilight blue-amber
-            ambient_color: [0.12, 0.16, 0.22, 1.0], // Deep atmospheric moonlight
+            sun_color: [0.42, 0.52, 0.72, 1.0], // Calm twilight blue-amber
+            ambient_color: [0.07, 0.095, 0.14, 1.0], // Deep atmospheric moonlight
             point_lights: [GpuPointLight::default(); 16],
             num_point_lights: 0,
             pad0: 0,
