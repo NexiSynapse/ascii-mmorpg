@@ -1,0 +1,1628 @@
+{
+  "schema": "veyrath-political-authoring-plan-v2",
+  "source": "veyrath-full.json and world-design.json",
+  "immutable_source_checkpoint": "veyrath-03-geography.map",
+  "factions": [
+    {
+      "faction_id": "crown",
+      "name": "Crown of Veyrath",
+      "color": "#806D62",
+      "territorial_seed": [
+        52,
+        47
+      ],
+      "capital_settlement": "veyrath",
+      "region_id": "heartland",
+      "generated_state_id": 9,
+      "generated_state_name": "Chazdus",
+      "generated_culture_id": 2,
+      "generated_culture_name": "Yotunn (Giants)",
+      "generated_religion_ids": [
+        2
+      ],
+      "generated_religion_names": [
+        "Yotunn (Giants) Beliefs"
+      ]
+    },
+    {
+      "faction_id": "synod",
+      "name": "The Ashen Synod",
+      "color": "#777A80",
+      "territorial_seed": [
+        49,
+        22
+      ],
+      "capital_settlement": "crownspire",
+      "region_id": "ashen-crown",
+      "generated_state_id": 5,
+      "generated_state_name": "Alian",
+      "generated_culture_id": 1,
+      "generated_culture_name": "Trow (Dark Elfish)",
+      "generated_religion_ids": [
+        1
+      ],
+      "generated_religion_names": [
+        "Trow (Dark Elfish) Beliefs"
+      ]
+    },
+    {
+      "faction_id": "gallowmere",
+      "name": "House Gallowmere",
+      "color": "#4C6654",
+      "territorial_seed": [
+        29,
+        44
+      ],
+      "capital_settlement": "dunhallow",
+      "region_id": "gallowmere",
+      "generated_state_id": 6,
+      "generated_state_name": "Qerags",
+      "generated_culture_id": 11,
+      "generated_culture_name": "Ugluk (Orkish)",
+      "generated_religion_ids": [
+        11
+      ],
+      "generated_religion_names": [
+        "Neutrals Pantheon"
+      ]
+    },
+    {
+      "faction_id": "mire-courts",
+      "name": "The Mire Courts",
+      "color": "#606C68",
+      "territorial_seed": [
+        75,
+        50
+      ],
+      "capital_settlement": "mirewatch",
+      "region_id": "hollow-fen",
+      "generated_state_id": 4,
+      "generated_state_name": "Haulsha",
+      "generated_culture_id": 13,
+      "generated_culture_name": "Quenian (Elfish)",
+      "generated_religion_ids": [
+        22
+      ],
+      "generated_religion_names": [
+        "Thenorgond Iconoclasm"
+      ]
+    },
+    {
+      "faction_id": "greyfall",
+      "name": "The Greyfall Compact",
+      "color": "#8A7B60",
+      "territorial_seed": [
+        47,
+        63
+      ],
+      "capital_settlement": "greyfall",
+      "region_id": "greyfall",
+      "generated_state_id": 2,
+      "generated_state_name": "Venatheie",
+      "generated_culture_id": 12,
+      "generated_culture_name": "Dail (Human)",
+      "generated_religion_ids": [
+        2
+      ],
+      "generated_religion_names": [
+        "Yotunn (Giants) Beliefs"
+      ]
+    },
+    {
+      "faction_id": "blackwake",
+      "name": "The Blackwake League",
+      "color": "#5E7480",
+      "territorial_seed": [
+        65,
+        84
+      ],
+      "capital_settlement": "blackwake",
+      "region_id": "black-coast",
+      "generated_state_id": 8,
+      "generated_state_name": "Cyhei",
+      "generated_culture_id": 4,
+      "generated_culture_name": "Khazadur (Dwarven)",
+      "generated_religion_ids": [
+        2
+      ],
+      "generated_religion_names": [
+        "Yotunn (Giants) Beliefs"
+      ]
+    }
+  ],
+  "cultures": [
+    {
+      "id": "crownlander",
+      "name": "Crownlanders",
+      "identity": "River-basin farming, royal crafts, urban guilds",
+      "centre": [
+        52,
+        47
+      ],
+      "generated_id": 2,
+      "generated_name": "Yotunn (Giants)"
+    },
+    {
+      "id": "crownfell",
+      "name": "Crownfell Clans",
+      "identity": "Pass wardens, miners, austere monastery communities",
+      "centre": [
+        49,
+        24
+      ],
+      "generated_id": 1,
+      "generated_name": "Trow (Dark Elfish)"
+    },
+    {
+      "id": "gallowfolk",
+      "name": "Gallowfolk",
+      "identity": "Forest nobility, hunters, woodland steads",
+      "centre": [
+        29,
+        44
+      ],
+      "generated_id": 11,
+      "generated_name": "Ugluk (Orkish)"
+    },
+    {
+      "id": "fenfolk",
+      "name": "Fenfolk",
+      "identity": "Boat travel, reedworking, dry-island settlements",
+      "centre": [
+        75,
+        51
+      ],
+      "generated_id": 13,
+      "generated_name": "Quenian (Elfish)"
+    },
+    {
+      "id": "valefolk",
+      "name": "Valefolk",
+      "identity": "Grain, mills, caravan trade, local compacts",
+      "centre": [
+        47,
+        64
+      ],
+      "generated_id": 12,
+      "generated_name": "Dail (Human)"
+    },
+    {
+      "id": "blackcoaster",
+      "name": "Blackcoasters",
+      "identity": "Harbour guilds, fishing, coastal shipping",
+      "centre": [
+        65,
+        84
+      ],
+      "generated_id": 4,
+      "generated_name": "Khazadur (Dwarven)"
+    }
+  ],
+  "religions": [
+    {
+      "id": "last-light",
+      "name": "Church of the Last Light",
+      "identity": "Fractured former state church; rival reformers and royal clergy",
+      "regions": [
+        "heartland",
+        "greyfall",
+        "black-coast"
+      ],
+      "centre": [
+        51,
+        46
+      ],
+      "generated_id": 2,
+      "generated_name": "Yotunn (Giants) Beliefs"
+    },
+    {
+      "id": "ashen-rite",
+      "name": "The Ashen Rite",
+      "identity": "Synod-controlled penitence and guarded accounts of the catastrophe",
+      "regions": [
+        "ashen-crown"
+      ],
+      "centre": [
+        48,
+        23
+      ],
+      "generated_id": 1,
+      "generated_name": "Trow (Dark Elfish) Beliefs"
+    },
+    {
+      "id": "old-root",
+      "name": "The Old Root Covenant",
+      "identity": "Persecuted local traditions; some sites conceal dangerous cults",
+      "regions": [
+        "gallowmere"
+      ],
+      "centre": [
+        25,
+        38
+      ],
+      "generated_id": 11,
+      "generated_name": "Neutrals Pantheon"
+    },
+    {
+      "id": "lantern-communion",
+      "name": "The Lantern Communion",
+      "identity": "Water, burial, remembrance, and guidance through the fen",
+      "regions": [
+        "hollow-fen"
+      ],
+      "centre": [
+        76,
+        52
+      ],
+      "generated_id": 22,
+      "generated_name": "Thenorgond Iconoclasm"
+    }
+  ],
+  "neutral_frontier": {
+    "name": "The Unclaimed March",
+    "anchors": [
+      [
+        35,
+        28
+      ],
+      [
+        22,
+        53
+      ],
+      [
+        70,
+        66
+      ]
+    ],
+    "rule": "Discontinuous frontier designation, not a seventh state; follow actual disputed cells"
+  },
+  "cell_plan": {
+    "rule": "nearest territorial seed with Unclaimed March pockets around the three neutral frontier anchors",
+    "neutral_frontier_radius_rule": "min(48px, nearest_faction_distance * 0.42)",
+    "counts": {
+      "synod": 907,
+      "gallowmere": 1379,
+      "mire-courts": 997,
+      "unclaimed-march": 121,
+      "crown": 521,
+      "greyfall": 671,
+      "blackwake": 257
+    },
+    "land_cell_count": 4853
+  },
+  "settlements": [
+    {
+      "settlement_id": "veyrath",
+      "name": "Veyrath",
+      "kind": "capital",
+      "region": "heartland",
+      "faction": "crown",
+      "population_target": 38000,
+      "site": "Raised river terrace beside King's Bridge; farmland and defensible hills; occupied by the regent's garrison",
+      "anchor": [
+        52,
+        47
+      ],
+      "target_cell": 2995,
+      "target_xy": [
+        831.08,
+        514.05
+      ],
+      "target_height": 36,
+      "target_biome": 3,
+      "target_biome_name": "Savanna",
+      "cell_distance": 3.09,
+      "raw_anchor_cell": 2995,
+      "raw_anchor_distance": 3.09,
+      "site_flags": [],
+      "existing_burg_id": 478,
+      "existing_burg_name": "Stiolt",
+      "existing_burg_group": "village",
+      "existing_burg_state": 1,
+      "burg_distance": 0.0,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "dunhallow",
+      "name": "Dunhallow",
+      "kind": "city",
+      "region": "gallowmere",
+      "faction": "gallowmere",
+      "population_target": 8500,
+      "site": "Lake outlet and western timber-road junction",
+      "anchor": [
+        29,
+        44
+      ],
+      "target_cell": 2735,
+      "target_xy": [
+        460.39,
+        487.18
+      ],
+      "target_height": 77,
+      "target_biome": 9,
+      "target_biome_name": "Taiga",
+      "cell_distance": 4.81,
+      "raw_anchor_cell": 2735,
+      "raw_anchor_distance": 4.81,
+      "site_flags": [],
+      "existing_burg_id": 119,
+      "existing_burg_name": "Mubredh",
+      "existing_burg_group": "town",
+      "existing_burg_state": 0,
+      "burg_distance": 0.0,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "greyfall",
+      "name": "Greyfall",
+      "kind": "city",
+      "region": "greyfall",
+      "faction": "greyfall",
+      "population_target": 10500,
+      "site": "Grain market above the Greywash floodplain",
+      "anchor": [
+        47,
+        63
+      ],
+      "target_cell": 4192,
+      "target_xy": [
+        746.08,
+        687.92
+      ],
+      "target_height": 39,
+      "target_biome": 4,
+      "target_biome_name": "Grassland",
+      "cell_distance": 7.8,
+      "raw_anchor_cell": 4192,
+      "raw_anchor_distance": 7.8,
+      "site_flags": [],
+      "existing_burg_id": 496,
+      "existing_burg_name": "Ulbsiltia",
+      "existing_burg_group": "village",
+      "existing_burg_state": 2,
+      "burg_distance": 6.43,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "blackwake",
+      "name": "Blackwake Port",
+      "kind": "city",
+      "region": "black-coast",
+      "faction": "blackwake",
+      "population_target": 14500,
+      "site": "Sheltered estuary harbour; verify coastline and port cell",
+      "anchor": [
+        65,
+        84
+      ],
+      "target_cell": 5575,
+      "target_xy": [
+        1096.58,
+        913.26
+      ],
+      "target_height": 27,
+      "target_biome": 12,
+      "target_biome_name": "Wetland",
+      "cell_distance": 57.59,
+      "raw_anchor_cell": 5575,
+      "raw_anchor_distance": 57.59,
+      "site_flags": [
+        "large_anchor_adjustment"
+      ],
+      "existing_burg_id": 465,
+      "existing_burg_name": "Khiz",
+      "existing_burg_group": "town",
+      "existing_burg_state": 1,
+      "burg_distance": 24.82,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "crownspire",
+      "name": "Crownspire Fortress",
+      "kind": "fortified_town",
+      "region": "ashen-crown",
+      "faction": "synod",
+      "population_target": 2200,
+      "site": "Sheltered high valley controlling Nine Graves Pass",
+      "anchor": [
+        47,
+        22
+      ],
+      "target_cell": 1628,
+      "target_xy": [
+        767.79,
+        333.5
+      ],
+      "target_height": 69,
+      "target_biome": 10,
+      "target_biome_name": "Tundra",
+      "cell_distance": 92.85,
+      "raw_anchor_cell": 971,
+      "raw_anchor_distance": 6.17,
+      "site_flags": [
+        "raw_anchor_biome_glacier",
+        "large_anchor_adjustment"
+      ],
+      "existing_burg_id": 121,
+      "existing_burg_name": "Ganen",
+      "existing_burg_group": "village",
+      "existing_burg_state": 5,
+      "burg_distance": 23.83,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "mirewatch",
+      "name": "Mirewatch",
+      "kind": "fortified_town",
+      "region": "hollow-fen",
+      "faction": "mire-courts",
+      "population_target": 2400,
+      "site": "Dry rise above a channel junction",
+      "anchor": [
+        75,
+        50
+      ],
+      "target_cell": 3340,
+      "target_xy": [
+        1202.62,
+        555.97
+      ],
+      "target_height": 36,
+      "target_biome": 8,
+      "target_biome_name": "Temperate rainforest",
+      "cell_distance": 6.52,
+      "raw_anchor_cell": 3340,
+      "raw_anchor_distance": 6.52,
+      "site_flags": [],
+      "existing_burg_id": 75,
+      "existing_burg_name": "Tiquana",
+      "existing_burg_group": "town",
+      "existing_burg_state": 4,
+      "burg_distance": 21.19,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "ashenwatch",
+      "name": "Ashenwatch",
+      "kind": "fortified_town",
+      "region": "greyfall",
+      "faction": "greyfall",
+      "population_target": 1800,
+      "site": "Low ridge protecting southern farms",
+      "anchor": [
+        40,
+        73
+      ],
+      "target_cell": 5002,
+      "target_xy": [
+        638.1,
+        801.67
+      ],
+      "target_height": 47,
+      "target_biome": 4,
+      "target_biome_name": "Grassland",
+      "cell_distance": 2.32,
+      "raw_anchor_cell": 5002,
+      "raw_anchor_distance": 2.32,
+      "site_flags": [],
+      "existing_burg_id": 650,
+      "existing_burg_name": "Gnok",
+      "existing_burg_group": "town",
+      "existing_burg_state": 2,
+      "burg_distance": 20.92,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "thornwatch",
+      "name": "Thornwatch",
+      "kind": "fortified_town",
+      "region": "heartland",
+      "faction": "crown",
+      "population_target": 2600,
+      "site": "Eastern basin edge and fen causeway gateway",
+      "anchor": [
+        64,
+        48
+      ],
+      "target_cell": 3122,
+      "target_xy": [
+        1016.47,
+        525.69
+      ],
+      "target_height": 33,
+      "target_biome": 5,
+      "target_biome_name": "Tropical seasonal forest",
+      "cell_distance": 7.88,
+      "raw_anchor_cell": 3122,
+      "raw_anchor_distance": 7.88,
+      "site_flags": [],
+      "existing_burg_id": 211,
+      "existing_burg_name": "Irgorhora",
+      "existing_burg_group": "town",
+      "existing_burg_state": 1,
+      "burg_distance": 14.58,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "blackford",
+      "name": "Blackford",
+      "kind": "fortified_town",
+      "region": "greyfall",
+      "faction": "greyfall",
+      "population_target": 2100,
+      "site": "Stable bridge approach above the Crownwater/Greywash confluence",
+      "anchor": [
+        56,
+        69
+      ],
+      "target_cell": 4755,
+      "target_xy": [
+        893.41,
+        761.28
+      ],
+      "target_height": 36,
+      "target_biome": 4,
+      "target_biome_name": "Grassland",
+      "cell_distance": 3.45,
+      "raw_anchor_cell": 4755,
+      "raw_anchor_distance": 3.45,
+      "site_flags": [],
+      "existing_burg_id": 13,
+      "existing_burg_name": "Keathel",
+      "existing_burg_group": "village",
+      "existing_burg_state": 2,
+      "burg_distance": 10.76,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "saltgrave",
+      "name": "Saltgrave",
+      "kind": "fortified_town",
+      "region": "black-coast",
+      "faction": "blackwake",
+      "population_target": 1700,
+      "site": "Secondary sheltered harbour and salt marshes",
+      "anchor": [
+        75,
+        77
+      ],
+      "target_cell": 5396,
+      "target_xy": [
+        1206.4,
+        855.14
+      ],
+      "target_height": 36,
+      "target_biome": 8,
+      "target_biome_name": "Temperate rainforest",
+      "cell_distance": 10.35,
+      "raw_anchor_cell": 5327,
+      "raw_anchor_distance": 5.24,
+      "site_flags": [
+        "raw_anchor_biome_temperate_rainforest"
+      ],
+      "existing_burg_id": 390,
+      "existing_burg_name": "Keren",
+      "existing_burg_group": "village",
+      "existing_burg_state": 1,
+      "burg_distance": 7.12,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "wintermere",
+      "name": "Wintermere",
+      "kind": "village",
+      "region": "ashen-crown",
+      "faction": "synod",
+      "population_target": null,
+      "site": "Sheltered upland pasture",
+      "anchor": [
+        43,
+        28
+      ],
+      "target_cell": 1621,
+      "target_xy": [
+        673.79,
+        332.45
+      ],
+      "target_height": 68,
+      "target_biome": 9,
+      "target_biome_name": "Taiga",
+      "cell_distance": 28.28,
+      "raw_anchor_cell": 1329,
+      "raw_anchor_distance": 4.0,
+      "site_flags": [
+        "raw_anchor_biome_glacier",
+        "large_anchor_adjustment"
+      ],
+      "existing_burg_id": null,
+      "existing_burg_name": null,
+      "existing_burg_group": null,
+      "existing_burg_state": null,
+      "burg_distance": 40.88,
+      "new_burg_required": true,
+      "placement_note": "Create a new burg on target_cell and set its canonical name."
+    },
+    {
+      "settlement_id": "frostvein",
+      "name": "Frostvein",
+      "kind": "hamlet",
+      "region": "ashen-crown",
+      "faction": "synod",
+      "population_target": null,
+      "site": "Occupied miners' hamlet below the abandoned mine workings",
+      "anchor": [
+        63,
+        30
+      ],
+      "target_cell": 1647,
+      "target_xy": [
+        1010.58,
+        334.16
+      ],
+      "target_height": 55,
+      "target_biome": 6,
+      "target_biome_name": "Temperate deciduous forest",
+      "cell_distance": 4.9,
+      "raw_anchor_cell": 1647,
+      "raw_anchor_distance": 4.9,
+      "site_flags": [],
+      "existing_burg_id": 493,
+      "existing_burg_name": "Ellanynlulil",
+      "existing_burg_group": "city",
+      "existing_burg_state": 5,
+      "burg_distance": 0.0,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "passwarden",
+      "name": "Passwarden",
+      "kind": "hamlet",
+      "region": "ashen-crown",
+      "faction": "synod",
+      "population_target": null,
+      "site": "Southern Nine Graves toll station",
+      "anchor": [
+        49,
+        31
+      ],
+      "target_cell": 1629,
+      "target_xy": [
+        777.56,
+        339.37
+      ],
+      "target_height": 68,
+      "target_biome": 9,
+      "target_biome_name": "Taiga",
+      "cell_distance": 6.64,
+      "raw_anchor_cell": 1629,
+      "raw_anchor_distance": 6.64,
+      "site_flags": [],
+      "existing_burg_id": null,
+      "existing_burg_name": null,
+      "existing_burg_group": null,
+      "existing_burg_state": null,
+      "burg_distance": 32.24,
+      "new_burg_required": true,
+      "placement_note": "Create a new burg on target_cell and set its canonical name."
+    },
+    {
+      "settlement_id": "coldbrook",
+      "name": "Coldbrook",
+      "kind": "village",
+      "region": "ashen-crown",
+      "faction": "synod",
+      "population_target": null,
+      "site": "Lower cold valley with water and hay meadows",
+      "anchor": [
+        59,
+        32
+      ],
+      "target_cell": 1739,
+      "target_xy": [
+        946.69,
+        347.87
+      ],
+      "target_height": 57,
+      "target_biome": 6,
+      "target_biome_name": "Temperate deciduous forest",
+      "cell_distance": 4.93,
+      "raw_anchor_cell": 1739,
+      "raw_anchor_distance": 4.93,
+      "site_flags": [],
+      "existing_burg_id": 27,
+      "existing_burg_name": "Kyathlumyma",
+      "existing_burg_group": "fort",
+      "existing_burg_state": 5,
+      "burg_distance": 11.77,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "wychford",
+      "name": "Wychford",
+      "kind": "village",
+      "region": "gallowmere",
+      "faction": "gallowmere",
+      "population_target": null,
+      "site": "Blackroot crossing on the Old Westroad",
+      "anchor": [
+        36,
+        46
+      ],
+      "target_cell": 2857,
+      "target_xy": [
+        578.4,
+        500.98
+      ],
+      "target_height": 61,
+      "target_biome": 4,
+      "target_biome_name": "Grassland",
+      "cell_distance": 5.56,
+      "raw_anchor_cell": 2857,
+      "raw_anchor_distance": 5.56,
+      "site_flags": [],
+      "existing_burg_id": 529,
+      "existing_burg_name": "Gler",
+      "existing_burg_group": "town",
+      "existing_burg_state": 5,
+      "burg_distance": 10.48,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "briarholt",
+      "name": "Briarholt",
+      "kind": "village",
+      "region": "gallowmere",
+      "faction": "gallowmere",
+      "population_target": null,
+      "site": "Managed woodland and forest-edge farms",
+      "anchor": [
+        32,
+        54
+      ],
+      "target_cell": 3650,
+      "target_xy": [
+        512.28,
+        598.03
+      ],
+      "target_height": 60,
+      "target_biome": 4,
+      "target_biome_name": "Grassland",
+      "cell_distance": 4.04,
+      "raw_anchor_cell": 3650,
+      "raw_anchor_distance": 4.04,
+      "site_flags": [],
+      "existing_burg_id": null,
+      "existing_burg_name": null,
+      "existing_burg_group": null,
+      "existing_burg_state": null,
+      "burg_distance": 29.16,
+      "new_burg_required": true,
+      "placement_note": "Create a new burg on target_cell and set its canonical name."
+    },
+    {
+      "settlement_id": "ravenhollow",
+      "name": "Ravenhollow",
+      "kind": "hamlet",
+      "region": "gallowmere",
+      "faction": "gallowmere",
+      "population_target": null,
+      "site": "Hidden spring-fed clearing",
+      "anchor": [
+        23,
+        36
+      ],
+      "target_cell": 2620,
+      "target_xy": [
+        352.12,
+        465.99
+      ],
+      "target_height": 81,
+      "target_biome": 10,
+      "target_biome_name": "Tundra",
+      "cell_distance": 71.77,
+      "raw_anchor_cell": 1999,
+      "raw_anchor_distance": 4.33,
+      "site_flags": [
+        "raw_anchor_biome_glacier",
+        "large_anchor_adjustment"
+      ],
+      "existing_burg_id": null,
+      "existing_burg_name": null,
+      "existing_burg_group": null,
+      "existing_burg_state": null,
+      "burg_distance": 43.59,
+      "new_burg_required": true,
+      "placement_note": "Create a new burg on target_cell and set its canonical name."
+    },
+    {
+      "settlement_id": "elderwick",
+      "name": "Elderwick",
+      "kind": "village",
+      "region": "gallowmere",
+      "faction": "gallowmere",
+      "population_target": null,
+      "site": "Wooded upland valley below Wolfstair",
+      "anchor": [
+        34,
+        35
+      ],
+      "target_cell": 2013,
+      "target_xy": [
+        552.23,
+        391.82
+      ],
+      "target_height": 65,
+      "target_biome": 4,
+      "target_biome_name": "Grassland",
+      "cell_distance": 10.69,
+      "raw_anchor_cell": 2013,
+      "raw_anchor_distance": 10.69,
+      "site_flags": [],
+      "existing_burg_id": 363,
+      "existing_burg_name": "Bariat",
+      "existing_burg_group": "town",
+      "existing_burg_state": 5,
+      "burg_distance": 14.48,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "mossbarrow",
+      "name": "Mossbarrow",
+      "kind": "hamlet",
+      "region": "gallowmere",
+      "faction": "gallowmere",
+      "population_target": null,
+      "site": "Charcoal and resin clearing",
+      "anchor": [
+        21,
+        48
+      ],
+      "target_cell": 3175,
+      "target_xy": [
+        329.26,
+        531.57
+      ],
+      "target_height": 58,
+      "target_biome": 4,
+      "target_biome_name": "Grassland",
+      "cell_distance": 7.63,
+      "raw_anchor_cell": 3175,
+      "raw_anchor_distance": 7.63,
+      "site_flags": [],
+      "existing_burg_id": null,
+      "existing_burg_name": null,
+      "existing_burg_group": null,
+      "existing_burg_state": null,
+      "burg_distance": 28.53,
+      "new_burg_required": true,
+      "placement_note": "Create a new burg on target_cell and set its canonical name."
+    },
+    {
+      "settlement_id": "dunmere",
+      "name": "Dunmere",
+      "kind": "village",
+      "region": "gallowmere",
+      "faction": "gallowmere",
+      "population_target": null,
+      "site": "Dry bank below Widow's Mere",
+      "anchor": [
+        29,
+        47
+      ],
+      "target_cell": 2968,
+      "target_xy": [
+        466.15,
+        515.25
+      ],
+      "target_height": 74,
+      "target_biome": 9,
+      "target_biome_name": "Taiga",
+      "cell_distance": 2.77,
+      "raw_anchor_cell": 2968,
+      "raw_anchor_distance": 2.77,
+      "site_flags": [],
+      "existing_burg_id": 283,
+      "existing_burg_name": "Bozd",
+      "existing_burg_group": "town",
+      "existing_burg_state": 0,
+      "burg_distance": 19.97,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "kingsbridge",
+      "name": "Kingsbridge",
+      "kind": "village",
+      "region": "heartland",
+      "faction": "crown",
+      "population_target": null,
+      "site": "Northern river crossing and market approach",
+      "anchor": [
+        51,
+        43
+      ],
+      "target_cell": 2655,
+      "target_xy": [
+        821.43,
+        471.02
+      ],
+      "target_height": 37,
+      "target_biome": 3,
+      "target_biome_name": "Savanna",
+      "cell_distance": 5.78,
+      "raw_anchor_cell": 2655,
+      "raw_anchor_distance": 5.78,
+      "site_flags": [],
+      "existing_burg_id": 491,
+      "existing_burg_name": "Fruict",
+      "existing_burg_group": "village",
+      "existing_burg_state": 5,
+      "burg_distance": 10.48,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "harthstead",
+      "name": "Harthstead",
+      "kind": "village",
+      "region": "heartland",
+      "faction": "crown",
+      "population_target": null,
+      "site": "Old Westroad agricultural junction",
+      "anchor": [
+        43,
+        48
+      ],
+      "target_cell": 3097,
+      "target_xy": [
+        684.37,
+        524.06
+      ],
+      "target_height": 44,
+      "target_biome": 4,
+      "target_biome_name": "Grassland",
+      "cell_distance": 5.36,
+      "raw_anchor_cell": 3097,
+      "raw_anchor_distance": 5.36,
+      "site_flags": [],
+      "existing_burg_id": 498,
+      "existing_burg_name": "Hobruing",
+      "existing_burg_group": "village",
+      "existing_burg_state": 9,
+      "burg_distance": 14.25,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "bellwether",
+      "name": "Bellwether",
+      "kind": "village",
+      "region": "heartland",
+      "faction": "crown",
+      "population_target": null,
+      "site": "Sheep pasture above central river terraces",
+      "anchor": [
+        58,
+        52
+      ],
+      "target_cell": 3411,
+      "target_xy": [
+        927.02,
+        568
+      ],
+      "target_height": 36,
+      "target_biome": 3,
+      "target_biome_name": "Savanna",
+      "cell_distance": 4.12,
+      "raw_anchor_cell": 3411,
+      "raw_anchor_distance": 4.12,
+      "site_flags": [],
+      "existing_burg_id": 553,
+      "existing_burg_name": "Orenor",
+      "existing_burg_group": "town",
+      "existing_burg_state": 1,
+      "burg_distance": 21.51,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "crownfield",
+      "name": "Crownfield",
+      "kind": "village",
+      "region": "heartland",
+      "faction": "crown",
+      "population_target": null,
+      "site": "Capital's principal grain belt",
+      "anchor": [
+        48,
+        54
+      ],
+      "target_cell": 3579,
+      "target_xy": [
+        764.61,
+        593.95
+      ],
+      "target_height": 37,
+      "target_biome": 3,
+      "target_biome_name": "Savanna",
+      "cell_distance": 3.39,
+      "raw_anchor_cell": 3579,
+      "raw_anchor_distance": 3.39,
+      "site_flags": [],
+      "existing_burg_id": 9,
+      "existing_burg_name": "Gurtec",
+      "existing_burg_group": "capital",
+      "existing_burg_state": 9,
+      "burg_distance": 20.14,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "tallowford",
+      "name": "Tallowford",
+      "kind": "village",
+      "region": "heartland",
+      "faction": "crown",
+      "population_target": null,
+      "site": "Southern crossing and livestock trade",
+      "anchor": [
+        56,
+        57
+      ],
+      "target_cell": 3852,
+      "target_xy": [
+        896.63,
+        636.13
+      ],
+      "target_height": 36,
+      "target_biome": 6,
+      "target_biome_name": "Temperate deciduous forest",
+      "cell_distance": 9.15,
+      "raw_anchor_cell": 3852,
+      "raw_anchor_distance": 9.15,
+      "site_flags": [],
+      "existing_burg_id": 480,
+      "existing_burg_name": "Ithrionzan",
+      "existing_burg_group": "town",
+      "existing_burg_state": 1,
+      "burg_distance": 6.39,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "whitebarrow",
+      "name": "Whitebarrow",
+      "kind": "village",
+      "region": "heartland",
+      "faction": "crown",
+      "population_target": null,
+      "site": "Northern road junction and monastery estate",
+      "anchor": [
+        49,
+        36
+      ],
+      "target_cell": 2031,
+      "target_xy": [
+        784.22,
+        394.34
+      ],
+      "target_height": 42,
+      "target_biome": 4,
+      "target_biome_name": "Grassland",
+      "cell_distance": 1.67,
+      "raw_anchor_cell": 2031,
+      "raw_anchor_distance": 1.67,
+      "site_flags": [],
+      "existing_burg_id": 357,
+      "existing_burg_name": "Khovshar",
+      "existing_burg_group": "village",
+      "existing_burg_state": 5,
+      "burg_distance": 9.34,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "highcross",
+      "name": "Highcross",
+      "kind": "village",
+      "region": "heartland",
+      "faction": "crown",
+      "population_target": null,
+      "site": "Firm terrace beside Frostvein crossing",
+      "anchor": [
+        61,
+        40
+      ],
+      "target_cell": 2351,
+      "target_xy": [
+        977.96,
+        431.78
+      ],
+      "target_height": 36,
+      "target_biome": 4,
+      "target_biome_name": "Grassland",
+      "cell_distance": 8.45,
+      "raw_anchor_cell": 2351,
+      "raw_anchor_distance": 8.45,
+      "site_flags": [],
+      "existing_burg_id": 499,
+      "existing_burg_name": "Umyuer",
+      "existing_burg_group": "town",
+      "existing_burg_state": 5,
+      "burg_distance": 11.58,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "reedhaven",
+      "name": "Reedhaven",
+      "kind": "village",
+      "region": "hollow-fen",
+      "faction": "mire-courts",
+      "population_target": null,
+      "site": "Navigable channel bank and raised gardens",
+      "anchor": [
+        73,
+        61
+      ],
+      "target_cell": 4134,
+      "target_xy": [
+        1169.42,
+        669.51
+      ],
+      "target_height": 42,
+      "target_biome": 8,
+      "target_biome_name": "Temperate rainforest",
+      "cell_distance": 2.06,
+      "raw_anchor_cell": 4134,
+      "raw_anchor_distance": 2.06,
+      "site_flags": [],
+      "existing_burg_id": 183,
+      "existing_burg_name": "Elunanderin",
+      "existing_burg_group": "city",
+      "existing_burg_state": 1,
+      "burg_distance": 9.42,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "mournfen",
+      "name": "Mournfen",
+      "kind": "hamlet",
+      "region": "hollow-fen",
+      "faction": "mire-courts",
+      "population_target": null,
+      "site": "Dry island and maintained boat landing",
+      "anchor": [
+        81,
+        58
+      ],
+      "target_cell": 4318,
+      "target_xy": [
+        1255.35,
+        692.78
+      ],
+      "target_height": 41,
+      "target_biome": 12,
+      "target_biome_name": "Wetland",
+      "cell_distance": 68.21,
+      "raw_anchor_cell": 4318,
+      "raw_anchor_distance": 68.21,
+      "site_flags": [
+        "large_anchor_adjustment"
+      ],
+      "existing_burg_id": null,
+      "existing_burg_name": null,
+      "existing_burg_group": null,
+      "existing_burg_state": null,
+      "burg_distance": 36.21,
+      "new_burg_required": true,
+      "placement_note": "Create a new burg on target_cell and set its canonical name."
+    },
+    {
+      "settlement_id": "sedgewick",
+      "name": "Sedgewick",
+      "kind": "village",
+      "region": "hollow-fen",
+      "faction": "mire-courts",
+      "population_target": null,
+      "site": "Raised causeway staging point",
+      "anchor": [
+        68,
+        51
+      ],
+      "target_cell": 3423,
+      "target_xy": [
+        1083.99,
+        559.4
+      ],
+      "target_height": 36,
+      "target_biome": 6,
+      "target_biome_name": "Temperate deciduous forest",
+      "cell_distance": 4.32,
+      "raw_anchor_cell": 3423,
+      "raw_anchor_distance": 4.32,
+      "site_flags": [],
+      "existing_burg_id": 376,
+      "existing_burg_name": "Thilran",
+      "existing_burg_group": "town",
+      "existing_burg_state": 1,
+      "burg_distance": 14.87,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "bellmire",
+      "name": "Bellmire",
+      "kind": "hamlet",
+      "region": "hollow-fen",
+      "faction": "mire-courts",
+      "population_target": null,
+      "site": "Northern fen rise and fish weirs",
+      "anchor": [
+        77,
+        43
+      ],
+      "target_cell": 2686,
+      "target_xy": [
+        1233.34,
+        472.95
+      ],
+      "target_height": 43,
+      "target_biome": 6,
+      "target_biome_name": "Temperate deciduous forest",
+      "cell_distance": 1.34,
+      "raw_anchor_cell": 2686,
+      "raw_anchor_distance": 1.34,
+      "site_flags": [],
+      "existing_burg_id": 172,
+      "existing_burg_name": "Ithyrlor",
+      "existing_burg_group": "town",
+      "existing_burg_state": 4,
+      "burg_distance": 0.0,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "millhaven",
+      "name": "Millhaven",
+      "kind": "village",
+      "region": "greyfall",
+      "faction": "greyfall",
+      "population_target": null,
+      "site": "Starter settlement on a dry terrace near Greyfall Mill; farms, well, and road access",
+      "anchor": [
+        45,
+        68
+      ],
+      "target_cell": 4649,
+      "target_xy": [
+        718.03,
+        745.99
+      ],
+      "target_height": 41,
+      "target_biome": 4,
+      "target_biome_name": "Grassland",
+      "cell_distance": 2.81,
+      "raw_anchor_cell": 4649,
+      "raw_anchor_distance": 2.81,
+      "site_flags": [],
+      "existing_burg_id": 643,
+      "existing_burg_name": "Chiafboif",
+      "existing_burg_group": "town",
+      "existing_burg_state": 2,
+      "burg_distance": 8.8,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "dunfield",
+      "name": "Dunfield",
+      "kind": "village",
+      "region": "greyfall",
+      "faction": "greyfall",
+      "population_target": null,
+      "site": "Greywash farms and granaries",
+      "anchor": [
+        38,
+        64
+      ],
+      "target_cell": 4359,
+      "target_xy": [
+        605.72,
+        705.82
+      ],
+      "target_height": 46,
+      "target_biome": 4,
+      "target_biome_name": "Grassland",
+      "cell_distance": 2.92,
+      "raw_anchor_cell": 4359,
+      "raw_anchor_distance": 2.92,
+      "site_flags": [],
+      "existing_burg_id": 629,
+      "existing_burg_name": "Mistwell",
+      "existing_burg_group": "town",
+      "existing_burg_state": 2,
+      "burg_distance": 14.39,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "briarford",
+      "name": "Briarford",
+      "kind": "village",
+      "region": "greyfall",
+      "faction": "greyfall",
+      "population_target": null,
+      "site": "Western valley crossing",
+      "anchor": [
+        34,
+        69
+      ],
+      "target_cell": 4729,
+      "target_xy": [
+        545.16,
+        765.52
+      ],
+      "target_height": 49,
+      "target_biome": 4,
+      "target_biome_name": "Grassland",
+      "cell_distance": 6.62,
+      "raw_anchor_cell": 4729,
+      "raw_anchor_distance": 6.62,
+      "site_flags": [],
+      "existing_burg_id": 471,
+      "existing_burg_name": "Phax",
+      "existing_burg_group": "town",
+      "existing_burg_state": 2,
+      "burg_distance": 26.73,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "emberleigh",
+      "name": "Emberleigh",
+      "kind": "hamlet",
+      "region": "greyfall",
+      "faction": "greyfall",
+      "population_target": null,
+      "site": "Recovering southern farmland",
+      "anchor": [
+        51,
+        74
+      ],
+      "target_cell": 5016,
+      "target_xy": [
+        810.3,
+        801.13
+      ],
+      "target_height": 39,
+      "target_biome": 6,
+      "target_biome_name": "Temperate deciduous forest",
+      "cell_distance": 14.08,
+      "raw_anchor_cell": 5016,
+      "raw_anchor_distance": 14.08,
+      "site_flags": [],
+      "existing_burg_id": 335,
+      "existing_burg_name": "Smallow",
+      "existing_burg_group": "village",
+      "existing_burg_state": 2,
+      "burg_distance": 5.29,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "widowfield",
+      "name": "Widowfield",
+      "kind": "village",
+      "region": "greyfall",
+      "faction": "greyfall",
+      "population_target": null,
+      "site": "Working farms beside abandoned military allotments",
+      "anchor": [
+        43,
+        76
+      ],
+      "target_cell": 5198,
+      "target_xy": [
+        689.28,
+        830.54
+      ],
+      "target_height": 45,
+      "target_biome": 8,
+      "target_biome_name": "Temperate rainforest",
+      "cell_distance": 5.61,
+      "raw_anchor_cell": 5198,
+      "raw_anchor_distance": 5.61,
+      "site_flags": [],
+      "existing_burg_id": 148,
+      "existing_burg_name": "Snowstar",
+      "existing_burg_group": "town",
+      "existing_burg_state": 2,
+      "burg_distance": 10.21,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "hallowcross",
+      "name": "Hallowcross",
+      "kind": "village",
+      "region": "greyfall",
+      "faction": "greyfall",
+      "population_target": null,
+      "site": "Eastern caravan junction above wet lowlands",
+      "anchor": [
+        58,
+        62
+      ],
+      "target_cell": 4206,
+      "target_xy": [
+        932.25,
+        684.68
+      ],
+      "target_height": 39,
+      "target_biome": 6,
+      "target_biome_name": "Temperate deciduous forest",
+      "cell_distance": 5.02,
+      "raw_anchor_cell": 4206,
+      "raw_anchor_distance": 5.02,
+      "site_flags": [],
+      "existing_burg_id": 608,
+      "existing_burg_name": "Indesthe",
+      "existing_burg_group": "village",
+      "existing_burg_state": 1,
+      "burg_distance": 18.72,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "brinewatch",
+      "name": "Brinewatch",
+      "kind": "village",
+      "region": "black-coast",
+      "faction": "blackwake",
+      "population_target": null,
+      "site": "Fishing cove west of Blackwake; verify coast",
+      "anchor": [
+        61,
+        84
+      ],
+      "target_cell": 5313,
+      "target_xy": [
+        1027.68,
+        846.44
+      ],
+      "target_height": 27,
+      "target_biome": 8,
+      "target_biome_name": "Temperate rainforest",
+      "cell_distance": 93.2,
+      "raw_anchor_cell": 5313,
+      "raw_anchor_distance": 93.2,
+      "site_flags": [
+        "large_anchor_adjustment"
+      ],
+      "existing_burg_id": 534,
+      "existing_burg_name": "Kinbilarak",
+      "existing_burg_group": "village",
+      "existing_burg_state": 1,
+      "burg_distance": 0.0,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "gullscar",
+      "name": "Gullscar",
+      "kind": "hamlet",
+      "region": "black-coast",
+      "faction": "blackwake",
+      "population_target": null,
+      "site": "Cliff-backed landing with a sheltered approach; verify coast",
+      "anchor": [
+        79,
+        74
+      ],
+      "target_cell": 5159,
+      "target_xy": [
+        1276.3,
+        818.6
+      ],
+      "target_height": 28,
+      "target_biome": 12,
+      "target_biome_name": "Wetland",
+      "cell_distance": 13.13,
+      "raw_anchor_cell": 5157,
+      "raw_anchor_distance": 3.38,
+      "site_flags": [
+        "raw_anchor_biome_wetland"
+      ],
+      "existing_burg_id": 663,
+      "existing_burg_name": "Uyaberi",
+      "existing_burg_group": "village",
+      "existing_burg_state": 1,
+      "burg_distance": 10.36,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    },
+    {
+      "settlement_id": "crowhaven",
+      "name": "Crowhaven",
+      "kind": "village",
+      "region": "black-coast",
+      "faction": "blackwake",
+      "population_target": null,
+      "site": "Small western coastal landing; verify coast",
+      "anchor": [
+        54,
+        83
+      ],
+      "target_cell": 5024,
+      "target_xy": [
+        887.38,
+        808.26
+      ],
+      "target_height": 38,
+      "target_biome": 6,
+      "target_biome_name": "Temperate deciduous forest",
+      "cell_distance": 107.32,
+      "raw_anchor_cell": 5024,
+      "raw_anchor_distance": 107.32,
+      "site_flags": [
+        "large_anchor_adjustment"
+      ],
+      "existing_burg_id": 218,
+      "existing_burg_name": "Shemla",
+      "existing_burg_group": "town",
+      "existing_burg_state": 2,
+      "burg_distance": 0.0,
+      "new_burg_required": false,
+      "placement_note": "Rename and promote the existing burg; keep its generated cell."
+    }
+  ],
+  "review_flags": {
+    "new_burg_required": [
+      "wintermere",
+      "passwarden",
+      "briarholt",
+      "ravenhollow",
+      "mossbarrow",
+      "mournfen"
+    ],
+    "coastal_targets": [
+      "blackwake",
+      "saltgrave",
+      "brinewatch",
+      "gullscar",
+      "crowhaven"
+    ],
+    "high_cell_snap_distance": [
+      "blackwake",
+      "crownspire",
+      "wintermere",
+      "ravenhollow",
+      "mournfen",
+      "brinewatch",
+      "crowhaven"
+    ]
+  },
+  "notes": [
+    "This is a placement plan only; it does not mutate the Azgaar checkpoint.",
+    "Cell assignments are an explicit starting pass for political editing, not a substitute for visual border review.",
+    "Create new burgs for flagged targets instead of renaming a distant generated burg.",
+    "Apply canonical state/culture/religion names and colours only after checking the generated SVG in Azgaar."
+  ]
+}

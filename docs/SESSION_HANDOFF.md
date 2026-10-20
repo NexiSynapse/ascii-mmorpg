@@ -1,8 +1,84 @@
 # ASCII MMORPG — session handoff
 
-Updated: 2026-10-18. This is the resumable engineering record, not a full transcript.
+Updated: 2026-10-20. This is the resumable engineering record, not a full transcript.
 
-Latest slice: the 3D play renderer now has a 4x4 depth sample resolve, broad
+## Latest: Veyrath map authoring — political checkpoint and standalone atlas export reviewed; placement acceptance pending (2026-10-20)
+
+Goal: create **Veyrath — The Dying Crown** in Azgaar, then save an editable
+`.map`, a readable high-resolution overview, a clean view, and Full JSON for
+future game import. The user's detailed world brief governs the design.
+
+State: authoring inputs are in `assets/maps/veyrath/`; Azgaar v1.154.2 generated
+the base and lore checkpoints, then a deterministic grayscale heightmap was
+applied through Tools → Heightmap → Image Converter in a standalone headed
+Chrome session. The resulting `veyrath-03-geography.map` has one connected
+land component (5,127 pack land cells), 5,648 pack cells, 10,043 grid cells,
+689 burgs, 206 rivers, and 497 routes. `veyrath-full.json` contains the live
+geography Full JSON data model; `veyrath-02-lore-full.json` preserves the
+earlier official lore export. The geography SVG was extracted to
+`veyrath-overview.svg` and a reduced `veyrath-clean.svg`; both parse as valid
+XML. MuPDF rasterizations provide `veyrath-overview.png` and
+`veyrath-clean.png` at 4800×3300. The first political checkpoint
+`veyrath-04-political.map` now applies six canonical powers, six cultures, four
+religions, a 121-cell Unclaimed March pocket set, forty named settlements, and
+five working ports. All forty-five landmark markers, five named rivers, and four
+named routes are now present. The derived political SVG views were normalized
+with their CSS land mask, coastline rule, referenced icon definitions, and
+standalone state labels; MuPDF rasterizations now render correctly at
+4800×3300. The raw geography checkpoint remains available for rollback. The
+browser session is not attached to OmniRush's built-in tab.
+
+Files: `world-design.json` contains six regions/powers/cultures, four religions,
+forty settlements, forty-five landmarks, planned drainage, passes, road graph,
+palette, and starter-area design. Percent coordinates are provisional and must
+be snapped to viable generated geography. `README.md` records the authoring
+workflow, pending political work, and geographical acceptance checks.
+
+Checks passed: `python assets/maps/veyrath/validate_design.py`,
+`python assets/maps/veyrath/validate_political_checkpoint.py`, Python
+compilation for the map scripts, and `git diff --check`. The political validator
+now also checks that derived SVG references resolve, the standalone land mask is
+present, the vignette artifact is absent, and the six political labels survive
+rasterization. Rust checks were not repeated for this authoring-only change.
+Game build recovery in the prior turn passed the workspace/present checks and
+release launch.
+
+Git: `main` at `5af8e8e`; authoring files and this note are uncommitted. The
+pre-existing `play_ansi.bat` modification is preserved. The normalized political
+clean atlas is now visually coherent: six state regions, neutral northern
+highlands, readable labels, rivers, roads, and coastline render without the
+former MuPDF linked-symbol/vignette artifacts. Remaining work is live-map
+acceptance of the adjusted Crownspire/Wintermere/Ravenhollow/Mournfen and
+southern/coastal sites, one controlled official Full-export attempt, and then
+runtime map-import planning. The PNG deliverables remain local rasterizations,
+not Azgaar's direct PNG export.
+Detailed continuation: `assets/maps/veyrath/README.md` and
+`geography-review.md`; `political-authoring-plan.json` and
+`validate_political_checkpoint.py` document the first political pass.
+
+## Veyrath ASCII map integration (2026-10-20)
+
+The client World Map modal now displays a compact printable-ASCII atlas derived
+from the current political checkpoint. It is implemented in
+`client/src/veyrath.rs` and `assets/maps/veyrath/veyrath-04-ascii.txt`, with
+colored glyphs for the six powers, sea, highlands, rivers, roads, capital, and
+the Millhaven starter marker. `render_ascii_map.py --check` verifies that the
+checked-in atlas still matches the political Full JSON checkpoint. Press `M` in
+realtime client mode to open it and `Esc` or `M` to close it. A deterministic
+one-frame check is available with:
+
+```text
+cargo run -p ascii-mmorpg-client --no-default-features -- --map-demo
+```
+
+Focused verification passed: `cargo fmt --all -- --check` and
+`cargo test -p ascii-mmorpg-client --lib` (110 tests). This is a presentation
+atlas/modal integration; the authoritative game world and server snapshots do
+not yet use the Veyrath geography for collision, movement, or zone simulation.
+
+## Previous renderer slice
+
+The 3D play renderer now has a 4x4 depth sample resolve, broad
 material-specific printable-ASCII glyph families, stable coverage/normal/
 variance-aware selection, extra tree/road/gate detail, and richer close actor
 planes. The world-black foreground-only contract remains intact. The next

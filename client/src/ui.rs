@@ -11,6 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Gauge, Paragraph, Widget};
 
 use crate::renderer::WeatherMode;
+use crate::veyrath;
 
 /// Interactive overlay modal window modes (CmdMMO-inspired windowed TUI).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1237,14 +1238,14 @@ impl RatatuiHud {
         Paragraph::new(attr_col).render(char_layout[1], buf);
     }
 
-    /// Renders the 2D Overworld Radar Map modal window.
+    /// Renders the Veyrath political checkpoint as a compact ASCII atlas.
     fn render_world_map_modal(&self, buf: &mut Buffer, area: Rect, world: &WorldSnapshot) {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Double)
             .border_style(Style::default().fg(Color::Rgb(100, 190, 120)))
             .title(Span::styled(
-                " Overworld Map: Whispering Forest [M to Close] ",
+                " Veyrath: The Dying Crown [M to Close] ",
                 Style::default()
                     .fg(Color::Rgb(140, 240, 160))
                     .add_modifier(Modifier::BOLD),
@@ -1252,44 +1253,53 @@ impl RatatuiHud {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        let map_layout = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(36), Constraint::Length(32)])
-            .split(inner);
+        let map_layout = if inner.width >= 68 {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(36), Constraint::Length(32)])
+                .split(inner)
+        } else {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(100), Constraint::Length(0)])
+                .split(inner)
+        };
 
         let px = world.player.position.x;
         let py = world.player.position.y;
 
-        // Visual radar map grid
-        let map_lines = vec![
-            Line::from(vec![Span::styled(
-                "  +---------------------------------+",
-                Style::default().fg(Color::Rgb(80, 120, 90)),
-            )]),
-            Line::from(vec![Span::styled(
-                "  | ♠ ♠ ♠  [==GATE==]  ♠ ♠ ♠  ▲RIDGE|",
-                Style::default().fg(Color::Rgb(100, 160, 110)),
-            )]),
-            Line::from(vec![Span::styled(
-                "  | ♠ ^RUIN        ☼TORCH    ♠ ♠ ♠ |",
-                Style::default().fg(Color::Rgb(160, 150, 120)),
-            )]),
-            Line::from(vec![Span::styled(
-                "  | ~~~~~~~[==BRIDGE==]~~~~~~~~~RIV |",
-                Style::default().fg(Color::Rgb(70, 150, 220)),
-            )]),
-            Line::from(vec![Span::styled(
-                "  | ♠ ♠ ♠     ☼TORCH      ♠MEADOW♠  |",
-                Style::default().fg(Color::Rgb(80, 140, 90)),
-            )]),
-            Line::from(vec![Span::styled(
-                "  +---------------------------------+",
-                Style::default().fg(Color::Rgb(80, 120, 90)),
-            )]),
-        ];
+        let map_lines =
+            veyrath::atlas_lines(map_layout[0].width as usize, map_layout[0].height as usize)
+                .into_iter()
+                .map(|line| {
+                    let mut spans = Vec::new();
+                    let mut current_color = None;
+                    let mut current = String::new();
+                    for glyph in line.chars() {
+                        let color = veyrath::glyph_color(glyph);
+                        if current_color != Some(color) && !current.is_empty() {
+                            let previous = current_color.unwrap_or((150, 155, 165));
+                            spans.push(Span::styled(
+                                std::mem::take(&mut current),
+                                Style::default().fg(Color::Rgb(previous.0, previous.1, previous.2)),
+                            ));
+                        }
+                        current_color = Some(color);
+                        current.push(glyph);
+                    }
+                    if !current.is_empty() {
+                        let color = current_color.unwrap_or((150, 155, 165));
+                        spans.push(Span::styled(
+                            current,
+                            Style::default().fg(Color::Rgb(color.0, color.1, color.2)),
+                        ));
+                    }
+                    Line::from(spans)
+                })
+                .collect::<Vec<_>>();
         Paragraph::new(map_lines).render(map_layout[0], buf);
 
-        let legend_lines = vec![
+        let mut legend_lines = vec![
             Line::from(vec![
                 Span::styled("Position: ", Style::default().fg(Color::Rgb(160, 160, 160))),
                 Span::styled(
@@ -1300,23 +1310,34 @@ impl RatatuiHud {
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Zone: ", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled("Region: ", Style::default().fg(Color::Rgb(160, 160, 160))),
                 Span::styled(
-                    "Ancient Fortress Woods",
+                    "Greyfall Vale",
                     Style::default().fg(Color::Rgb(140, 190, 230)),
                 ),
             ]),
             Line::from(vec![Span::styled(
-                "Ruins: (-8, -5)   |  Gate: (2, -12)",
-                Style::default().fg(Color::Rgb(180, 170, 150)),
+                "@ Veyrath  * Millhaven",
+                Style::default().fg(Color::Rgb(255, 215, 120)),
             )]),
             Line::from(vec![Span::styled(
-                "River: y ~ 8      |  ☼ Torches: (-6, 2)",
-                Style::default().fg(Color::Rgb(100, 180, 240)),
+                veyrath::ATLAS_NOTE,
+                Style::default().fg(Color::Rgb(140, 190, 150)),
             )]),
+        ];
+        for (name, glyph, color) in veyrath::REGION_LEGEND {
+            legend_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{glyph} "),
+                    Style::default().fg(Color::Rgb(color.0, color.1, color.2)),
+                ),
+                Span::styled(*name, Style::default().fg(Color::Rgb(190, 195, 205))),
+            ]));
+        }
+        legend_lines.extend([
             Line::from(vec![Span::styled(
                 format!(
-                    "Hostiles: {} in radar reach",
+                    "Hostiles nearby: {}",
                     world
                         .entities
                         .iter()
@@ -1325,7 +1346,11 @@ impl RatatuiHud {
                 ),
                 Style::default().fg(Color::Rgb(255, 120, 120)),
             )]),
-        ];
+            Line::from(vec![Span::styled(
+                "~ sea  ^ highland  : river  = road",
+                Style::default().fg(Color::Rgb(120, 160, 190)),
+            )]),
+        ]);
         Paragraph::new(legend_lines).render(map_layout[1], buf);
     }
 
@@ -1632,15 +1657,16 @@ mod tests {
         let map_rendered = hud.render_hud_overlay_with_modal(
             &world,
             80,
-            12,
+            30,
             WeatherMode::Rain,
             "WGPU 3D",
             ActiveModal::WorldMap,
         );
-        assert!(map_rendered.contains("Overworld Map"));
-        assert!(map_rendered.contains("Whispering Forest"));
+        assert!(map_rendered.contains("Veyrath: The Dying Crown"));
+        assert!(map_rendered.contains("Ashen Synod"));
+        assert!(map_rendered.contains("Blackwake League"));
         assert!(map_rendered.contains("Position:"));
-        assert!(map_rendered.contains("GATE"));
+        assert!(map_rendered.contains("Millhaven"));
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub mod term;
 #[cfg(any(feature = "notcurses", test))]
 mod terminal_colors;
 pub mod ui;
+pub mod veyrath;
 pub use partitions::{FontProfile, GameState, Partitions};
 pub use renderer::{Renderer, WeatherMode};
 pub use term::{

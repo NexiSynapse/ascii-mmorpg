@@ -1,0 +1,2235 @@
+{
+  "schema": "veyrath-geography-snap-v1",
+  "source": "veyrath-full.json",
+  "map": {
+    "version": "1.154.2",
+    "description": "Azgaar's Fantasy Map Generator output: azgaar.github.io/Fantasy-map-generator",
+    "exportedAt": "2026-10-19T23:33:48.312Z",
+    "mapName": "Veyrath — The Dying Crown",
+    "width": 1600,
+    "height": 1100,
+    "seed": "731204",
+    "mapId": 1792441554253
+  },
+  "counts": {
+    "pack_cells": 5648,
+    "land_cells": 5127,
+    "generated_burgs": 688,
+    "generated_states": 10,
+    "generated_rivers": 206
+  },
+  "settlements": [
+    {
+      "id": "veyrath",
+      "name": "Veyrath",
+      "kind": "capital",
+      "region": "heartland",
+      "anchor_percent": [
+        52,
+        47
+      ],
+      "anchor_xy": [
+        832.0,
+        517.0
+      ],
+      "cell": 2995,
+      "cell_xy": [
+        831.08,
+        514.05
+      ],
+      "cell_height": 36,
+      "cell_state": 1,
+      "cell_biome": 3,
+      "cell_distance": 3.09,
+      "nearest_generated_burg": 478,
+      "nearest_generated_burg_name": "Stiolt",
+      "burg_distance": 3.09
+    },
+    {
+      "id": "dunhallow",
+      "name": "Dunhallow",
+      "kind": "city",
+      "region": "gallowmere",
+      "anchor_percent": [
+        29,
+        44
+      ],
+      "anchor_xy": [
+        464.0,
+        484.0
+      ],
+      "cell": 2735,
+      "cell_xy": [
+        460.39,
+        487.18
+      ],
+      "cell_height": 77,
+      "cell_state": 0,
+      "cell_biome": 9,
+      "cell_distance": 4.81,
+      "nearest_generated_burg": 119,
+      "nearest_generated_burg_name": "Mubredh",
+      "burg_distance": 4.81
+    },
+    {
+      "id": "greyfall",
+      "name": "Greyfall",
+      "kind": "city",
+      "region": "greyfall",
+      "anchor_percent": [
+        47,
+        63
+      ],
+      "anchor_xy": [
+        752.0,
+        693.0
+      ],
+      "cell": 4192,
+      "cell_xy": [
+        746.08,
+        687.92
+      ],
+      "cell_height": 39,
+      "cell_state": 2,
+      "cell_biome": 4,
+      "cell_distance": 7.8,
+      "nearest_generated_burg": 496,
+      "nearest_generated_burg_name": "Ulbsiltia",
+      "burg_distance": 12.89
+    },
+    {
+      "id": "blackwake",
+      "name": "Blackwake Port",
+      "kind": "city",
+      "region": "black-coast",
+      "anchor_percent": [
+        65,
+        84
+      ],
+      "anchor_xy": [
+        1040.0,
+        924.0
+      ],
+      "cell": 5443,
+      "cell_xy": [
+        1073,
+        884.8
+      ],
+      "cell_height": 19,
+      "cell_state": 0,
+      "cell_biome": 0,
+      "cell_distance": 51.24,
+      "nearest_generated_burg": 465,
+      "nearest_generated_burg_name": "Khiz",
+      "burg_distance": 65.29
+    },
+    {
+      "id": "crownspire",
+      "name": "Crownspire Fortress",
+      "kind": "fortified_town",
+      "region": "ashen-crown",
+      "anchor_percent": [
+        47,
+        22
+      ],
+      "anchor_xy": [
+        752.0,
+        242.0
+      ],
+      "cell": 971,
+      "cell_xy": [
+        757.87,
+        243.91
+      ],
+      "cell_height": 91,
+      "cell_state": 0,
+      "cell_biome": 11,
+      "cell_distance": 6.17,
+      "nearest_generated_burg": 121,
+      "nearest_generated_burg_name": "Ganen",
+      "burg_distance": 113.49
+    },
+    {
+      "id": "mirewatch",
+      "name": "Mirewatch",
+      "kind": "fortified_town",
+      "region": "hollow-fen",
+      "anchor_percent": [
+        75,
+        50
+      ],
+      "anchor_xy": [
+        1200.0,
+        550.0
+      ],
+      "cell": 3340,
+      "cell_xy": [
+        1202.62,
+        555.97
+      ],
+      "cell_height": 36,
+      "cell_state": 4,
+      "cell_biome": 8,
+      "cell_distance": 6.52,
+      "nearest_generated_burg": 75,
+      "nearest_generated_burg_name": "Tiquana",
+      "burg_distance": 17.55
+    },
+    {
+      "id": "ashenwatch",
+      "name": "Ashenwatch",
+      "kind": "fortified_town",
+      "region": "greyfall",
+      "anchor_percent": [
+        40,
+        73
+      ],
+      "anchor_xy": [
+        640.0,
+        803.0
+      ],
+      "cell": 5002,
+      "cell_xy": [
+        638.1,
+        801.67
+      ],
+      "cell_height": 47,
+      "cell_state": 2,
+      "cell_biome": 4,
+      "cell_distance": 2.32,
+      "nearest_generated_burg": 650,
+      "nearest_generated_burg_name": "Gnok",
+      "burg_distance": 18.89
+    },
+    {
+      "id": "thornwatch",
+      "name": "Thornwatch",
+      "kind": "fortified_town",
+      "region": "heartland",
+      "anchor_percent": [
+        64,
+        48
+      ],
+      "anchor_xy": [
+        1024.0,
+        528.0
+      ],
+      "cell": 3122,
+      "cell_xy": [
+        1016.47,
+        525.69
+      ],
+      "cell_height": 33,
+      "cell_state": 1,
+      "cell_biome": 5,
+      "cell_distance": 7.88,
+      "nearest_generated_burg": 411,
+      "nearest_generated_burg_name": "Anarith Itys",
+      "burg_distance": 11.26
+    },
+    {
+      "id": "blackford",
+      "name": "Blackford",
+      "kind": "fortified_town",
+      "region": "greyfall",
+      "anchor_percent": [
+        56,
+        69
+      ],
+      "anchor_xy": [
+        896.0,
+        759.0
+      ],
+      "cell": 4755,
+      "cell_xy": [
+        893.41,
+        761.28
+      ],
+      "cell_height": 36,
+      "cell_state": 2,
+      "cell_biome": 4,
+      "cell_distance": 3.45,
+      "nearest_generated_burg": 625,
+      "nearest_generated_burg_name": "Oressadhil",
+      "burg_distance": 8.81
+    },
+    {
+      "id": "saltgrave",
+      "name": "Saltgrave",
+      "kind": "fortified_town",
+      "region": "black-coast",
+      "anchor_percent": [
+        75,
+        77
+      ],
+      "anchor_xy": [
+        1200.0,
+        847.0
+      ],
+      "cell": 5327,
+      "cell_xy": [
+        1205.21,
+        847.55
+      ],
+      "cell_height": 41,
+      "cell_state": 1,
+      "cell_biome": 8,
+      "cell_distance": 5.24,
+      "nearest_generated_burg": 213,
+      "nearest_generated_burg_name": "Bayeli",
+      "burg_distance": 15.22
+    },
+    {
+      "id": "wintermere",
+      "name": "Wintermere",
+      "kind": "village",
+      "region": "ashen-crown",
+      "anchor_percent": [
+        43,
+        28
+      ],
+      "anchor_xy": [
+        688.0,
+        308.0
+      ],
+      "cell": 1329,
+      "cell_xy": [
+        686.05,
+        304.51
+      ],
+      "cell_height": 91,
+      "cell_state": 0,
+      "cell_biome": 11,
+      "cell_distance": 4.0,
+      "nearest_generated_burg": 472,
+      "nearest_generated_burg_name": "Khovd",
+      "burg_distance": 66.71
+    },
+    {
+      "id": "frostvein",
+      "name": "Frostvein",
+      "kind": "hamlet",
+      "region": "ashen-crown",
+      "anchor_percent": [
+        63,
+        30
+      ],
+      "anchor_xy": [
+        1008.0,
+        330.0
+      ],
+      "cell": 1647,
+      "cell_xy": [
+        1010.58,
+        334.16
+      ],
+      "cell_height": 55,
+      "cell_state": 5,
+      "cell_biome": 6,
+      "cell_distance": 4.9,
+      "nearest_generated_burg": 493,
+      "nearest_generated_burg_name": "Ellanynlulil",
+      "burg_distance": 4.9
+    },
+    {
+      "id": "passwarden",
+      "name": "Passwarden",
+      "kind": "hamlet",
+      "region": "ashen-crown",
+      "anchor_percent": [
+        49,
+        31
+      ],
+      "anchor_xy": [
+        784.0,
+        341.0
+      ],
+      "cell": 1629,
+      "cell_xy": [
+        777.56,
+        339.37
+      ],
+      "cell_height": 68,
+      "cell_state": 5,
+      "cell_biome": 9,
+      "cell_distance": 6.64,
+      "nearest_generated_burg": 121,
+      "nearest_generated_burg_name": "Ganen",
+      "burg_distance": 29.51
+    },
+    {
+      "id": "coldbrook",
+      "name": "Coldbrook",
+      "kind": "village",
+      "region": "ashen-crown",
+      "anchor_percent": [
+        59,
+        32
+      ],
+      "anchor_xy": [
+        944.0,
+        352.0
+      ],
+      "cell": 1739,
+      "cell_xy": [
+        946.69,
+        347.87
+      ],
+      "cell_height": 57,
+      "cell_state": 5,
+      "cell_biome": 6,
+      "cell_distance": 4.93,
+      "nearest_generated_burg": 27,
+      "nearest_generated_burg_name": "Kyathlumyma",
+      "burg_distance": 13.04
+    },
+    {
+      "id": "wychford",
+      "name": "Wychford",
+      "kind": "village",
+      "region": "gallowmere",
+      "anchor_percent": [
+        36,
+        46
+      ],
+      "anchor_xy": [
+        576.0,
+        506.0
+      ],
+      "cell": 2857,
+      "cell_xy": [
+        578.4,
+        500.98
+      ],
+      "cell_height": 61,
+      "cell_state": 5,
+      "cell_biome": 4,
+      "cell_distance": 5.56,
+      "nearest_generated_burg": 343,
+      "nearest_generated_burg_name": "Traggalt",
+      "burg_distance": 6.96
+    },
+    {
+      "id": "briarholt",
+      "name": "Briarholt",
+      "kind": "village",
+      "region": "gallowmere",
+      "anchor_percent": [
+        32,
+        54
+      ],
+      "anchor_xy": [
+        512.0,
+        594.0
+      ],
+      "cell": 3650,
+      "cell_xy": [
+        512.28,
+        598.03
+      ],
+      "cell_height": 60,
+      "cell_state": 2,
+      "cell_biome": 4,
+      "cell_distance": 4.04,
+      "nearest_generated_burg": 392,
+      "nearest_generated_burg_name": "Froi",
+      "burg_distance": 27.54
+    },
+    {
+      "id": "ravenhollow",
+      "name": "Ravenhollow",
+      "kind": "hamlet",
+      "region": "gallowmere",
+      "anchor_percent": [
+        23,
+        36
+      ],
+      "anchor_xy": [
+        368.0,
+        396.0
+      ],
+      "cell": 1999,
+      "cell_xy": [
+        366.91,
+        391.81
+      ],
+      "cell_height": 91,
+      "cell_state": 0,
+      "cell_biome": 11,
+      "cell_distance": 4.33,
+      "nearest_generated_burg": 669,
+      "nearest_generated_burg_name": "Zrag",
+      "burg_distance": 112.73
+    },
+    {
+      "id": "elderwick",
+      "name": "Elderwick",
+      "kind": "village",
+      "region": "gallowmere",
+      "anchor_percent": [
+        34,
+        35
+      ],
+      "anchor_xy": [
+        544.0,
+        385.0
+      ],
+      "cell": 2013,
+      "cell_xy": [
+        552.23,
+        391.82
+      ],
+      "cell_height": 65,
+      "cell_state": 5,
+      "cell_biome": 4,
+      "cell_distance": 10.69,
+      "nearest_generated_burg": 363,
+      "nearest_generated_burg_name": "Bariat",
+      "burg_distance": 23.51
+    },
+    {
+      "id": "mossbarrow",
+      "name": "Mossbarrow",
+      "kind": "hamlet",
+      "region": "gallowmere",
+      "anchor_percent": [
+        21,
+        48
+      ],
+      "anchor_xy": [
+        336.0,
+        528.0
+      ],
+      "cell": 3175,
+      "cell_xy": [
+        329.26,
+        531.57
+      ],
+      "cell_height": 58,
+      "cell_state": 6,
+      "cell_biome": 4,
+      "cell_distance": 7.63,
+      "nearest_generated_burg": 684,
+      "nearest_generated_burg_name": "Watzakt",
+      "burg_distance": 21.95
+    },
+    {
+      "id": "dunmere",
+      "name": "Dunmere",
+      "kind": "village",
+      "region": "gallowmere",
+      "anchor_percent": [
+        29,
+        47
+      ],
+      "anchor_xy": [
+        464.0,
+        517.0
+      ],
+      "cell": 2968,
+      "cell_xy": [
+        466.15,
+        515.25
+      ],
+      "cell_height": 74,
+      "cell_state": 0,
+      "cell_biome": 9,
+      "cell_distance": 2.77,
+      "nearest_generated_burg": 283,
+      "nearest_generated_burg_name": "Bozd",
+      "burg_distance": 18.77
+    },
+    {
+      "id": "kingsbridge",
+      "name": "Kingsbridge",
+      "kind": "village",
+      "region": "heartland",
+      "anchor_percent": [
+        51,
+        43
+      ],
+      "anchor_xy": [
+        816.0,
+        473.0
+      ],
+      "cell": 2655,
+      "cell_xy": [
+        821.43,
+        471.02
+      ],
+      "cell_height": 37,
+      "cell_state": 5,
+      "cell_biome": 3,
+      "cell_distance": 5.78,
+      "nearest_generated_burg": 491,
+      "nearest_generated_burg_name": "Fruict",
+      "burg_distance": 15.83
+    },
+    {
+      "id": "harthstead",
+      "name": "Harthstead",
+      "kind": "village",
+      "region": "heartland",
+      "anchor_percent": [
+        43,
+        48
+      ],
+      "anchor_xy": [
+        688.0,
+        528.0
+      ],
+      "cell": 3097,
+      "cell_xy": [
+        684.37,
+        524.06
+      ],
+      "cell_height": 44,
+      "cell_state": 5,
+      "cell_biome": 4,
+      "cell_distance": 5.36,
+      "nearest_generated_burg": 498,
+      "nearest_generated_burg_name": "Hobruing",
+      "burg_distance": 9.53
+    },
+    {
+      "id": "bellwether",
+      "name": "Bellwether",
+      "kind": "village",
+      "region": "heartland",
+      "anchor_percent": [
+        58,
+        52
+      ],
+      "anchor_xy": [
+        928.0,
+        572.0
+      ],
+      "cell": 3411,
+      "cell_xy": [
+        927.02,
+        568
+      ],
+      "cell_height": 36,
+      "cell_state": 1,
+      "cell_biome": 3,
+      "cell_distance": 4.12,
+      "nearest_generated_burg": 61,
+      "nearest_generated_burg_name": "Efranthentha",
+      "burg_distance": 21.95
+    },
+    {
+      "id": "crownfield",
+      "name": "Crownfield",
+      "kind": "village",
+      "region": "heartland",
+      "anchor_percent": [
+        48,
+        54
+      ],
+      "anchor_xy": [
+        768.0,
+        594.0
+      ],
+      "cell": 3579,
+      "cell_xy": [
+        764.61,
+        593.95
+      ],
+      "cell_height": 37,
+      "cell_state": 9,
+      "cell_biome": 3,
+      "cell_distance": 3.39,
+      "nearest_generated_burg": 9,
+      "nearest_generated_burg_name": "Gurtec",
+      "burg_distance": 23.21
+    },
+    {
+      "id": "tallowford",
+      "name": "Tallowford",
+      "kind": "village",
+      "region": "heartland",
+      "anchor_percent": [
+        56,
+        57
+      ],
+      "anchor_xy": [
+        896.0,
+        627.0
+      ],
+      "cell": 3852,
+      "cell_xy": [
+        896.63,
+        636.13
+      ],
+      "cell_height": 36,
+      "cell_state": 1,
+      "cell_biome": 6,
+      "cell_distance": 9.15,
+      "nearest_generated_burg": 457,
+      "nearest_generated_burg_name": "Himlalorgor",
+      "burg_distance": 14.3
+    },
+    {
+      "id": "whitebarrow",
+      "name": "Whitebarrow",
+      "kind": "village",
+      "region": "heartland",
+      "anchor_percent": [
+        49,
+        36
+      ],
+      "anchor_xy": [
+        784.0,
+        396.0
+      ],
+      "cell": 2031,
+      "cell_xy": [
+        784.22,
+        394.34
+      ],
+      "cell_height": 42,
+      "cell_state": 5,
+      "cell_biome": 4,
+      "cell_distance": 1.67,
+      "nearest_generated_burg": 357,
+      "nearest_generated_burg_name": "Khovshar",
+      "burg_distance": 8.34
+    },
+    {
+      "id": "highcross",
+      "name": "Highcross",
+      "kind": "village",
+      "region": "heartland",
+      "anchor_percent": [
+        61,
+        40
+      ],
+      "anchor_xy": [
+        976.0,
+        440.0
+      ],
+      "cell": 2351,
+      "cell_xy": [
+        977.96,
+        431.78
+      ],
+      "cell_height": 36,
+      "cell_state": 5,
+      "cell_biome": 4,
+      "cell_distance": 8.45,
+      "nearest_generated_burg": 125,
+      "nearest_generated_burg_name": "Lhosilos",
+      "burg_distance": 15.22
+    },
+    {
+      "id": "reedhaven",
+      "name": "Reedhaven",
+      "kind": "village",
+      "region": "hollow-fen",
+      "anchor_percent": [
+        73,
+        61
+      ],
+      "anchor_xy": [
+        1168.0,
+        671.0
+      ],
+      "cell": 4134,
+      "cell_xy": [
+        1169.42,
+        669.51
+      ],
+      "cell_height": 42,
+      "cell_state": 1,
+      "cell_biome": 8,
+      "cell_distance": 2.06,
+      "nearest_generated_burg": 183,
+      "nearest_generated_burg_name": "Elunanderin",
+      "burg_distance": 7.42
+    },
+    {
+      "id": "mournfen",
+      "name": "Mournfen",
+      "kind": "hamlet",
+      "region": "hollow-fen",
+      "anchor_percent": [
+        81,
+        58
+      ],
+      "anchor_xy": [
+        1296.0,
+        638.0
+      ],
+      "cell": 4141,
+      "cell_xy": [
+        1244.5,
+        673.5
+      ],
+      "cell_height": 2,
+      "cell_state": 0,
+      "cell_biome": 0,
+      "cell_distance": 62.55,
+      "nearest_generated_burg": 500,
+      "nearest_generated_burg_name": "Doranen",
+      "burg_distance": 81.23
+    },
+    {
+      "id": "sedgewick",
+      "name": "Sedgewick",
+      "kind": "village",
+      "region": "hollow-fen",
+      "anchor_percent": [
+        68,
+        51
+      ],
+      "anchor_xy": [
+        1088.0,
+        561.0
+      ],
+      "cell": 3423,
+      "cell_xy": [
+        1083.99,
+        559.4
+      ],
+      "cell_height": 36,
+      "cell_state": 1,
+      "cell_biome": 6,
+      "cell_distance": 4.32,
+      "nearest_generated_burg": 376,
+      "nearest_generated_burg_name": "Thilran",
+      "burg_distance": 11.68
+    },
+    {
+      "id": "bellmire",
+      "name": "Bellmire",
+      "kind": "hamlet",
+      "region": "hollow-fen",
+      "anchor_percent": [
+        77,
+        43
+      ],
+      "anchor_xy": [
+        1232.0,
+        473.0
+      ],
+      "cell": 2686,
+      "cell_xy": [
+        1233.34,
+        472.95
+      ],
+      "cell_height": 43,
+      "cell_state": 4,
+      "cell_biome": 6,
+      "cell_distance": 1.34,
+      "nearest_generated_burg": 172,
+      "nearest_generated_burg_name": "Ithyrlor",
+      "burg_distance": 1.34
+    },
+    {
+      "id": "millhaven",
+      "name": "Millhaven",
+      "kind": "village",
+      "region": "greyfall",
+      "anchor_percent": [
+        45,
+        68
+      ],
+      "anchor_xy": [
+        720.0,
+        748.0
+      ],
+      "cell": 4649,
+      "cell_xy": [
+        718.03,
+        745.99
+      ],
+      "cell_height": 41,
+      "cell_state": 2,
+      "cell_biome": 4,
+      "cell_distance": 2.81,
+      "nearest_generated_burg": 643,
+      "nearest_generated_burg_name": "Chiafboif",
+      "burg_distance": 9.88
+    },
+    {
+      "id": "dunfield",
+      "name": "Dunfield",
+      "kind": "village",
+      "region": "greyfall",
+      "anchor_percent": [
+        38,
+        64
+      ],
+      "anchor_xy": [
+        608.0,
+        704.0
+      ],
+      "cell": 4359,
+      "cell_xy": [
+        605.72,
+        705.82
+      ],
+      "cell_height": 46,
+      "cell_state": 2,
+      "cell_biome": 4,
+      "cell_distance": 2.92,
+      "nearest_generated_burg": 629,
+      "nearest_generated_burg_name": "Mistwell",
+      "burg_distance": 11.56
+    },
+    {
+      "id": "briarford",
+      "name": "Briarford",
+      "kind": "village",
+      "region": "greyfall",
+      "anchor_percent": [
+        34,
+        69
+      ],
+      "anchor_xy": [
+        544.0,
+        759.0
+      ],
+      "cell": 4729,
+      "cell_xy": [
+        545.16,
+        765.52
+      ],
+      "cell_height": 49,
+      "cell_state": 2,
+      "cell_biome": 4,
+      "cell_distance": 6.62,
+      "nearest_generated_burg": 471,
+      "nearest_generated_burg_name": "Phax",
+      "burg_distance": 20.39
+    },
+    {
+      "id": "emberleigh",
+      "name": "Emberleigh",
+      "kind": "hamlet",
+      "region": "greyfall",
+      "anchor_percent": [
+        51,
+        74
+      ],
+      "anchor_xy": [
+        816.0,
+        814.0
+      ],
+      "cell": 5113,
+      "cell_xy": [
+        806.6,
+        820.3
+      ],
+      "cell_height": 2,
+      "cell_state": 0,
+      "cell_biome": 0,
+      "cell_distance": 11.32,
+      "nearest_generated_burg": 588,
+      "nearest_generated_burg_name": "Eluneri",
+      "burg_distance": 14.24
+    },
+    {
+      "id": "widowfield",
+      "name": "Widowfield",
+      "kind": "village",
+      "region": "greyfall",
+      "anchor_percent": [
+        43,
+        76
+      ],
+      "anchor_xy": [
+        688.0,
+        836.0
+      ],
+      "cell": 5198,
+      "cell_xy": [
+        689.28,
+        830.54
+      ],
+      "cell_height": 45,
+      "cell_state": 2,
+      "cell_biome": 8,
+      "cell_distance": 5.61,
+      "nearest_generated_burg": 148,
+      "nearest_generated_burg_name": "Snowstar",
+      "burg_distance": 6.77
+    },
+    {
+      "id": "hallowcross",
+      "name": "Hallowcross",
+      "kind": "village",
+      "region": "greyfall",
+      "anchor_percent": [
+        58,
+        62
+      ],
+      "anchor_xy": [
+        928.0,
+        682.0
+      ],
+      "cell": 4206,
+      "cell_xy": [
+        932.25,
+        684.68
+      ],
+      "cell_height": 39,
+      "cell_state": 1,
+      "cell_biome": 6,
+      "cell_distance": 5.02,
+      "nearest_generated_burg": 595,
+      "nearest_generated_burg_name": "Sylmarilelo",
+      "burg_distance": 18.05
+    },
+    {
+      "id": "brinewatch",
+      "name": "Brinewatch",
+      "kind": "village",
+      "region": "black-coast",
+      "anchor_percent": [
+        61,
+        84
+      ],
+      "anchor_xy": [
+        976.0,
+        924.0
+      ],
+      "cell": 5229,
+      "cell_xy": [
+        997.5,
+        839.8
+      ],
+      "cell_height": 16,
+      "cell_state": 0,
+      "cell_biome": 0,
+      "cell_distance": 86.9,
+      "nearest_generated_burg": 534,
+      "nearest_generated_burg_name": "Kinbilarak",
+      "burg_distance": 93.2
+    },
+    {
+      "id": "gullscar",
+      "name": "Gullscar",
+      "kind": "hamlet",
+      "region": "black-coast",
+      "anchor_percent": [
+        79,
+        74
+      ],
+      "anchor_xy": [
+        1264.0,
+        814.0
+      ],
+      "cell": 5157,
+      "cell_xy": [
+        1265.28,
+        810.87
+      ],
+      "cell_height": 36,
+      "cell_state": 1,
+      "cell_biome": 12,
+      "cell_distance": 3.38,
+      "nearest_generated_burg": 663,
+      "nearest_generated_burg_name": "Uyaberi",
+      "burg_distance": 13.11
+    },
+    {
+      "id": "crowhaven",
+      "name": "Crowhaven",
+      "kind": "village",
+      "region": "black-coast",
+      "anchor_percent": [
+        54,
+        83
+      ],
+      "anchor_xy": [
+        864.0,
+        913.0
+      ],
+      "cell": 5126,
+      "cell_xy": [
+        904.38,
+        820.92
+      ],
+      "cell_height": 2,
+      "cell_state": 0,
+      "cell_biome": 0,
+      "cell_distance": 100.54,
+      "nearest_generated_burg": 218,
+      "nearest_generated_burg_name": "Shemla",
+      "burg_distance": 107.32
+    }
+  ],
+  "landmarks": [
+    {
+      "id": "crownspire-fortress",
+      "name": "Crownspire Fortress",
+      "kind": "fortification",
+      "region": "ashen-crown",
+      "anchor_percent": [
+        47,
+        22
+      ],
+      "anchor_xy": [
+        752.0,
+        242.0
+      ],
+      "cell": 971,
+      "cell_xy": [
+        757.87,
+        243.91
+      ],
+      "cell_height": 91,
+      "cell_state": 0,
+      "cell_biome": 11,
+      "cell_distance": 6.17,
+      "nearest_generated_burg": 121,
+      "nearest_generated_burg_name": "Ganen",
+      "burg_distance": 113.49
+    },
+    {
+      "id": "nine-graves-pass",
+      "name": "Nine Graves Pass",
+      "kind": "special",
+      "region": "ashen-crown",
+      "anchor_percent": [
+        49,
+        27
+      ],
+      "anchor_xy": [
+        784.0,
+        297.0
+      ],
+      "cell": 1336,
+      "cell_xy": [
+        776.21,
+        295.45
+      ],
+      "cell_height": 91,
+      "cell_state": 0,
+      "cell_biome": 11,
+      "cell_distance": 7.94,
+      "nearest_generated_burg": 121,
+      "nearest_generated_burg_name": "Ganen",
+      "burg_distance": 63.77
+    },
+    {
+      "id": "frostvein-mine",
+      "name": "Frostvein Mine",
+      "kind": "ruin",
+      "region": "ashen-crown",
+      "anchor_percent": [
+        64,
+        24
+      ],
+      "anchor_xy": [
+        1024.0,
+        264.0
+      ],
+      "cell": 1171,
+      "cell_xy": [
+        1024.89,
+        272
+      ],
+      "cell_height": 79,
+      "cell_state": 0,
+      "cell_biome": 11,
+      "cell_distance": 8.05,
+      "nearest_generated_burg": 340,
+      "nearest_generated_burg_name": "Nalolumadi",
+      "burg_distance": 69.07
+    },
+    {
+      "id": "silent-glacier",
+      "name": "The Silent Glacier",
+      "kind": "special",
+      "region": "ashen-crown",
+      "anchor_percent": [
+        56,
+        13
+      ],
+      "anchor_xy": [
+        896.0,
+        143.0
+      ],
+      "cell": 333,
+      "cell_xy": [
+        901.45,
+        142.47
+      ],
+      "cell_height": 71,
+      "cell_state": 0,
+      "cell_biome": 11,
+      "cell_distance": 5.48,
+      "nearest_generated_burg": 594,
+      "nearest_generated_burg_name": "Skuph",
+      "burg_distance": 111.74
+    },
+    {
+      "id": "saintless-redoubt",
+      "name": "Saintless Redoubt",
+      "kind": "fortification",
+      "region": "ashen-crown",
+      "anchor_percent": [
+        74,
+        30
+      ],
+      "anchor_xy": [
+        1184.0,
+        330.0
+      ],
+      "cell": 1559,
+      "cell_xy": [
+        1182.31,
+        329.98
+      ],
+      "cell_height": 91,
+      "cell_state": 0,
+      "cell_biome": 11,
+      "cell_distance": 1.69,
+      "nearest_generated_burg": 328,
+      "nearest_generated_burg_name": "Ithananynzan",
+      "burg_distance": 78.23
+    },
+    {
+      "id": "gate-of-cinders",
+      "name": "Gate of Cinders",
+      "kind": "fortification",
+      "region": "ashen-crown",
+      "anchor_percent": [
+        62,
+        26
+      ],
+      "anchor_xy": [
+        992.0,
+        286.0
+      ],
+      "cell": 1263,
+      "cell_xy": [
+        996.54,
+        283.5
+      ],
+      "cell_height": 88,
+      "cell_state": 0,
+      "cell_biome": 11,
+      "cell_distance": 5.18,
+      "nearest_generated_burg": 340,
+      "nearest_generated_burg_name": "Nalolumadi",
+      "burg_distance": 34.99
+    },
+    {
+      "id": "watch-of-nine",
+      "name": "Watch of Nine",
+      "kind": "fortification",
+      "region": "ashen-crown",
+      "anchor_percent": [
+        50,
+        25
+      ],
+      "anchor_xy": [
+        800.0,
+        275.0
+      ],
+      "cell": 1154,
+      "cell_xy": [
+        798.57,
+        272.77
+      ],
+      "cell_height": 91,
+      "cell_state": 0,
+      "cell_biome": 11,
+      "cell_distance": 2.65,
+      "nearest_generated_burg": 121,
+      "nearest_generated_burg_name": "Ganen",
+      "burg_distance": 90.55
+    },
+    {
+      "id": "ossuary-of-saints",
+      "name": "Ossuary of Saints",
+      "kind": "ruin",
+      "region": "ashen-crown",
+      "anchor_percent": [
+        44,
+        20
+      ],
+      "anchor_xy": [
+        704.0,
+        220.0
+      ],
+      "cell": 790,
+      "cell_xy": [
+        695.48,
+        219.66
+      ],
+      "cell_height": 91,
+      "cell_state": 0,
+      "cell_biome": 11,
+      "cell_distance": 8.53,
+      "nearest_generated_burg": 488,
+      "nearest_generated_burg_name": "Srandorlon",
+      "burg_distance": 122.47
+    },
+    {
+      "id": "arvens-priory",
+      "name": "Saint Arven's Priory",
+      "kind": "ruin",
+      "region": "ashen-crown",
+      "anchor_percent": [
+        60,
+        19
+      ],
+      "anchor_xy": [
+        960.0,
+        209.0
+      ],
+      "cell": 723,
+      "cell_xy": [
+        957.2,
+        209.22
+      ],
+      "cell_height": 91,
+      "cell_state": 0,
+      "cell_biome": 11,
+      "cell_distance": 2.81,
+      "nearest_generated_burg": 537,
+      "nearest_generated_burg_name": "Porji",
+      "burg_distance": 98.64
+    },
+    {
+      "id": "blackroot-circle",
+      "name": "Blackroot Circle",
+      "kind": "special",
+      "region": "gallowmere",
+      "anchor_percent": [
+        25,
+        35
+      ],
+      "anchor_xy": [
+        400.0,
+        385.0
+      ],
+      "cell": 1901,
+      "cell_xy": [
+        399.18,
+        379.12
+      ],
+      "cell_height": 91,
+      "cell_state": 0,
+      "cell_biome": 11,
+      "cell_distance": 5.94,
+      "nearest_generated_burg": 95,
+      "nearest_generated_burg_name": "Ul-Zrid",
+      "burg_distance": 116.25
+    },
+    {
+      "id": "widows-chapel",
+      "name": "Widow's Chapel",
+      "kind": "ruin",
+      "region": "gallowmere",
+      "anchor_percent": [
+        34,
+        47
+      ],
+      "anchor_xy": [
+        544.0,
+        517.0
+      ],
+      "cell": 2974,
+      "cell_xy": [
+        545.38,
+        516.23
+      ],
+      "cell_height": 65,
+      "cell_state": 5,
+      "cell_biome": 4,
+      "cell_distance": 1.58,
+      "nearest_generated_burg": 71,
+      "nearest_generated_burg_name": "Prol",
+      "burg_distance": 20.33
+    },
+    {
+      "id": "hollow-oak",
+      "name": "Hollow Oak",
+      "kind": "special",
+      "region": "gallowmere",
+      "anchor_percent": [
+        22,
+        43
+      ],
+      "anchor_xy": [
+        352.0,
+        473.0
+      ],
+      "cell": 2620,
+      "cell_xy": [
+        352.12,
+        465.99
+      ],
+      "cell_height": 81,
+      "cell_state": 0,
+      "cell_biome": 10,
+      "cell_distance": 7.01,
+      "nearest_generated_burg": 669,
+      "nearest_generated_burg_name": "Zrag",
+      "burg_distance": 38.23
+    },
+    {
+      "id": "forsaken-hunt",
+      "name": "The Forsaken Hunt",
+      "kind": "special",
+      "region": "gallowmere",
+      "anchor_percent": [
+        19,
+        52
+      ],
+      "anchor_xy": [
+        304.0,
+        572.0
+      ],
+      "cell": 3454,
+      "cell_xy": [
+        306.42,
+        572.81
+      ],
+      "cell_height": 49,
+      "cell_state": 6,
+      "cell_biome": 4,
+      "cell_distance": 2.55,
+      "nearest_generated_burg": 254,
+      "nearest_generated_burg_name": "Gaxi",
+      "burg_distance": 16.44
+    },
+    {
+      "id": "thornbound-keep",
+      "name": "Thornbound Keep",
+      "kind": "fortification",
+      "region": "gallowmere",
+      "anchor_percent": [
+        33,
+        31
+      ],
+      "anchor_xy": [
+        528.0,
+        341.0
+      ],
+      "cell": 1610,
+      "cell_xy": [
+        521.22,
+        334.68
+      ],
+      "cell_height": 91,
+      "cell_state": 0,
+      "cell_biome": 11,
+      "cell_distance": 9.27,
+      "nearest_generated_burg": 631,
+      "nearest_generated_burg_name": "Uzdrurd",
+      "burg_distance": 45.43
+    },
+    {
+      "id": "veiled-monastery",
+      "name": "The Veiled Monastery",
+      "kind": "ruin",
+      "region": "gallowmere",
+      "anchor_percent": [
+        28,
+        33
+      ],
+      "anchor_xy": [
+        448.0,
+        363.0
+      ],
+      "cell": 1805,
+      "cell_xy": [
+        447.5,
+        368.62
+      ],
+      "cell_height": 91,
+      "cell_state": 0,
+      "cell_biome": 11,
+      "cell_distance": 5.64,
+      "nearest_generated_burg": 631,
+      "nearest_generated_burg_name": "Uzdrurd",
+      "burg_distance": 74.57
+    },
+    {
+      "id": "old-ravenscar",
+      "name": "Old Ravenscar",
+      "kind": "ruin",
+      "region": "gallowmere",
+      "anchor_percent": [
+        19,
+        39
+      ],
+      "anchor_xy": [
+        304.0,
+        429.0
+      ],
+      "cell": 2301,
+      "cell_xy": [
+        310.14,
+        431.86
+      ],
+      "cell_height": 91,
+      "cell_state": 0,
+      "cell_biome": 11,
+      "cell_distance": 6.77,
+      "nearest_generated_burg": 76,
+      "nearest_generated_burg_name": "Egrocrur",
+      "burg_distance": 50.75
+    },
+    {
+      "id": "grave-of-leaves",
+      "name": "The Grave of Leaves",
+      "kind": "ruin",
+      "region": "gallowmere",
+      "anchor_percent": [
+        29,
+        56
+      ],
+      "anchor_xy": [
+        464.0,
+        616.0
+      ],
+      "cell": 3735,
+      "cell_xy": [
+        454.44,
+        614.7
+      ],
+      "cell_height": 57,
+      "cell_state": 6,
+      "cell_biome": 4,
+      "cell_distance": 9.65,
+      "nearest_generated_burg": 120,
+      "nearest_generated_burg_name": "Honk",
+      "burg_distance": 10.68
+    },
+    {
+      "id": "veyrath-keep",
+      "name": "Veyrath Keep",
+      "kind": "fortification",
+      "region": "heartland",
+      "anchor_percent": [
+        52,
+        46
+      ],
+      "anchor_xy": [
+        832.0,
+        506.0
+      ],
+      "cell": 2876,
+      "cell_xy": [
+        826.75,
+        503.46
+      ],
+      "cell_height": 36,
+      "cell_state": 5,
+      "cell_biome": 3,
+      "cell_distance": 5.83,
+      "nearest_generated_burg": 478,
+      "nearest_generated_burg_name": "Stiolt",
+      "burg_distance": 8.1
+    },
+    {
+      "id": "kings-bridge",
+      "name": "King's Bridge",
+      "kind": "special",
+      "region": "heartland",
+      "anchor_percent": [
+        52,
+        47
+      ],
+      "anchor_xy": [
+        832.0,
+        517.0
+      ],
+      "cell": 2995,
+      "cell_xy": [
+        831.08,
+        514.05
+      ],
+      "cell_height": 36,
+      "cell_state": 1,
+      "cell_biome": 3,
+      "cell_distance": 3.09,
+      "nearest_generated_burg": 478,
+      "nearest_generated_burg_name": "Stiolt",
+      "burg_distance": 3.09
+    },
+    {
+      "id": "gallows-market",
+      "name": "Gallows Market",
+      "kind": "special",
+      "region": "heartland",
+      "anchor_percent": [
+        51,
+        48
+      ],
+      "anchor_xy": [
+        816.0,
+        528.0
+      ],
+      "cell": 3107,
+      "cell_xy": [
+        819.92,
+        521.7
+      ],
+      "cell_height": 36,
+      "cell_state": 9,
+      "cell_biome": 3,
+      "cell_distance": 7.42,
+      "nearest_generated_burg": 478,
+      "nearest_generated_burg_name": "Stiolt",
+      "burg_distance": 20.54
+    },
+    {
+      "id": "royal-sepulchre",
+      "name": "The Royal Sepulchre",
+      "kind": "ruin",
+      "region": "heartland",
+      "anchor_percent": [
+        56,
+        44
+      ],
+      "anchor_xy": [
+        896.0,
+        484.0
+      ],
+      "cell": 2768,
+      "cell_xy": [
+        899.02,
+        485.17
+      ],
+      "cell_height": 36,
+      "cell_state": 5,
+      "cell_biome": 6,
+      "cell_distance": 3.24,
+      "nearest_generated_burg": 391,
+      "nearest_generated_burg_name": "Thelle",
+      "burg_distance": 3.59
+    },
+    {
+      "id": "hill-of-spears",
+      "name": "Hill of Spears",
+      "kind": "fortification",
+      "region": "heartland",
+      "anchor_percent": [
+        58,
+        46
+      ],
+      "anchor_xy": [
+        928.0,
+        506.0
+      ],
+      "cell": 2884,
+      "cell_xy": [
+        935.61,
+        501.95
+      ],
+      "cell_height": 36,
+      "cell_state": 1,
+      "cell_biome": 3,
+      "cell_distance": 8.62,
+      "nearest_generated_burg": 26,
+      "nearest_generated_burg_name": "Kmlondolu",
+      "burg_distance": 17.11
+    },
+    {
+      "id": "orens-cloister",
+      "name": "Saint Oren's Cloister",
+      "kind": "ruin",
+      "region": "heartland",
+      "anchor_percent": [
+        46,
+        38
+      ],
+      "anchor_xy": [
+        736.0,
+        418.0
+      ],
+      "cell": 2227,
+      "cell_xy": [
+        735.3,
+        418.08
+      ],
+      "cell_height": 40,
+      "cell_state": 5,
+      "cell_biome": 4,
+      "cell_distance": 0.7,
+      "nearest_generated_burg": 206,
+      "nearest_generated_burg_name": "Ulbrin",
+      "burg_distance": 10.72
+    },
+    {
+      "id": "burnt-archive",
+      "name": "The Burnt Archive",
+      "kind": "ruin",
+      "region": "heartland",
+      "anchor_percent": [
+        54,
+        49
+      ],
+      "anchor_xy": [
+        864.0,
+        539.0
+      ],
+      "cell": 3216,
+      "cell_xy": [
+        869.98,
+        535.79
+      ],
+      "cell_height": 35,
+      "cell_state": 1,
+      "cell_biome": 3,
+      "cell_distance": 6.79,
+      "nearest_generated_burg": 593,
+      "nearest_generated_burg_name": "Gighel",
+      "burg_distance": 9.3
+    },
+    {
+      "id": "drowned-abbey",
+      "name": "Drowned Abbey",
+      "kind": "ruin",
+      "region": "hollow-fen",
+      "anchor_percent": [
+        78,
+        57
+      ],
+      "anchor_xy": [
+        1248.0,
+        627.0
+      ],
+      "cell": 3878,
+      "cell_xy": [
+        1231.63,
+        624.63
+      ],
+      "cell_height": 2,
+      "cell_state": 0,
+      "cell_biome": 0,
+      "cell_distance": 16.54,
+      "nearest_generated_burg": 500,
+      "nearest_generated_burg_name": "Doranen",
+      "burg_distance": 33.16
+    },
+    {
+      "id": "mirewatch-fort",
+      "name": "Mirewatch",
+      "kind": "fortification",
+      "region": "hollow-fen",
+      "anchor_percent": [
+        75,
+        50
+      ],
+      "anchor_xy": [
+        1200.0,
+        550.0
+      ],
+      "cell": 3340,
+      "cell_xy": [
+        1202.62,
+        555.97
+      ],
+      "cell_height": 36,
+      "cell_state": 4,
+      "cell_biome": 8,
+      "cell_distance": 6.52,
+      "nearest_generated_burg": 75,
+      "nearest_generated_burg_name": "Tiquana",
+      "burg_distance": 17.55
+    },
+    {
+      "id": "sinking-road",
+      "name": "The Sinking Road",
+      "kind": "ruin",
+      "region": "hollow-fen",
+      "anchor_percent": [
+        71,
+        55
+      ],
+      "anchor_xy": [
+        1136.0,
+        605.0
+      ],
+      "cell": 3697,
+      "cell_xy": [
+        1130.86,
+        604.67
+      ],
+      "cell_height": 37,
+      "cell_state": 1,
+      "cell_biome": 6,
+      "cell_distance": 5.15,
+      "nearest_generated_burg": 194,
+      "nearest_generated_burg_name": "Silaurthelu",
+      "burg_distance": 10.81
+    },
+    {
+      "id": "lantern-pools",
+      "name": "The Lantern Pools",
+      "kind": "special",
+      "region": "hollow-fen",
+      "anchor_percent": [
+        77,
+        53
+      ],
+      "anchor_xy": [
+        1232.0,
+        583.0
+      ],
+      "cell": 3524,
+      "cell_xy": [
+        1225.6,
+        584
+      ],
+      "cell_height": 38,
+      "cell_state": 4,
+      "cell_biome": 12,
+      "cell_distance": 6.48,
+      "nearest_generated_burg": 297,
+      "nearest_generated_burg_name": "Luiturmalela",
+      "burg_distance": 23.34
+    },
+    {
+      "id": "reedgate-tower",
+      "name": "Reedgate Tower",
+      "kind": "fortification",
+      "region": "hollow-fen",
+      "anchor_percent": [
+        69,
+        51
+      ],
+      "anchor_xy": [
+        1104.0,
+        561.0
+      ],
+      "cell": 3424,
+      "cell_xy": [
+        1097.07,
+        559.33
+      ],
+      "cell_height": 35,
+      "cell_state": 1,
+      "cell_biome": 12,
+      "cell_distance": 7.13,
+      "nearest_generated_burg": 376,
+      "nearest_generated_burg_name": "Thilran",
+      "burg_distance": 7.77
+    },
+    {
+      "id": "flooded-sepulchres",
+      "name": "The Flooded Sepulchres",
+      "kind": "ruin",
+      "region": "hollow-fen",
+      "anchor_percent": [
+        80,
+        62
+      ],
+      "anchor_xy": [
+        1280.0,
+        682.0
+      ],
+      "cell": 4318,
+      "cell_xy": [
+        1255.35,
+        692.78
+      ],
+      "cell_height": 41,
+      "cell_state": 1,
+      "cell_biome": 12,
+      "cell_distance": 26.9,
+      "nearest_generated_burg": 423,
+      "nearest_generated_burg_name": "Tedie",
+      "burg_distance": 55.74
+    },
+    {
+      "id": "bell-below",
+      "name": "The Bell Below",
+      "kind": "ruin",
+      "region": "hollow-fen",
+      "anchor_percent": [
+        76,
+        64
+      ],
+      "anchor_xy": [
+        1216.0,
+        704.0
+      ],
+      "cell": 4315,
+      "cell_xy": [
+        1214.58,
+        701.77
+      ],
+      "cell_height": 42,
+      "cell_state": 1,
+      "cell_biome": 12,
+      "cell_distance": 2.64,
+      "nearest_generated_burg": 421,
+      "nearest_generated_burg_name": "Sheoress",
+      "burg_distance": 33.65
+    },
+    {
+      "id": "drowned-avel",
+      "name": "Drowned Avel",
+      "kind": "ruin",
+      "region": "hollow-fen",
+      "anchor_percent": [
+        73,
+        57
+      ],
+      "anchor_xy": [
+        1168.0,
+        627.0
+      ],
+      "cell": 3872,
+      "cell_xy": [
+        1166.27,
+        630.87
+      ],
+      "cell_height": 41,
+      "cell_state": 1,
+      "cell_biome": 8,
+      "cell_distance": 4.24,
+      "nearest_generated_burg": 473,
+      "nearest_generated_burg_name": "Anorion",
+      "burg_distance": 4.24
+    },
+    {
+      "id": "greyfall-mill",
+      "name": "Greyfall Mill",
+      "kind": "special",
+      "region": "greyfall",
+      "anchor_percent": [
+        46,
+        68
+      ],
+      "anchor_xy": [
+        736.0,
+        748.0
+      ],
+      "cell": 4650,
+      "cell_xy": [
+        738.44,
+        750.97
+      ],
+      "cell_height": 39,
+      "cell_state": 2,
+      "cell_biome": 6,
+      "cell_distance": 3.84,
+      "nearest_generated_burg": 587,
+      "nearest_generated_burg_name": "Sprinfove",
+      "burg_distance": 3.43
+    },
+    {
+      "id": "broken-banner",
+      "name": "The Broken Banner Battlefield",
+      "kind": "special",
+      "region": "greyfall",
+      "anchor_percent": [
+        49,
+        59
+      ],
+      "anchor_xy": [
+        784.0,
+        649.0
+      ],
+      "cell": 4015,
+      "cell_xy": [
+        780.13,
+        657.62
+      ],
+      "cell_height": 37,
+      "cell_state": 2,
+      "cell_biome": 3,
+      "cell_distance": 9.45,
+      "nearest_generated_burg": 671,
+      "nearest_generated_burg_name": "Koshelduch",
+      "burg_distance": 12.3
+    },
+    {
+      "id": "blackford-bridge",
+      "name": "Blackford Bridge",
+      "kind": "special",
+      "region": "greyfall",
+      "anchor_percent": [
+        56,
+        69
+      ],
+      "anchor_xy": [
+        896.0,
+        759.0
+      ],
+      "cell": 4755,
+      "cell_xy": [
+        893.41,
+        761.28
+      ],
+      "cell_height": 36,
+      "cell_state": 2,
+      "cell_biome": 4,
+      "cell_distance": 3.45,
+      "nearest_generated_burg": 625,
+      "nearest_generated_burg_name": "Oressadhil",
+      "burg_distance": 8.81
+    },
+    {
+      "id": "ashenwatch-keep",
+      "name": "Ashenwatch",
+      "kind": "fortification",
+      "region": "greyfall",
+      "anchor_percent": [
+        40,
+        73
+      ],
+      "anchor_xy": [
+        640.0,
+        803.0
+      ],
+      "cell": 5002,
+      "cell_xy": [
+        638.1,
+        801.67
+      ],
+      "cell_height": 47,
+      "cell_state": 2,
+      "cell_biome": 4,
+      "cell_distance": 2.32,
+      "nearest_generated_burg": 650,
+      "nearest_generated_burg_name": "Gnok",
+      "burg_distance": 18.89
+    },
+    {
+      "id": "red-ditch-keep",
+      "name": "Red Ditch Keep",
+      "kind": "fortification",
+      "region": "greyfall",
+      "anchor_percent": [
+        40,
+        66
+      ],
+      "anchor_xy": [
+        640.0,
+        726.0
+      ],
+      "cell": 4451,
+      "cell_xy": [
+        644.12,
+        728.32
+      ],
+      "cell_height": 45,
+      "cell_state": 2,
+      "cell_biome": 4,
+      "cell_distance": 4.73,
+      "nearest_generated_burg": 201,
+      "nearest_generated_burg_name": "Ialtvielx",
+      "burg_distance": 21.09
+    },
+    {
+      "id": "gallows-manor",
+      "name": "Gallows Manor",
+      "kind": "ruin",
+      "region": "greyfall",
+      "anchor_percent": [
+        46,
+        71
+      ],
+      "anchor_xy": [
+        736.0,
+        781.0
+      ],
+      "cell": 4832,
+      "cell_xy": [
+        742.02,
+        779.8
+      ],
+      "cell_height": 41,
+      "cell_state": 2,
+      "cell_biome": 6,
+      "cell_distance": 6.14,
+      "nearest_generated_burg": 260,
+      "nearest_generated_burg_name": "Whitmoceans",
+      "burg_distance": 10.71
+    },
+    {
+      "id": "ilvas-hospice",
+      "name": "Saint Ilva's Hospice",
+      "kind": "ruin",
+      "region": "greyfall",
+      "anchor_percent": [
+        51,
+        66
+      ],
+      "anchor_xy": [
+        816.0,
+        726.0
+      ],
+      "cell": 4464,
+      "cell_xy": [
+        810.74,
+        727.73
+      ],
+      "cell_height": 36,
+      "cell_state": 2,
+      "cell_biome": 6,
+      "cell_distance": 5.54,
+      "nearest_generated_burg": 199,
+      "nearest_generated_burg_name": "Kalyrandee",
+      "burg_distance": 5.54
+    },
+    {
+      "id": "burnt-orchard",
+      "name": "Burnt Orchard Hamlet",
+      "kind": "ruin",
+      "region": "greyfall",
+      "anchor_percent": [
+        36,
+        74
+      ],
+      "anchor_xy": [
+        576.0,
+        814.0
+      ],
+      "cell": 5091,
+      "cell_xy": [
+        580.5,
+        811.27
+      ],
+      "cell_height": 47,
+      "cell_state": 3,
+      "cell_biome": 4,
+      "cell_distance": 5.26,
+      "nearest_generated_burg": 29,
+      "nearest_generated_burg_name": "Bres",
+      "burg_distance": 20.21
+    },
+    {
+      "id": "blackwake-port",
+      "name": "Blackwake Port",
+      "kind": "special",
+      "region": "black-coast",
+      "anchor_percent": [
+        65,
+        84
+      ],
+      "anchor_xy": [
+        1040.0,
+        924.0
+      ],
+      "cell": 5443,
+      "cell_xy": [
+        1073,
+        884.8
+      ],
+      "cell_height": 19,
+      "cell_state": 0,
+      "cell_biome": 0,
+      "cell_distance": 51.24,
+      "nearest_generated_burg": 465,
+      "nearest_generated_burg_name": "Khiz",
+      "burg_distance": 65.29
+    },
+    {
+      "id": "widows-lighthouse",
+      "name": "The Widow's Lighthouse",
+      "kind": "ruin",
+      "region": "black-coast",
+      "anchor_percent": [
+        69,
+        87
+      ],
+      "anchor_xy": [
+        1104.0,
+        957.0
+      ],
+      "cell": 5575,
+      "cell_xy": [
+        1096.58,
+        913.26
+      ],
+      "cell_height": 27,
+      "cell_state": 1,
+      "cell_biome": 12,
+      "cell_distance": 44.36,
+      "nearest_generated_burg": 465,
+      "nearest_generated_burg_name": "Khiz",
+      "burg_distance": 69.12
+    },
+    {
+      "id": "saltgrave-fort",
+      "name": "Saltgrave",
+      "kind": "fortification",
+      "region": "black-coast",
+      "anchor_percent": [
+        75,
+        77
+      ],
+      "anchor_xy": [
+        1200.0,
+        847.0
+      ],
+      "cell": 5327,
+      "cell_xy": [
+        1205.21,
+        847.55
+      ],
+      "cell_height": 41,
+      "cell_state": 1,
+      "cell_biome": 8,
+      "cell_distance": 5.24,
+      "nearest_generated_burg": 213,
+      "nearest_generated_burg_name": "Bayeli",
+      "burg_distance": 15.22
+    },
+    {
+      "id": "drowned-fleet",
+      "name": "The Drowned Fleet",
+      "kind": "ruin",
+      "region": "black-coast",
+      "anchor_percent": [
+        72,
+        89
+      ],
+      "anchor_xy": [
+        1152.0,
+        979.0
+      ],
+      "cell": 5544,
+      "cell_xy": [
+        1149.2,
+        902.6
+      ],
+      "cell_height": 19,
+      "cell_state": 0,
+      "cell_biome": 0,
+      "cell_distance": 76.45,
+      "nearest_generated_burg": 474,
+      "nearest_generated_burg_name": "Duzyuman",
+      "burg_distance": 99.53
+    },
+    {
+      "id": "edrics-crypt",
+      "name": "Saint Edric's Crypt",
+      "kind": "ruin",
+      "region": "black-coast",
+      "anchor_percent": [
+        78,
+        79
+      ],
+      "anchor_xy": [
+        1248.0,
+        869.0
+      ],
+      "cell": 5400,
+      "cell_xy": [
+        1236.36,
+        856.13
+      ],
+      "cell_height": 13,
+      "cell_state": 0,
+      "cell_biome": 0,
+      "cell_distance": 17.35,
+      "nearest_generated_burg": 241,
+      "nearest_generated_burg_name": "Kobakalu",
+      "burg_distance": 24.23
+    }
+  ]
+}

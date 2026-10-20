@@ -13,6 +13,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|arg| arg == "--demo") {
         return run_demo_mode();
     }
+    if args.iter().any(|arg| arg == "--map-demo") {
+        return run_map_demo_mode();
+    }
     if args.iter().any(|arg| arg == "--wgpu-demo") {
         return run_wgpu_demo(&args);
     }
@@ -79,6 +82,17 @@ fn run_demo_mode() -> Result<(), Box<dyn std::error::Error>> {
         world.tick = frame;
         terminal.draw(&renderer.render_frame(&world, frame))?;
     }
+    Ok(())
+}
+
+fn run_map_demo_mode() -> Result<(), Box<dyn std::error::Error>> {
+    let mut terminal = PlainTerminal::new();
+    let (width, height) = terminal.size();
+    let mut renderer = Renderer::new(width as i16, height as i16).with_weather(WeatherMode::Rain);
+    renderer.set_active_modal(ascii_mmorpg_client::ActiveModal::WorldMap);
+    let mut world = sample_world();
+    world.messages = vec!["Veyrath ASCII atlas loaded from the political checkpoint.".into()];
+    terminal.draw(&renderer.render_frame(&world, 0))?;
     Ok(())
 }
 
