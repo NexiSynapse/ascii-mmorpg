@@ -15,17 +15,30 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// World presentation path used by the windowed presenter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PresentMode {
+    /// Render logical cells as continuously positioned glyph quads on a
+    /// letterboxed black canvas. The authored grid remains the coordinate
+    /// system, but glyphs are no longer stretched to fill the surface.
+    #[default]
+    Continuous,
+    /// Keep the original surface-filling grid path for compatibility and
+    /// visual comparison while the continuous path is being accepted.
+    GridFallback,
+}
+
 /// How to open the window and pace the loop.
 pub struct PresentOptions {
     pub title: String,
     /// Font size in px; also fixes the cell grid density.
     pub cell_px: f32,
     /// Logical grid when a windowed window opens. Explicit dimensions also cap
-    /// the logical grid during fullscreen/resizes; the presenter scales those
-    /// cells to the physical surface instead of silently increasing scene
-    /// resolution. A zero dimension uses the monitor/surface size with no cap.
-    /// This keeps existing struct literals source-compatible while making
-    /// `Default` fullscreen.
+    /// the logical grid during fullscreen/resizes; the presenter scale-to-fits
+    /// those cells into the physical surface instead of silently increasing
+    /// scene resolution. A zero dimension uses the monitor/surface size with
+    /// no cap. This keeps existing struct literals source-compatible while
+    /// making `Default` fullscreen.
     pub width_cells: u32,
     pub height_cells: u32,
     /// Frame pacing: 0 = uncapped (Immediate present, benchmark mode).
@@ -38,6 +51,8 @@ pub struct PresentOptions {
     pub fps: u32,
     /// Exit after this many presented frames (automated proof without keys).
     pub max_frames: Option<u64>,
+    /// Select the new continuous canvas or the legacy grid fallback.
+    pub mode: PresentMode,
 }
 
 impl Default for PresentOptions {
@@ -49,6 +64,7 @@ impl Default for PresentOptions {
             height_cells: 0,
             fps: 60,
             max_frames: None,
+            mode: PresentMode::Continuous,
         }
     }
 }
@@ -170,6 +186,45 @@ impl PointerEvent {
         let gy = (y * grid_height as f32 / surface_height as f32).floor() as u32;
         Some((gx.min(grid_width - 1), gy.min(grid_height - 1)))
     }
+
+    /// Convert a surface position into the authored grid inside an
+    /// aspect-preserving viewport. Letterbox/pillarbox margins are rejected.
+    pub fn grid_position_fitted(
+        &self,
+        surface_width: u32,
+        surface_height: u32,
+        grid_width: u32,
+        grid_height: u32,
+        cell_width: u32,
+        cell_height: u32,
+    ) -> Option<(u32, u32)> {
+        let (x, y) = self.position?;
+        let viewport = fitted_viewport(
+            surface_width,
+            surface_height,
+            grid_width,
+            grid_height,
+            cell_width,
+            cell_height,
+        );
+        if !x.is_finite()
+            || !y.is_finite()
+            || viewport.width <= 0.0
+            || viewport.height <= 0.0
+            || x < viewport.x
+            || y < viewport.y
+            || x >= viewport.x + viewport.width
+            || y >= viewport.y + viewport.height
+        {
+            return None;
+        }
+        let gx = ((x - viewport.x) * grid_width as f32 / viewport.width).floor() as u32;
+        let gy = ((y - viewport.y) * grid_height as f32 / viewport.height).floor() as u32;
+        Some((
+            gx.min(grid_width.saturating_sub(1)),
+            gy.min(grid_height.saturating_sub(1)),
+        ))
+    }
 }
 
 /// App-side pointer bookkeeping: last cursor position and held buttons.
@@ -286,6 +341,26 @@ struct GlyphInstance {
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ContinuousGlyphInstance {
+    /// Centre position in authored grid coordinates, not surface pixels.
+    position: [f32; 2],
+    /// Billboard size in authored cells.
+    scale: [f32; 2],
+    rotation: f32,
+    skew: [f32; 2],
+    glyph: u32,
+    fg_start: [f32; 3],
+    fg_end: [f32; 3],
+    bg: [f32; 3],
+    /// 0 = flat, 1 = horizontal, 2 = vertical.
+    fg_gradient_axis: u32,
+    opacity: f32,
+    /// World content is kept separate from pinned UI for future camera glide.
+    world: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
     grid_w: u32,
     grid_h: u32,
@@ -298,8 +373,11 @@ struct Uniforms {
     /// Sub-cell camera glide offset in grid cells (fractional follow).
     cam: [f32; 2],
     /// Explicit pad: WGSL uniform structs round up to a 16-byte multiple
-    /// (40 bytes of fields need a 48-byte buffer).
+    /// (the fields below are also shared by the continuous and overlay
+    /// pipelines).
     _pad: [f32; 2],
+    viewport_origin: [f32; 2],
+    viewport_size: [f32; 2],
 }
 
 struct Gpu {
@@ -311,11 +389,14 @@ struct Gpu {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    continuous_pipe: wgpu::RenderPipeline,
     overlay_pipe: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniform_buf: wgpu::Buffer,
     instance_buf: wgpu::Buffer,
     instance_cap: usize,
+    continuous_buf: wgpu::Buffer,
+    continuous_cap: usize,
     overlay_buf: wgpu::Buffer,
     overlay_cap: usize,
     grid_w: u32,
@@ -648,6 +729,95 @@ impl App {
             multiview: None,
             cache: None,
         });
+        let continuous_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("continuous-glyph-shader"),
+            source: wgpu::ShaderSource::Wgsl(CONTINUOUS_SHADER.into()),
+        });
+        let continuous_pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("continuous-glyph-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &continuous_shader,
+                entry_point: Some("cvs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: size_of::<ContinuousGlyphInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 8,
+                            shader_location: 1,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32,
+                            offset: 16,
+                            shader_location: 2,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 20,
+                            shader_location: 3,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Uint32,
+                            offset: 28,
+                            shader_location: 4,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 32,
+                            shader_location: 5,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 44,
+                            shader_location: 6,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 56,
+                            shader_location: 7,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Uint32,
+                            offset: 68,
+                            shader_location: 8,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32,
+                            offset: 72,
+                            shader_location: 9,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Uint32,
+                            offset: 76,
+                            shader_location: 10,
+                        },
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &continuous_shader,
+                entry_point: Some("cfs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
         let overlay_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("overlay-shader"),
             source: wgpu::ShaderSource::Wgsl(OVERLAY_SHADER.into()),
@@ -730,6 +900,12 @@ impl App {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let continuous_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("continuous-instances"),
+            size: continuous_capacity(grid_w, grid_h),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         self.window = Some(window);
         self.pointer.set_surface_size(w, h);
         self.gpu = Some(Gpu {
@@ -739,11 +915,14 @@ impl App {
             surface,
             config,
             pipeline,
+            continuous_pipe,
             overlay_pipe,
             bind_group,
             uniform_buf,
             instance_buf,
             instance_cap: (grid_w * grid_h) as usize,
+            continuous_buf,
+            continuous_cap: (grid_w * grid_h) as usize,
             overlay_buf,
             overlay_cap,
             grid_w,
@@ -781,6 +960,15 @@ impl App {
                 mapped_at_creation: false,
             });
             gpu.instance_cap = required;
+        }
+        if required > gpu.continuous_cap {
+            gpu.continuous_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("continuous-instances"),
+                size: continuous_capacity(gpu.grid_w, gpu.grid_h),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            gpu.continuous_cap = required;
         }
     }
 
@@ -821,6 +1009,14 @@ impl App {
             ),
             None => ([0.0, 0.0, 0.0], 0.0),
         };
+        let viewport = fitted_viewport(
+            gpu.config.width,
+            gpu.config.height,
+            gpu.grid_w,
+            gpu.grid_h,
+            self.atlas.cell_w,
+            self.atlas.cell_h,
+        );
         let uniforms = Uniforms {
             grid_w: gpu.grid_w,
             grid_h: gpu.grid_h,
@@ -830,21 +1026,33 @@ impl App {
             wash_strength,
             cam: [camera.ox, camera.oy],
             _pad: [0.0, 0.0],
+            viewport_origin: [viewport.x, viewport.y],
+            viewport_size: [viewport.width, viewport.height],
         };
         gpu.queue
             .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
         let t_inst = std::time::Instant::now();
-        let instances = {
+        let (instances, continuous_instances) = {
             let rects: Vec<(i32, i32, i32, i32)> = scene
                 .partitions
                 .iter()
                 .filter(|p| p.camera)
                 .map(|p| (p.x, p.y, p.w, p.h))
                 .collect();
-            frame_instances(&frame, gpu.grid_w, gpu.grid_h, &rects)
+            match self.opts.mode {
+                PresentMode::Continuous => (
+                    Vec::new(),
+                    frame_continuous_instances(&frame, gpu.grid_w, gpu.grid_h, &rects),
+                ),
+                PresentMode::GridFallback => (
+                    frame_instances(&frame, gpu.grid_w, gpu.grid_h, &rects),
+                    Vec::new(),
+                ),
+            }
         };
         let inst_count = instances.len();
+        let continuous_count = continuous_instances.len();
         let inst_d = t_inst.elapsed();
         let need = instances.len().max(1);
         if need > gpu.instance_cap {
@@ -858,6 +1066,23 @@ impl App {
         }
         gpu.queue
             .write_buffer(&gpu.instance_buf, 0, bytemuck::cast_slice(&instances));
+        if !continuous_instances.is_empty() {
+            let need = continuous_instances.len();
+            if need > gpu.continuous_cap {
+                gpu.continuous_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("continuous-instances"),
+                    size: (need * size_of::<ContinuousGlyphInstance>()) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                gpu.continuous_cap = need;
+            }
+            gpu.queue.write_buffer(
+                &gpu.continuous_buf,
+                0,
+                bytemuck::cast_slice(&continuous_instances),
+            );
+        }
 
         // Vector overlay: halo quads paint first (under glyphs), bright
         // cores last (over glyphs). One buffer, two draw ranges.
@@ -956,10 +1181,20 @@ impl App {
             pass.set_bind_group(0, &gpu.bind_group, &[]);
             pass.set_vertex_buffer(0, gpu.overlay_buf.slice(..));
             pass.draw(0..halo_count, 0..1);
-            pass.set_pipeline(&gpu.pipeline);
-            pass.set_bind_group(0, &gpu.bind_group, &[]);
-            pass.set_vertex_buffer(0, gpu.instance_buf.slice(..));
-            pass.draw(0..6, 0..instances.len() as u32);
+            match self.opts.mode {
+                PresentMode::Continuous => {
+                    pass.set_pipeline(&gpu.continuous_pipe);
+                    pass.set_bind_group(0, &gpu.bind_group, &[]);
+                    pass.set_vertex_buffer(0, gpu.continuous_buf.slice(..));
+                    pass.draw(0..6, 0..continuous_count as u32);
+                }
+                PresentMode::GridFallback => {
+                    pass.set_pipeline(&gpu.pipeline);
+                    pass.set_bind_group(0, &gpu.bind_group, &[]);
+                    pass.set_vertex_buffer(0, gpu.instance_buf.slice(..));
+                    pass.draw(0..6, 0..inst_count as u32);
+                }
+            }
             pass.set_pipeline(&gpu.overlay_pipe);
             pass.set_bind_group(0, &gpu.bind_group, &[]);
             pass.set_vertex_buffer(0, gpu.overlay_buf.slice(..));
@@ -970,12 +1205,14 @@ impl App {
         self.presented += 1;
         if std::env::var("PRESENT_PROFILE").is_ok() && self.presented % 60 == 0 {
             eprintln!(
-                "[profile] build={:?} world3d={:?} compose={:?} inst={:?} n={} grid={}x{}",
+                "[profile] build={:?} world3d={:?} compose={:?} inst={:?} n={} continuous={} mode={:?} grid={}x{}",
                 t1.duration_since(t0),
                 gpu3d_ms.unwrap_or_default(),
                 t2.duration_since(t1),
                 inst_d,
                 inst_count,
+                continuous_count,
+                self.opts.mode,
                 gpu.grid_w,
                 gpu.grid_h
             );
@@ -1180,6 +1417,109 @@ fn frame_band(
     out
 }
 
+/// A physical viewport for the authored logical grid. The cell aspect comes
+/// from the embedded font, so a fullscreen surface letterboxes instead of
+/// stretching glyphs horizontally or vertically.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ViewportRect {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+fn fitted_viewport(
+    surface_width: u32,
+    surface_height: u32,
+    grid_width: u32,
+    grid_height: u32,
+    cell_width: u32,
+    cell_height: u32,
+) -> ViewportRect {
+    let sw = surface_width as f32;
+    let sh = surface_height as f32;
+    let authored_width = (grid_width.max(1) * cell_width.max(1)) as f32;
+    let authored_height = (grid_height.max(1) * cell_height.max(1)) as f32;
+    if sw <= 0.0 || sh <= 0.0 {
+        return ViewportRect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        };
+    }
+    let scale = (sw / authored_width).min(sh / authored_height);
+    let width = authored_width * scale;
+    let height = authored_height * scale;
+    ViewportRect {
+        x: (sw - width) * 0.5,
+        y: (sh - height) * 0.5,
+        width,
+        height,
+    }
+}
+
+fn frame_continuous_instances(
+    frame: &Frame,
+    grid_w: u32,
+    grid_h: u32,
+    world: &[(i32, i32, i32, i32)],
+) -> Vec<ContinuousGlyphInstance> {
+    let cols = grid_w.min(frame.w.max(0) as u32);
+    let rows = grid_h.min(frame.h.max(0) as u32);
+    if cols == 0 || rows == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity((cols * rows) as usize);
+    for y in 0..rows {
+        for x in 0..cols {
+            let Some(cell) = frame.get(x as i32, y as i32) else {
+                continue;
+            };
+            if cell.transparent {
+                continue;
+            }
+            let xi = x as i32;
+            let yi = y as i32;
+            let in_world = frame.is_world(xi, yi)
+                || world
+                    .iter()
+                    .any(|&(px, py, pw, ph)| xi >= px && xi < px + pw && yi >= py && yi < py + ph);
+            let bold = if cell.bold { 1.25 } else { 1.0 };
+            let f = |c: u8| ((f32::from(c) / 255.0) * bold).min(1.0);
+            out.push(ContinuousGlyphInstance {
+                position: [
+                    x as f32 + 0.5 + cell.offset_x,
+                    y as f32 + 0.5 + cell.offset_y,
+                ],
+                scale: [cell.scale.clamp(0.25, 2.0), cell.scale.clamp(0.25, 2.0)],
+                rotation: 0.0,
+                skew: [0.0, 0.0],
+                glyph: atlas::slot(cell.glyph),
+                fg_start: [f(cell.fg.r), f(cell.fg.g), f(cell.fg.b)],
+                fg_end: [f(cell.fg_end.r), f(cell.fg_end.g), f(cell.fg_end.b)],
+                bg: if in_world {
+                    [0.0, 0.0, 0.0]
+                } else {
+                    [
+                        f32::from(cell.bg.r) / 255.0,
+                        f32::from(cell.bg.g) / 255.0,
+                        f32::from(cell.bg.b) / 255.0,
+                    ]
+                },
+                fg_gradient_axis: match cell.fg_gradient {
+                    None => 0,
+                    Some(super::Axis::X) => 1,
+                    Some(super::Axis::Y) => 2,
+                },
+                opacity: 1.0,
+                world: in_world as u32,
+            });
+        }
+    }
+    out
+}
+
 fn grid_for_surface(width: u32, height: u32, cell_w: u32, cell_h: u32) -> (u32, u32) {
     ((width / cell_w).max(1), (height / cell_h).max(1))
 }
@@ -1264,6 +1604,11 @@ fn instance_capacity(grid_w: u32, grid_h: u32) -> u64 {
     (grid_w.max(1) as u64 * grid_h.max(1) as u64 * size_of::<GlyphInstance>() as u64).max(1)
 }
 
+fn continuous_capacity(grid_w: u32, grid_h: u32) -> u64 {
+    (grid_w.max(1) as u64 * grid_h.max(1) as u64 * size_of::<ContinuousGlyphInstance>() as u64)
+        .max(1)
+}
+
 const SHADER: &str = r#"
 struct U {
   grid: vec2<u32>,
@@ -1271,6 +1616,9 @@ struct U {
   wash_rgb: vec3<f32>,
   wash_strength: f32,
   cam: vec2<f32>,
+  _pad: vec2<f32>,
+  viewport_origin: vec2<f32>,
+  viewport_size: vec2<f32>,
 };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
@@ -1305,13 +1653,13 @@ fn vs(@builtin(vertex_index) vi: u32,
     // Centered billboard scale: 1.0 fills the cell, smaller floats inside it
     // (reference spark particles vary in size); the atlas UV stays full-glyph.
     let c0 = (c - 0.5) * size + 0.5;
-    let cell = vec2<f32>(f32(u.surf.x) / f32(u.grid.x), f32(u.surf.y) / f32(u.grid.y));
+    let cell = u.viewport_size / vec2<f32>(u.grid);
     // Fractional follow: the scene composes on integer cells while the
     // view glides between them (no cell-stepping while walking).
     // Fractional follow: world instances glide between cells while pinned
     // UI stays put (no cell-stepping while walking).
     let shift = select(vec2<f32>(0.0, 0.0), u.cam, world != 0u);
-    let pix = (vec2<f32>(grid) + motion_offset - shift + c0) * cell;
+    let pix = u.viewport_origin + (vec2<f32>(grid) + motion_offset - shift + c0) * cell;
     let ndc = vec2<f32>(pix.x / f32(u.surf.x), 1.0 - pix.y / f32(u.surf.y)) * 2.0 - vec2<f32>(1.0);
     let tile = vec2<f32>(f32(glyph % 32u), f32(glyph / 32u));
     var o: VOut;
@@ -1336,6 +1684,95 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {
     let washed = mix(col, u.wash_rgb, u.wash_strength);
     let final_col = select(washed, col, i.world != 0u);
     return vec4<f32>(final_col, 1.0);
+}
+"#;
+
+const CONTINUOUS_SHADER: &str = r#"
+struct U {
+  grid: vec2<u32>,
+  surf: vec2<u32>,
+  wash_rgb: vec3<f32>,
+  wash_strength: f32,
+  cam: vec2<f32>,
+  _pad: vec2<f32>,
+  viewport_origin: vec2<f32>,
+  viewport_size: vec2<f32>,
+};
+@group(0) @binding(0) var<uniform> u: U;
+@group(0) @binding(1) var atlas: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
+
+struct VOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) glyph_uv: vec2<f32>,
+    @location(2) fg_start: vec3<f32>,
+    @location(3) fg_end: vec3<f32>,
+    @location(4) bg: vec3<f32>,
+    @interpolate(flat) @location(5) gradient_axis: u32,
+    @location(6) opacity: f32,
+    @interpolate(flat) @location(7) world: u32,
+};
+
+@vertex
+fn cvs(@builtin(vertex_index) vi: u32,
+       @location(0) position: vec2<f32>,
+       @location(1) scale: vec2<f32>,
+       @location(2) rotation: f32,
+       @location(3) skew: vec2<f32>,
+       @location(4) glyph: u32,
+       @location(5) fg_start: vec3<f32>,
+       @location(6) fg_end: vec3<f32>,
+       @location(7) bg: vec3<f32>,
+       @location(8) gradient_axis: u32,
+       @location(9) opacity: f32,
+       @location(10) world: u32) -> VOut {
+    var c = vec2<f32>(0.0, 0.0);
+    if (vi == 1u) { c = vec2<f32>(1.0, 0.0); }
+    else if (vi == 2u || vi == 4u) { c = vec2<f32>(1.0, 1.0); }
+    else if (vi == 5u) { c = vec2<f32>(0.0, 1.0); }
+    let local = (c - 0.5) * scale;
+    let sheared = vec2<f32>(
+        local.x + skew.x * local.y,
+        local.y + skew.y * local.x,
+    );
+    let cs = cos(rotation);
+    let sn = sin(rotation);
+    let rotated = vec2<f32>(
+        cs * sheared.x - sn * sheared.y,
+        sn * sheared.x + cs * sheared.y,
+    );
+    let logical = position + rotated;
+    let pix = u.viewport_origin + logical / vec2<f32>(u.grid) * u.viewport_size;
+    let ndc = vec2<f32>(pix.x / f32(u.surf.x), 1.0 - pix.y / f32(u.surf.y)) * 2.0 - vec2<f32>(1.0);
+    let tile = vec2<f32>(f32(glyph % 32u), f32(glyph / 32u));
+    var o: VOut;
+    o.pos = vec4<f32>(ndc, 0.0, 1.0);
+    o.uv = (tile + c) / vec2<f32>(32.0, 16.0);
+    o.glyph_uv = c;
+    o.fg_start = fg_start;
+    o.fg_end = fg_end;
+    o.bg = bg;
+    o.gradient_axis = gradient_axis;
+    o.opacity = opacity;
+    o.world = world;
+    return o;
+}
+
+@fragment
+fn cfs(i: VOut) -> @location(0) vec4<f32> {
+    let a = textureSample(atlas, samp, i.uv).r * i.opacity;
+    let position = select(i.glyph_uv.x, i.glyph_uv.y, i.gradient_axis == 2u);
+    let blend = select(0.0, position, i.gradient_axis != 0u);
+    let fg = mix(i.fg_start, i.fg_end, blend);
+    let col = mix(i.bg, fg, a);
+    let washed = mix(col, u.wash_rgb, u.wash_strength);
+    let final_col = select(washed, col, i.world != 0u);
+    // UI cells keep an opaque background even when the glyph mask is a space;
+    // world cells retain mask alpha so sparse glyphs continue to reveal the
+    // black canvas around their ink.
+    let alpha = select(1.0, a, i.world != 0u);
+    return vec4<f32>(final_col, alpha);
 }
 "#;
 
@@ -1501,6 +1938,8 @@ struct U {
   wash_strength: f32,
   cam: vec2<f32>,
   _pad: vec2<f32>,
+  viewport_origin: vec2<f32>,
+  viewport_size: vec2<f32>,
 };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
@@ -1521,8 +1960,8 @@ fn ovs(@location(0) pos: vec2<f32>,
        @location(2) alpha: f32,
        @location(3) glyph: u32,
        @location(4) uv: vec2<f32>) -> OOut {
-    let cell = vec2<f32>(f32(u.surf.x) / f32(u.grid.x), f32(u.surf.y) / f32(u.grid.y));
-    let pix = pos * cell;
+    let cell = u.viewport_size / vec2<f32>(u.grid);
+    let pix = u.viewport_origin + pos * cell;
     let ndc = vec2<f32>(pix.x / f32(u.surf.x), 1.0 - pix.y / f32(u.surf.y)) * 2.0 - vec2<f32>(1.0);
     var o: OOut;
     o.pos = vec4<f32>(ndc, 0.0, 1.0);
@@ -1548,8 +1987,9 @@ fn ofs(i: OOut) -> @location(0) vec4<f32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        frame_instances, glide_camera, grid_for_surface, grid_for_surface_limited,
-        instance_capacity, GlyphInstance, OVERLAY_SHADER, SHADER,
+        continuous_capacity, fitted_viewport, frame_continuous_instances, frame_instances,
+        glide_camera, grid_for_surface, grid_for_surface_limited, instance_capacity,
+        ContinuousGlyphInstance, GlyphInstance, CONTINUOUS_SHADER, OVERLAY_SHADER, SHADER,
     };
     use crate::{Axis, Cell, Frame, Rgb};
 
@@ -1576,10 +2016,41 @@ mod tests {
     }
 
     #[test]
+    fn fitted_viewport_preserves_authored_aspect_with_centered_bars() {
+        let viewport = fitted_viewport(1920, 1080, 160, 56, 10, 16);
+        assert!((viewport.width - 1920.0).abs() < 0.001);
+        assert!((viewport.height - 1075.2).abs() < 0.001);
+        assert!(viewport.x.abs() < 0.001);
+        assert!((viewport.y - 2.4).abs() < 0.001);
+
+        let wide = fitted_viewport(2560, 1080, 160, 56, 10, 16);
+        assert_eq!(wide.height, 1080.0);
+        assert!((wide.width - 1928.5714).abs() < 0.001);
+        assert!((wide.x - 315.7143).abs() < 0.001);
+        assert_eq!(wide.y, 0.0);
+    }
+
+    #[test]
     fn instance_capacity_covers_every_grid_cell() {
         let bytes = instance_capacity(80, 25);
         assert_eq!(bytes, 80 * 25 * std::mem::size_of::<GlyphInstance>() as u64);
         assert!(instance_capacity(0, 0) >= std::mem::size_of::<GlyphInstance>() as u64);
+        assert!(continuous_capacity(0, 0) >= std::mem::size_of::<ContinuousGlyphInstance>() as u64);
+    }
+
+    #[test]
+    fn continuous_instances_use_fractional_positions_and_black_world_backgrounds() {
+        let mut frame = Frame::blank(2, 1);
+        frame.cells[0] = Cell::new('@', Rgb::new(255, 200, 80), Rgb::new(50, 20, 10))
+            .with_offset(0.25, -0.125)
+            .with_scale(0.75);
+        frame.cells[1] = Cell::new('h', Rgb::new(200, 220, 255), Rgb::new(50, 20, 10));
+        let instances = frame_continuous_instances(&frame, 2, 1, &[(0, 0, 2, 1)]);
+        assert_eq!(instances.len(), 2);
+        assert_eq!(instances[0].position, [0.75, 0.375]);
+        assert_eq!(instances[0].scale, [0.75, 0.75]);
+        assert_eq!(instances[0].bg, [0.0, 0.0, 0.0]);
+        assert_eq!(instances[1].position, [1.5, 0.5]);
     }
 
     #[test]
@@ -1700,6 +2171,15 @@ mod tests {
             wheel: 0.0,
         };
         assert_eq!(event.grid_position(640, 480, 80, 30), Some((79, 29)));
+        assert_eq!(event.grid_position_fitted(640, 480, 80, 30, 10, 16), None);
+        let fitted = PointerEvent {
+            position: Some((320.0, 240.0)),
+            ..event
+        };
+        assert_eq!(
+            fitted.grid_position_fitted(640, 480, 80, 30, 10, 16),
+            Some((40, 15))
+        );
         assert_eq!(event.grid_position(640, 480, 0, 30), None);
 
         let outside = PointerEvent {
@@ -1727,6 +2207,15 @@ mod tests {
         assert!(SHADER.contains("mix(i.fg_start, i.fg_end, blend)"));
         assert!(SHADER.contains("i.glyph_uv.y"));
         assert!(SHADER.contains("i.gradient_axis != 0u"));
+        assert!(SHADER.contains("u.viewport_origin"));
+    }
+
+    #[test]
+    fn continuous_shader_applies_transform_channels_and_opacity() {
+        assert!(CONTINUOUS_SHADER.contains("cos(rotation)"));
+        assert!(CONTINUOUS_SHADER.contains("skew.x * local.y"));
+        assert!(CONTINUOUS_SHADER.contains("u.viewport_size"));
+        assert!(CONTINUOUS_SHADER.contains("select(1.0, a, i.world != 0u)"));
     }
 
     #[test]

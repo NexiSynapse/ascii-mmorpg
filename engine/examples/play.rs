@@ -4,6 +4,8 @@
 //! fixed elevated oblique 2.5D camera. WASD/arrows walk in fixed world
 //! directions, left-click ground targeting, `F` attacks, `1-3` cast, `I` opens
 //! the inventory, `R` rests, `F11` toggles fullscreen, and `Q`/Esc quits.
+//! Pass `--grid` to compare the legacy grid presenter with the default
+//! continuous, aspect-preserving canvas.
 //!
 //! Every frame builds a mesh list (zoned ground, ocean sheet, trees, item
 //! drops, humanoid actors, combat FX as world-space decals and boxes), one
@@ -36,7 +38,9 @@ fn main() {
 #[cfg(feature = "present")]
 fn real_main() -> Result<(), String> {
     use ascii_mmorpg_engine::motion::{smooth_angle, KinematicMotion};
-    use ascii_mmorpg_engine::present::{GpuWorld, PointerEvent, PresentOptions, SceneSource};
+    use ascii_mmorpg_engine::present::{
+        GpuWorld, PointerEvent, PresentMode, PresentOptions, SceneSource,
+    };
     use ascii_mmorpg_engine::raster::{
         self, Camera3, DepthOpts, HumanoidPose, Mesh, PointLight, Transform, Vec3,
     };
@@ -409,8 +413,14 @@ fn real_main() -> Result<(), String> {
         grid_height: u32,
     ) -> Option<Point> {
         let (surface_width, surface_height) = event.surface_size;
-        let (gx, gy) =
-            event.grid_position(surface_width, surface_height, grid_width, grid_height)?;
+        let (gx, gy) = event.grid_position_fitted(
+            surface_width,
+            surface_height,
+            grid_width,
+            grid_height,
+            10,
+            16,
+        )?;
         let world_top = HUD_H as u32;
         let world_bottom = world_top.saturating_add(camera.height.max(0) as u32);
         if gx >= camera.width.max(0) as u32 || gy < world_top || gy >= world_bottom {
@@ -2111,6 +2121,11 @@ fn real_main() -> Result<(), String> {
         .position(|arg| arg == "--frames")
         .and_then(|i| args.get(i + 1))
         .and_then(|v| v.parse::<u64>().ok());
+    let mode = if args.iter().any(|arg| arg == "--grid") {
+        PresentMode::GridFallback
+    } else {
+        PresentMode::Continuous
+    };
 
     match ascii_mmorpg_engine::present::run_dynamic(
         LocalGame::new(),
@@ -2121,6 +2136,7 @@ fn real_main() -> Result<(), String> {
             width_cells: GRID_W,
             height_cells: GRID_H,
             max_frames: frames,
+            mode,
             ..Default::default()
         },
     ) {

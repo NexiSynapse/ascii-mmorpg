@@ -96,9 +96,60 @@ All nine tickets are child issues of #1 and carry `ready-for-agent`.
 
 ### Next action
 
-Ticket #2 is green and closed. Do not begin ticket #3's GPU canvas/bloom work in
-this slice; the next session may start it only as a separate bounded task after
-preserving this verified seam and keeping the grid-first presenter as fallback.
+Ticket #2 is green and closed. Ticket #3 is the active bounded slice; keep the
+grid-first presenter available as fallback until the continuous path receives
+live visual acceptance.
+
+## Ticket #3: continuous GPU canvas and aspect-preserving presentation (2026-10-21)
+
+### Changed
+
+- Added `PresentMode::{Continuous,GridFallback}`. The continuous path is now
+  the default; `engine/examples/play.rs --grid` selects the legacy grid path
+  for side-by-side comparison and fallback operation.
+- Added a dedicated continuous instanced glyph pipeline. Composed frame cells
+  are emitted as floating-point billboard positions and scales on a black GPU
+  canvas instead of being stretched independently to the physical surface.
+  The shader supports rotation and skew channels for the primitive seam's later
+  glyph/ribbon migration while preserving fractional cell offsets today.
+- Added aspect-preserving viewport fitting based on the authored grid and
+  embedded font cell aspect. Fullscreen and resize surfaces now centre the
+  authored scene with black letterboxing/pillarboxing instead of distorting
+  glyphs.
+- Updated overlay/HUD text to use the same fitted viewport. UI cells retain
+  opaque backgrounds even for space glyphs, while sparse world cells continue
+  to reveal the black void around their ink.
+- Added fitted pointer mapping so point-and-click rejects letterbox margins and
+  maps clicks through the same authored viewport as rendering.
+
+### Verification
+
+- `cargo fmt --all -- --check` passed.
+- Focused presenter tests passed (`15` tests), including fitted viewport
+  geometry, fractional continuous instances, black world backgrounds, shader
+  transform contracts, pointer letterbox rejection, and fallback-compatible
+  frame ordering.
+- `cargo test --locked -p ascii-mmorpg-engine --lib continuous::tests` passed
+  (`5` tests).
+- `cargo check --locked -p ascii-mmorpg-engine --features present --examples`
+  passed.
+- `cargo test --workspace --locked` passed (`110` client tests, `126` engine
+  tests, `8` server library tests, `3` server binary tests, `14` shared tests,
+  `2` tools tests, and all doc tests).
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` passed.
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play
+  -- --check` passed.
+- Default continuous Vulkan smoke run passed for `30` frames on the NVIDIA
+  GeForce GTX 1650.
+- Legacy fallback Vulkan smoke run passed for `30` frames with `--grid` on the
+  NVIDIA GeForce GTX 1650.
+- `git diff --check` passed.
+
+### Next action
+
+Close ticket #3 after the commit/push. Ticket #4 can then add floating-point
+emission and bloom on top of this canvas; do not migrate the in-world torch
+path until the isolated showcase is visually accepted.
 
 ## Latest: Veyrath map authoring — political checkpoint and standalone atlas export reviewed; placement acceptance pending (2026-10-20)
 
