@@ -1,4 +1,4 @@
-//! Data-driven effect showcase: the five engine effect archetypes share one
+//! Data-driven effect showcase: the eight engine effect archetypes share one
 //! record list, so sampling never rebuilds scripted particle geometry.
 //!
 //! Run: `cargo run -p ascii-mmorpg-engine --features present --example fx`
@@ -97,6 +97,43 @@ fn real_main() -> Result<(), String> {
                         },
                     },
                     Emitter {
+                        origin: (57.0, 18.0),
+                        start: 0.0,
+                        lifetime: 1.8,
+                        cell: Cell::new('|', Rgb::new(210, 235, 255), BG).with_glow(1.0),
+                        kind: Effect::LightningColumn {
+                            height: 9,
+                            width: 5,
+                            grow: 0.18,
+                            seed: 0x1CE,
+                        },
+                    },
+                    Emitter {
+                        origin: (24.0, 8.0),
+                        start: 0.0,
+                        lifetime: 1.8,
+                        cell: Cell::new('^', Rgb::new(170, 220, 255), BG).with_glow(0.8),
+                        kind: Effect::IcicleWave {
+                            rows: 3,
+                            length: 5,
+                            direction: (1.0, 0.0),
+                            spacing: 2.0,
+                            grow: 0.3,
+                        },
+                    },
+                    Emitter {
+                        origin: (20.0, 18.0),
+                        start: 0.0,
+                        lifetime: 1.8,
+                        cell: Cell::new('o', Rgb::new(170, 185, 205), BG).with_glow(0.55),
+                        kind: Effect::SmokeRing {
+                            count: 12,
+                            radius: 4.0,
+                            rise: 0.35,
+                            seed: 0x5A0,
+                        },
+                    },
+                    Emitter {
                         origin: (29.0, 16.0),
                         start: 0.0,
                         lifetime: 1.8,
@@ -128,6 +165,9 @@ fn real_main() -> Result<(), String> {
             mosaic.push_text(48, 1, "BURST", Rgb::new(255, 185, 90), BG);
             mosaic.push_text(25, 21, "NUMBER", Rgb::new(255, 100, 100), BG);
             mosaic.push_text(44, 21, "SPIKE", Rgb::new(180, 235, 255), BG);
+            mosaic.push_text(50, 1, "BOLT", Rgb::new(210, 235, 255), BG);
+            mosaic.push_text(21, 1, "ICE", Rgb::new(170, 220, 255), BG);
+            mosaic.push_text(16, 21, "SMOKE", Rgb::new(170, 185, 205), BG);
             scene.layers.push(mosaic);
 
             let mut torch = Layer::new("torch", 1);
@@ -198,6 +238,9 @@ fn real_main() -> Result<(), String> {
             (33, 2, 43, 14),
             (44, 10, 55, 20),
             (25, 12, 35, 20),
+            (50, 2, 63, 21),
+            (20, 2, 34, 13),
+            (14, 12, 27, 21),
         ];
         for (i, region) in regions.into_iter().enumerate() {
             let visible = show.visible_in(0.8, region.0, region.1, region.2, region.3);
@@ -219,7 +262,7 @@ fn real_main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--check") {
         run_check()?;
-        eprintln!("fx check ok: five data-driven effects grow and release");
+        eprintln!("fx check ok: eight data-driven effects grow and release");
         return Ok(());
     }
     let frames = args

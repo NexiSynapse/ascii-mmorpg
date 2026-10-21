@@ -35,6 +35,22 @@ impl std::ops::Sub for Vec3 {
     }
 }
 
+impl std::ops::Add for Vec3 {
+    type Output = Vec3;
+
+    fn add(self, o: Vec3) -> Vec3 {
+        Vec3::new(self.x + o.x, self.y + o.y, self.z + o.z)
+    }
+}
+
+impl std::ops::Mul<f32> for Vec3 {
+    type Output = Vec3;
+
+    fn mul(self, scale: f32) -> Vec3 {
+        Vec3::new(self.x * scale, self.y * scale, self.z * scale)
+    }
+}
+
 impl Vec3 {
     pub fn new(x: f32, y: f32, z: f32) -> Self {
         Self { x, y, z }
@@ -720,6 +736,56 @@ impl Mesh {
         mesh
     }
 
+    /// A pair of crossed vertical ribbons for a grass blade. `tip_offset`
+    /// gives the blade a presentation-only lean while the base remains fixed
+    /// to the authoritative ground position, so weather can wave foliage
+    /// without changing collision or world coordinates.
+    pub fn blade_y(
+        base: Vec3,
+        height: f32,
+        half_width: f32,
+        tip_offset: Vec3,
+        yaw: f32,
+        albedo: Rgb,
+    ) -> Mesh {
+        let height = height.max(0.0);
+        let half_width = half_width.max(0.0);
+        let tip = Vec3::new(
+            base.x + tip_offset.x,
+            base.y + height + tip_offset.y,
+            base.z + tip_offset.z,
+        );
+        let mut mesh = Mesh::new();
+        for angle in [yaw, yaw + std::f32::consts::FRAC_PI_2] {
+            let (s, c) = angle.sin_cos();
+            let side = Vec3::new(c * half_width, 0.0, -s * half_width);
+            let a = base - side;
+            let b = base + side;
+            let tip_side = side * 0.3;
+            let c2 = tip + tip_side;
+            let d = tip - tip_side;
+            mesh.push_quad(a, b, c2, d, albedo);
+        }
+        mesh
+    }
+
+    /// A thin diagonal ribbon used for rain. The endpoints are supplied in
+    /// world space so the caller can animate falling and wind drift with
+    /// fractional positions; no terminal-cell stepping is involved.
+    pub fn streak(start: Vec3, end: Vec3, half_width: f32, albedo: Rgb) -> Mesh {
+        let half_width = half_width.max(0.0);
+        let mut mesh = Mesh::new();
+        // Two perpendicular vertical ribbons give short streaks enough face
+        // area to survive the elevated ASCII raster at oblique angles.
+        for side in [
+            Vec3::new(half_width, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, half_width),
+        ] {
+            mesh.push_quad(start - side, start + side, end + side, end - side, albedo);
+        }
+        mesh
+    }
+
     /// Repaint every face whose albedo matches `from`; stack-box recipes
     /// keep their material breaks while whole figures take a new palette.
     pub fn retinted(mut self, from: Rgb, to: Rgb) -> Mesh {
@@ -1239,40 +1305,7 @@ fn rasterize_tri(
     });
 
     let n = (tri.v[1] - tri.v[0]).cross(tri.v[2] - tri.v[0]).norm();
-    // Keep the no-light CPU path exactly aligned with the GPU pre-pass. Local
-    // point lights are then added only for the explicit CPU fallback.
-    let (mut sr, mut sg, mut sb, _) = shade_face(tri, sun, opts.ambient);
-    // Coarse face-centre point lighting is intentional for this 4x
-    // character-cell raster: it keeps local sources stable instead of
-    // producing per-pixel shimmer while still brightening actual surfaces.
-    // Empty screen cells never reach this path and therefore stay black.
-    let center = Vec3::new(
-        (tri.v[0].x + tri.v[1].x + tri.v[2].x) / 3.0,
-        (tri.v[0].y + tri.v[1].y + tri.v[2].y) / 3.0,
-        (tri.v[0].z + tri.v[1].z + tri.v[2].z) / 3.0,
-    );
-    let response = match MaterialKind::classify(tri.albedo) {
-        MaterialKind::Metal => 0.82,
-        MaterialKind::Water => 0.52,
-        MaterialKind::Foliage | MaterialKind::Earth => 0.72,
-        MaterialKind::Fire | MaterialKind::Magic => 0.95,
-        _ => 0.64,
-    };
-    for light in lights {
-        let radius = light.radius.max(0.001);
-        let distance = (center - light.position)
-            .dot(center - light.position)
-            .sqrt();
-        let falloff = (1.0 - distance / radius).max(0.0);
-        let contribution = falloff * falloff * light.intensity.max(0.0) * response;
-        if contribution <= 0.0 {
-            continue;
-        }
-        sr = (sr + f32::from(light.color.r) / 255.0 * contribution).min(1.0);
-        sg = (sg + f32::from(light.color.g) / 255.0 * contribution).min(1.0);
-        sb = (sb + f32::from(light.color.b) / 255.0 * contribution).min(1.0);
-    }
-    let lum = 0.2126 * sr + 0.7152 * sg + 0.0722 * sb;
+    let (sr, sg, sb, lum) = shade_face_with_lights(tri, sun, opts, lights);
     let view_normal = Vec3::new(n.dot(right), n.dot(up), n.dot(fwd)).norm();
 
     let cx = cam.width as f32 / 2.0;
@@ -1351,6 +1384,49 @@ pub(crate) fn shade_face(tri: &Tri, sun: Vec3, ambient: f32) -> (f32, f32, f32, 
     let sr = f32::from(tri.albedo.r) / 255.0 * diff;
     let sg = f32::from(tri.albedo.g) / 255.0 * diff;
     let sb = f32::from(tri.albedo.b) / 255.0 * diff;
+    let lum = 0.2126 * sr + 0.7152 * sg + 0.0722 * sb;
+    (sr, sg, sb, lum)
+}
+
+/// Flat sun shading plus coarse face-centre point-light response. The GPU
+/// pre-pass calls this same helper before uploading triangles, keeping dynamic
+/// local lighting identical between the CPU fallback and the default GPU fill.
+pub(crate) fn shade_face_with_lights(
+    tri: &Tri,
+    sun: Vec3,
+    opts: &DepthOpts,
+    lights: &[PointLight],
+) -> (f32, f32, f32, f32) {
+    let (mut sr, mut sg, mut sb, _) = shade_face(tri, sun, opts.ambient);
+    // Character-cell rasterization intentionally uses the face centre instead
+    // of per-sample point-light interpolation. This keeps local sources stable
+    // instead of producing shimmer while still brightening actual surfaces.
+    let center = Vec3::new(
+        (tri.v[0].x + tri.v[1].x + tri.v[2].x) / 3.0,
+        (tri.v[0].y + tri.v[1].y + tri.v[2].y) / 3.0,
+        (tri.v[0].z + tri.v[1].z + tri.v[2].z) / 3.0,
+    );
+    let response = match MaterialKind::classify(tri.albedo) {
+        MaterialKind::Metal => 0.82,
+        MaterialKind::Water => 0.52,
+        MaterialKind::Foliage | MaterialKind::Earth => 0.72,
+        MaterialKind::Fire | MaterialKind::Magic => 0.95,
+        _ => 0.64,
+    };
+    for light in lights {
+        let radius = light.radius.max(0.001);
+        let distance = (center - light.position)
+            .dot(center - light.position)
+            .sqrt();
+        let falloff = (1.0 - distance / radius).max(0.0);
+        let contribution = falloff * falloff * light.intensity.max(0.0) * response;
+        if contribution <= 0.0 {
+            continue;
+        }
+        sr = (sr + f32::from(light.color.r) / 255.0 * contribution).min(1.0);
+        sg = (sg + f32::from(light.color.g) / 255.0 * contribution).min(1.0);
+        sb = (sb + f32::from(light.color.b) / 255.0 * contribution).min(1.0);
+    }
     let lum = 0.2126 * sr + 0.7152 * sg + 0.0722 * sb;
     (sr, sg, sb, lum)
 }
@@ -2194,6 +2270,65 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn animated_blade_keeps_its_base_grounded_while_the_tip_leans() {
+        let still = Mesh::blade_y(
+            Vec3::new(2.0, 0.02, 3.0),
+            0.7,
+            0.08,
+            Vec3::new(0.0, 0.0, 0.0),
+            0.2,
+            white(),
+        );
+        let bent = Mesh::blade_y(
+            Vec3::new(2.0, 0.02, 3.0),
+            0.7,
+            0.08,
+            Vec3::new(0.22, 0.0, -0.08),
+            0.2,
+            white(),
+        );
+        let min_y = |mesh: &Mesh| {
+            mesh.tris
+                .iter()
+                .flat_map(|tri| tri.v.iter())
+                .map(|v| v.y)
+                .fold(f32::INFINITY, f32::min)
+        };
+        assert!((min_y(&still) - 0.02).abs() < 1e-5);
+        assert!((min_y(&bent) - 0.02).abs() < 1e-5);
+        assert!(
+            still
+                .tris
+                .iter()
+                .zip(bent.tris.iter())
+                .flat_map(|(a, b)| a.v.iter().zip(b.v.iter()))
+                .any(|(a, b)| (a.x - b.x).abs() > 0.1 || (a.z - b.z).abs() > 0.05),
+            "weather sway must move the blade tip without moving its base"
+        );
+    }
+
+    #[test]
+    fn rain_streak_has_two_crossed_ribbons_and_preserves_endpoints() {
+        let mesh = Mesh::streak(
+            Vec3::new(1.0, 4.0, 2.0),
+            Vec3::new(1.2, 3.1, 2.1),
+            0.025,
+            white(),
+        );
+        assert_eq!(mesh.tris.len(), 4);
+        assert!(mesh
+            .tris
+            .iter()
+            .flat_map(|tri| tri.v)
+            .any(|v| { (v.y - 4.0).abs() < 0.03 && (v.x - 1.0).abs() < 0.04 }));
+        assert!(mesh
+            .tris
+            .iter()
+            .flat_map(|tri| tri.v)
+            .any(|v| { (v.y - 3.1).abs() < 0.03 && (v.x - 1.2).abs() < 0.04 }));
     }
 
     #[test]

@@ -224,19 +224,29 @@ pub fn text_quads(run: &TextRun, slot_of: impl Fn(char) -> u32) -> Vec<OverlayVe
     if run.size <= 0.0 || run.text.is_empty() {
         return out;
     }
-    let adv = run.size;
+    // Overlay text shares the terminal grid with the cell renderer. Fractional
+    // positions/sizes look attractive in a fixed window but become visibly
+    // misregistered when fullscreen changes the grid dimensions, so snap the
+    // overlay to whole cells at the final tessellation boundary.
+    let x = run.x.round();
+    let y = run.y.round();
+    let size = run.size.round();
+    if size < 1.0 {
+        return out;
+    }
+    let adv = size;
     for (i, glyph) in run.text.chars().enumerate() {
         if glyph == ' ' {
             continue;
         }
         let slot = slot_of(glyph);
-        let cx = run.x + i as f32 * adv;
-        let cy = run.y;
+        let cx = x + i as f32 * adv;
+        let cy = y;
         let backing = [
             [cx, cy],
             [cx + adv, cy],
-            [cx + adv, cy + run.size],
-            [cx, cy + run.size],
+            [cx + adv, cy + size],
+            [cx, cy + size],
         ];
         for [a, b, c] in [
             [backing[0], backing[1], backing[2]],
@@ -256,8 +266,8 @@ pub fn text_quads(run: &TextRun, slot_of: impl Fn(char) -> u32) -> Vec<OverlayVe
         let corners = [
             [cx, cy],
             [cx + adv, cy],
-            [cx + adv, cy + run.size],
-            [cx, cy + run.size],
+            [cx + adv, cy + size],
+            [cx, cy + size],
         ];
         let tris = [
             (
@@ -345,6 +355,27 @@ mod tests {
         blank.text = "A".into();
         blank.size = 0.0;
         assert!(text_quads(&blank, |g| g as u32).is_empty());
+    }
+
+    #[test]
+    fn fractional_overlay_text_snaps_to_terminal_cells() {
+        let run = TextRun {
+            x: 2.4,
+            y: 0.35,
+            text: "AB".into(),
+            size: 1.35,
+            fg: [1.0, 1.0, 1.0],
+            bg: [0.0, 0.0, 0.0],
+        };
+        let quads = text_quads(&run, |g| g as u32);
+        assert!(!quads.is_empty());
+        assert!(quads.iter().all(|vertex| {
+            (vertex.pos[0] - vertex.pos[0].round()).abs() < 1e-5
+                && (vertex.pos[1] - vertex.pos[1].round()).abs() < 1e-5
+        }));
+        let a_x = quads.iter().find(|v| v.glyph == 'A' as u32).unwrap().pos[0];
+        let b_x = quads.iter().find(|v| v.glyph == 'B' as u32).unwrap().pos[0];
+        assert!((b_x - a_x - 1.0).abs() < 1e-5);
     }
 
     #[test]

@@ -86,6 +86,12 @@ pub fn compose(scene: &Scene, camera: &Camera, t: f32) -> Frame {
         .unwrap_or(0)
         .max(0);
     let mut frame = Frame::blank(w, h);
+    // Keep light emitters independent from the visible topmost cell. A glow
+    // source can intentionally sit underneath a later world layer (for
+    // example, a projected torch halo under the rasterized terrain). If we
+    // only inspect `frame.cells` after compositing, that source disappears as
+    // soon as the terrain glyph wins the same cell.
+    let mut glow_sources: Vec<(i32, i32, Cell, bool)> = Vec::new();
 
     for partition in &scene.partitions {
         let mut order: Vec<usize> = partition.layers.to_vec();
@@ -119,6 +125,9 @@ pub fn compose(scene: &Scene, camera: &Camera, t: f32) -> Frame {
                         }
                         let mut resolved = cell.cell;
                         resolved.fg = flat;
+                        if resolved.glow.is_finite() && resolved.glow > 0.0 {
+                            glow_sources.push((x, y, resolved, partition.camera));
+                        }
                         frame.set_partition_cell(x, y, resolved, partition.camera);
                         continue;
                     }
@@ -140,11 +149,14 @@ pub fn compose(scene: &Scene, camera: &Camera, t: f32) -> Frame {
                     (cell.x as f32 + s.dx as f32, cell.y as f32 + s.dy as f32),
                 );
                 resolved.fg = resolved.fg.scaled(s.bright);
+                if resolved.glow.is_finite() && resolved.glow > 0.0 {
+                    glow_sources.push((x, y, resolved, partition.camera));
+                }
                 frame.set_partition_cell(x, y, resolved, partition.camera);
             }
         }
     }
-    apply_glow(&mut frame);
+    apply_glow(&mut frame, &glow_sources);
     if let Some(wash) = scene.wash {
         apply_wash(&mut frame, wash);
     }
@@ -190,42 +202,28 @@ fn apply_wash(frame: &mut Frame, wash: Wash) {
 /// Measured reference curve (burst core, Video-47489 t=10.5 s): halo excess
 /// ≈15 brightness levels at 1 cell out, fading by ~5 cells (~40 px at 8
 /// px/cell), peak in the spark ring rather than the core. Tuned to match:
-/// reach = glow × 5 cells, quadratic falloff, amplitude 0.12 (a glow-1.0
-/// torch washes ≈21 levels at distance 1, ≈9 at 2, ≈4 at 3).
+/// reach = glow × 5 cells, quadratic falloff. World emitters use a stronger
+/// amplitude than pinned UI emitters because world partitions deliberately
+/// keep their backgrounds black; existing world ink needs enough foreground
+/// lift to read as luminance at the low logical resolution.
 const GLOW_RADIUS_PER_UNIT: f32 = 5.0;
 const GLOW_AMPLITUDE: f32 = 0.12;
+const WORLD_GLOW_AMPLITUDE: f32 = 0.42;
 
 /// Light buffer: every stamped cell with `glow > 0` washes its foreground
-/// color onto neighboring backgrounds with quadratic falloff (reference
-/// torch halos and spell-core blooms tint nearby glyphs). Runs after all
-/// partitions so halos cross partition borders like real light; writes only
-/// backgrounds, so emission order is irrelevant and the pass is stable.
-fn apply_glow(frame: &mut Frame) {
+/// color onto neighboring cells with quadratic falloff (reference torch halos
+/// and spell-core blooms tint nearby glyphs). Runs after all partitions so
+/// halos cross partition borders like real light; world partitions lift
+/// existing foreground ink while pinned UI partitions wash their backgrounds.
+fn apply_glow(frame: &mut Frame, glow_sources: &[(i32, i32, Cell, bool)]) {
     // Index-based scan: the old per-cell `get()` paid bounds checks plus an
     // Option unwrap on every frame cell; the spill below does one manual
     // bounds check per target instead of two (get + set). Behavior — which
     // cells wash and by how much — is unchanged.
     let w = frame.w;
     let h = frame.h;
-    let sources: Vec<(i32, i32, Cell)> = frame
-        .cells
-        .iter()
-        .enumerate()
-        .filter_map(|(i, cell)| {
-            if cell.transparent || !cell.glow.is_finite() || cell.glow <= 0.0 {
-                return None;
-            }
-            Some(((i as i32 % w.max(1)), (i as i32 / w.max(1)), *cell))
-        })
-        .collect();
-    for (sx, sy, mut source) in sources {
+    for &(sx, sy, mut source, source_is_world) in glow_sources {
         source.glow = source.glow.min(8.0);
-        let source_index = (sy * w + sx) as usize;
-        let source_is_world = frame
-            .world_cells
-            .get(source_index)
-            .copied()
-            .unwrap_or(false);
         let radius = (source.glow * GLOW_RADIUS_PER_UNIT).ceil() as i32;
         for dy in -radius..=radius {
             for dx in -radius..=radius {
@@ -234,7 +232,12 @@ fn apply_glow(frame: &mut Frame) {
                     continue;
                 }
                 let fall = source.glow * (1.0 - dist / (radius as f32 + 1.0));
-                let fall = fall * fall * GLOW_AMPLITUDE;
+                let amplitude = if source_is_world {
+                    WORLD_GLOW_AMPLITUDE
+                } else {
+                    GLOW_AMPLITUDE
+                };
+                let fall = fall * fall * amplitude;
                 if fall <= 0.0 {
                     continue;
                 }
@@ -460,6 +463,44 @@ mod tests {
         assert!(near.bg.r > near.bg.b);
         // Core glyph itself is untouched by its own wash target check.
         assert_eq!(core.glyph, '*');
+    }
+
+    #[test]
+    fn glow_source_survives_a_later_layer_at_the_same_cell() {
+        let mut scene = Scene::default();
+        let mut emitter = Layer::new("emitter", -1);
+        emitter.push(AnimCell::still(
+            3,
+            2,
+            Cell::new(' ', Rgb::new(255, 120, 20), Rgb::new(0, 0, 0)).with_glow(1.0),
+        ));
+        let mut terrain = Layer::new("terrain", 0);
+        terrain.push(AnimCell::still(
+            3,
+            2,
+            Cell::new('.', Rgb::new(20, 20, 20), Rgb::new(0, 0, 0)),
+        ));
+        terrain.push(AnimCell::still(
+            4,
+            2,
+            Cell::new('.', Rgb::new(20, 20, 20), Rgb::new(0, 0, 0)),
+        ));
+        scene.layers.push(emitter);
+        scene.layers.push(terrain);
+        scene
+            .partitions
+            .push(Partition::new("world", 0, 0, 8, 5, vec![0, 1], true));
+
+        let frame = compose(&scene, &Camera::default(), 0.0);
+        assert_eq!(frame.get(3, 2).unwrap().glyph, '.');
+        assert!(
+            frame.get(4, 2).unwrap().fg.r > 20,
+            "a hidden lower-layer emitter must still warm nearby world ink"
+        );
+        assert!(
+            frame.get(4, 2).unwrap().fg.r >= 50,
+            "world glow must be visibly brighter than normal terrain colouring"
+        );
     }
 
     #[test]

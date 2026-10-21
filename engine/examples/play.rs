@@ -1,10 +1,9 @@
 //! Playable windowed port with real depth: the local server
 //! [`Simulation`](ascii_mmorpg_server) ticks at 20 Hz while the world is
 //! rasterized through the 3D depth backend (`raster::`) behind an OSRS-style
-//! elevated orbit camera. WASD/arrows walk relative to what the camera faces
-//! (screen-up = camera forward, snapped by motion to the step grid), hold the
-//! right mouse button and drag to orbit, wheel to zoom, `F` attacks, `1-3`
-//! cast, `I` opens the inventory, `R` rests, `Q`/Esc quits.
+//! fixed elevated oblique 2.5D camera. WASD/arrows walk in fixed world
+//! directions, left-click ground targeting, `F` attacks, `1-3` cast, `I` opens
+//! the inventory, `R` rests, `F11` toggles fullscreen, and `Q`/Esc quits.
 //!
 //! Every frame builds a mesh list (zoned ground, ocean sheet, trees, item
 //! drops, humanoid actors, combat FX as world-space decals and boxes), one
@@ -42,15 +41,16 @@ fn real_main() -> Result<(), String> {
         self, Camera3, DepthOpts, HumanoidPose, Mesh, PointLight, Transform, Vec3,
     };
     use ascii_mmorpg_engine::{
-        bridge, overlay::TextRun, Camera, Cell, Layer, Partition, Rgb, Scene,
+        bridge, cell_text_width, compose, AnimCell, Camera, Cell, Layer, Partition, Rgb, Scene,
     };
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::time::Duration;
     use winit::keyboard::KeyCode;
 
     use ascii_mmorpg_server::{FixedTickClock, Simulation};
     use ascii_mmorpg_shared::{
-        ClientCommand, Command, Direction, EntityId, EntityKind, Tick, WorldSnapshot,
+        is_point_obstructed, overworld_obstacles, ClientCommand, Command, Direction, EntityId,
+        EntityKind, Point, Tick, WorldSnapshot,
     };
 
     const PLAYER_ID: EntityId = 1;
@@ -66,16 +66,12 @@ fn real_main() -> Result<(), String> {
     const HUD_H: i32 = 7;
     const LOG_H: i32 = 5;
 
-    /// Camera defaults: OSRS-mid pull-back looking down at the player.
+    /// Fixed camera: OSRS-mid pull-back looking down at the player.
+    const CAM_YAW: f32 = std::f32::consts::PI; // fixed north-facing view
     const CAM_DIST: f32 = 13.5;
     const CAM_PITCH: f32 = -0.68; // close readable OSRS gameplay framing
-    const CAM_PITCH_MIN: f32 = -1.12;
-    const CAM_PITCH_MAX: f32 = -0.35;
-    const CAM_DIST_MIN: f32 = 7.0;
-    const CAM_DIST_MAX: f32 = 24.0;
-    /// Focal (cell units): at the 17-unit pull-back one world unit spans
-    /// ~2 cells, so the 192-column view covers ~96 world cells — the same
-    /// wing as the bridge camera.
+    /// Focal (cell units): at the fixed pull-back one world unit spans about
+    /// two cells, so the 160-column view keeps the bridge-scale world read.
     const CAM_FOCAL: f32 = 48.0;
     const ATTACK_PHASE_SECONDS: f32 = 0.42;
     const FACING_RESPONSE: f32 = 18.0;
@@ -90,6 +86,72 @@ fn real_main() -> Result<(), String> {
     const LABEL_BG: Rgb = Rgb::new(0, 0, 0);
     const DIGIT_GOLD: Rgb = Rgb::new(255, 230, 160);
     const TARGET_ORANGE: Rgb = Rgb::new(255, 170, 58);
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Weather {
+        Clear,
+        Rain,
+        Storm,
+    }
+
+    #[derive(Clone, Copy)]
+    struct WeatherProfile {
+        grass_amplitude: f32,
+        grass_speed: f32,
+        rain_density: u32,
+        rain_speed: f32,
+        wind_x: f32,
+        wind_z: f32,
+        rain_color: Rgb,
+    }
+
+    fn weather_profile(weather: Weather, time: f32) -> WeatherProfile {
+        let gust = (time * 0.82).sin() * 0.5 + (time * 1.37 + 1.4).sin() * 0.3;
+        match weather {
+            Weather::Clear => WeatherProfile {
+                grass_amplitude: 0.015,
+                grass_speed: 1.2,
+                rain_density: 0,
+                rain_speed: 0.0,
+                wind_x: 0.0,
+                wind_z: 0.0,
+                rain_color: Rgb::new(0, 0, 0),
+            },
+            Weather::Rain => WeatherProfile {
+                grass_amplitude: 0.12 + gust.abs() * 0.05,
+                grass_speed: 2.2 + gust.abs() * 0.4,
+                rain_density: 24,
+                rain_speed: 1.45 + gust.abs() * 0.18,
+                wind_x: 0.20 + gust * 0.08,
+                wind_z: -0.08 + gust * 0.04,
+                rain_color: Rgb::new(108, 142, 186),
+            },
+            Weather::Storm => WeatherProfile {
+                grass_amplitude: 0.22 + gust.abs() * 0.09,
+                grass_speed: 3.8 + gust.abs() * 0.7,
+                rain_density: 42,
+                rain_speed: 2.15 + gust.abs() * 0.28,
+                wind_x: 0.34 + gust * 0.12,
+                wind_z: -0.14 + gust * 0.06,
+                rain_color: Rgb::new(132, 166, 210),
+            },
+        }
+    }
+
+    fn weather_from_args() -> Weather {
+        let mut args = std::env::args();
+        while let Some(arg) = args.next() {
+            if arg != "--weather" {
+                continue;
+            }
+            return match args.next().as_deref() {
+                Some("clear") => Weather::Clear,
+                Some("storm") => Weather::Storm,
+                _ => Weather::Rain,
+            };
+        }
+        Weather::Rain
+    }
 
     /// Centralized foreground-only world palette. These colours are albedos
     /// for visible geometry and are resolved into glyph foregrounds by the
@@ -160,6 +222,81 @@ fn real_main() -> Result<(), String> {
         let mut h = (x as u32).wrapping_mul(374_761_393) ^ (y as u32).wrapping_mul(668_265_263);
         h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
         h ^ (h >> 16)
+    }
+
+    const TORCH_CRACKLE_COUNT: usize = 6;
+    const TORCH_CRACKLE_PERIOD: f32 = 0.92;
+    const TORCH_CRACKLE_LIFETIME: f32 = 0.34;
+
+    #[derive(Clone, Copy)]
+    struct TorchPulse {
+        light_gain: f32,
+        radius_scale: f32,
+        flame_scale: f32,
+        offset: (f32, f32),
+    }
+
+    fn hash01(seed: u32) -> f32 {
+        scene_hash(seed as i32, 991) as f32 / u32::MAX as f32
+    }
+
+    fn torch_spots() -> [(f32, f32); 3] {
+        [(-7.5, -3.5), (8.5, 4.0), (-4.5, 1.5)]
+    }
+
+    /// One deterministic pulse drives both the flame geometry and its point
+    /// light, so the visible flame never flickers independently of the light
+    /// pool it produces.
+    fn torch_pulse(time: f32, index: usize) -> TorchPulse {
+        let seed = 700_u32.wrapping_add(index as u32 * 37);
+        let phase = hash01(seed) * std::f32::consts::TAU;
+        let fast = (time * (9.0 + hash01(seed + 1) * 3.0) + phase).sin();
+        let slow = (time * (3.2 + hash01(seed + 2) * 1.4) + phase * 0.61).sin();
+        let flicker = (0.84 + fast * 0.08 + slow * 0.05).clamp(0.68, 1.02);
+        TorchPulse {
+            light_gain: flicker,
+            radius_scale: (0.91 + flicker * 0.12).clamp(0.86, 1.04),
+            flame_scale: (0.90 + flicker * 0.16).clamp(0.84, 1.08),
+            offset: (fast * 0.045 + slow * 0.018, slow * 0.035 - fast * 0.012),
+        }
+    }
+
+    /// Deterministic short-lived spark around one torch. The cycle phase is
+    /// seeded per spark, while its direction, rise, colour and size remain
+    /// stable across frames. The fade reaches zero before the spark vanishes.
+    fn torch_crackle(
+        time: f32,
+        torch_index: usize,
+        crackle_index: usize,
+        origin: (f32, f32),
+    ) -> Option<(Vec3, Rgb, f32)> {
+        let seed = 2_000_u32
+            .wrapping_add(torch_index as u32 * 97)
+            .wrapping_add(crackle_index as u32 * 13);
+        let phase = hash01(seed) * TORCH_CRACKLE_PERIOD;
+        let age = (time + phase).rem_euclid(TORCH_CRACKLE_PERIOD);
+        if age >= TORCH_CRACKLE_LIFETIME {
+            return None;
+        }
+        let progress = (age / TORCH_CRACKLE_LIFETIME).clamp(0.0, 1.0);
+        let angle = hash01(seed + 1) * std::f32::consts::TAU;
+        let speed = 0.36 + hash01(seed + 2) * 0.54;
+        let radial = speed * age;
+        let rise = 0.62 + hash01(seed + 3) * 0.85;
+        let wobble = (time * (7.0 + hash01(seed + 4) * 4.0) + angle).sin() * 0.06;
+        let fade = (1.0 - progress).powf(0.72);
+        let palette = match crackle_index % 3 {
+            0 => Rgb::new(244, 58, 28),
+            1 => Rgb::new(255, 126, 30),
+            _ => Rgb::new(255, 216, 74),
+        };
+        let color = palette.scaled(0.62 + fade * 0.38);
+        let position = Vec3::new(
+            origin.0 + angle.cos() * radial + wobble,
+            1.91 + rise * age,
+            origin.1 + angle.sin() * radial - wobble * 0.7,
+        );
+        Some((position, color, fade))
     }
 
     /// Current zone label for the HUD (first "Zone: " message).
@@ -244,13 +381,6 @@ fn real_main() -> Result<(), String> {
         None
     }
 
-    /// Ground-projected camera basis, mirroring `raster::basis` (which is
-    /// private): forward = (sin yaw, cos yaw) on the x/z plane.
-    fn ground_frame(yaw: f32) -> ((f32, f32), (f32, f32)) {
-        let (s, c) = yaw.sin_cos();
-        ((s, c), (c, -s)) // (forward, right) ground vectors
-    }
-
     /// Project a world point to the raster view's cell coords (same mapping
     /// as `rasterize_tri`'s fill math) so labels glue to 3D bodies.
     fn project(p: Vec3, cam: &Camera3) -> Option<(i32, i32)> {
@@ -269,6 +399,123 @@ fn real_main() -> Result<(), String> {
         Some((sx, sy))
     }
 
+    /// Convert a left-click in the world partition into the nearest ground
+    /// tile. The presenter supplies physical surface coordinates; this uses
+    /// the same authored logical grid and camera basis as the raster pass.
+    fn pointer_world_target(
+        event: &PointerEvent,
+        camera: &Camera3,
+        grid_width: u32,
+        grid_height: u32,
+    ) -> Option<Point> {
+        let (surface_width, surface_height) = event.surface_size;
+        let (gx, gy) =
+            event.grid_position(surface_width, surface_height, grid_width, grid_height)?;
+        let world_top = HUD_H as u32;
+        let world_bottom = world_top.saturating_add(camera.height.max(0) as u32);
+        if gx >= camera.width.max(0) as u32 || gy < world_top || gy >= world_bottom {
+            return None;
+        }
+
+        let (s, c) = camera.yaw.sin_cos();
+        let (sp, cp) = camera.pitch.sin_cos();
+        let fwd = Vec3::new(s * cp, sp, c * cp);
+        let right = Vec3::new(c, 0.0, -s);
+        let up = fwd.cross(right).norm();
+        let screen_x = gx as f32 + 0.5;
+        let screen_y = (gy - world_top) as f32 + 0.5;
+        let ray = Vec3::new(
+            fwd.x
+                + right.x * (screen_x - camera.width as f32 / 2.0) / camera.focal
+                + up.x * (camera.height as f32 / 2.0 - screen_y) / camera.focal,
+            fwd.y
+                + right.y * (screen_x - camera.width as f32 / 2.0) / camera.focal
+                + up.y * (camera.height as f32 / 2.0 - screen_y) / camera.focal,
+            fwd.z
+                + right.z * (screen_x - camera.width as f32 / 2.0) / camera.focal
+                + up.z * (camera.height as f32 / 2.0 - screen_y) / camera.focal,
+        )
+        .norm();
+        if ray.y.abs() < 1e-4 {
+            return None;
+        }
+        let distance = -camera.pos.y / ray.y;
+        if !distance.is_finite() || distance < 0.0 {
+            return None;
+        }
+        let hit = Vec3::new(
+            camera.pos.x + ray.x * distance,
+            0.0,
+            camera.pos.z + ray.z * distance,
+        );
+        if !hit.x.is_finite() || !hit.z.is_finite() {
+            return None;
+        }
+        Some(Point {
+            x: hit.x.round() as i16,
+            y: hit.z.round() as i16,
+        })
+    }
+
+    /// Build a bounded, collision-aware cardinal path. Cardinal steps avoid
+    /// diagonal corner cutting and keep each queued command equivalent to a
+    /// server-authoritative `Command::Move(Direction)`.
+    fn path_to_target(start: Point, target: Point) -> Option<Vec<(Direction, Point)>> {
+        if start == target {
+            return Some(Vec::new());
+        }
+        let obstacles = overworld_obstacles();
+        if is_point_obstructed(target, &obstacles).is_some() {
+            return None;
+        }
+        let directions = [
+            Direction::North,
+            Direction::South,
+            Direction::East,
+            Direction::West,
+        ];
+        let mut frontier = VecDeque::from([(start.x, start.y)]);
+        let mut parents: HashMap<(i16, i16), ((i16, i16), Direction)> = HashMap::new();
+        parents.insert((start.x, start.y), ((start.x, start.y), Direction::North));
+
+        while let Some(current) = frontier.pop_front() {
+            for direction in directions {
+                let (dx, dy) = direction.delta();
+                let next = (current.0.saturating_add(dx), current.1.saturating_add(dy));
+                if parents.contains_key(&next) {
+                    continue;
+                }
+                let point = Point {
+                    x: next.0,
+                    y: next.1,
+                };
+                if is_point_obstructed(point, &obstacles).is_some() {
+                    continue;
+                }
+                parents.insert(next, (current, direction));
+                if next == (target.x, target.y) {
+                    let mut path = Vec::new();
+                    let mut cursor = next;
+                    while cursor != (start.x, start.y) {
+                        let (previous, step) = parents[&cursor];
+                        path.push((
+                            step,
+                            Point {
+                                x: cursor.0,
+                                y: cursor.1,
+                            },
+                        ));
+                        cursor = previous;
+                    }
+                    path.reverse();
+                    return Some(path);
+                }
+                frontier.push_back(next);
+            }
+        }
+        None
+    }
+
     /// Screen-space text helpers (labels layer, partition-relative coords).
     struct LocalGame {
         sim: Simulation,
@@ -278,10 +525,10 @@ fn real_main() -> Result<(), String> {
         held: HashSet<KeyCode>,
         motion: KinematicMotion,
         pending: Vec<Command>,
-        // Camera orbit state (presentation-only; the sim is world-space).
-        cam_yaw: f32,
-        cam_pitch: f32,
-        cam_dist: f32,
+        click_path: VecDeque<(Direction, Point)>,
+        click_target: Option<Point>,
+        // Camera follow is presentation-only; orientation and scale are fixed
+        // constants, while the smoothed focus follows the local player.
         follow: Option<(f32, f32)>,
         /// Entity render positions smoothed toward snapshot positions.
         smoothed: HashMap<u64, (f32, f32)>,
@@ -300,14 +547,27 @@ fn real_main() -> Result<(), String> {
         /// Stashed during the last `scene_at_size`: meshes + camera for the
         /// presenter's GPU raster pass (consumed by `SceneSource::gpu_world`).
         pending_world: Option<GpuWorld>,
+        /// Presentation-only weather mode. It changes foliage/rain geometry,
+        /// never the authoritative simulation or collision map.
+        weather: Weather,
+        /// Last logical world view used for click-to-ground projection.
+        last_camera: Option<Camera3>,
+        last_grid: (u32, u32),
     }
 
     impl LocalGame {
         fn new() -> Self {
-            Self::with_gpu3d(!std::env::args().any(|arg| arg == "--cpu"))
+            Self::with_gpu3d_and_weather(
+                !std::env::args().any(|arg| arg == "--cpu"),
+                weather_from_args(),
+            )
         }
 
         fn with_gpu3d(gpu3d: bool) -> Self {
+            Self::with_gpu3d_and_weather(gpu3d, Weather::Rain)
+        }
+
+        fn with_gpu3d_and_weather(gpu3d: bool, weather: Weather) -> Self {
             let mut sim = Simulation::demo();
             sim.connect_player(PLAYER_ID);
             Self {
@@ -318,9 +578,8 @@ fn real_main() -> Result<(), String> {
                 held: HashSet::new(),
                 motion: KinematicMotion::default(),
                 pending: Vec::new(),
-                cam_yaw: std::f32::consts::PI, // start looking north
-                cam_pitch: CAM_PITCH,
-                cam_dist: CAM_DIST,
+                click_path: VecDeque::new(),
+                click_target: None,
                 follow: None,
                 smoothed: HashMap::new(),
                 combat_fx: Vec::new(),
@@ -333,11 +592,29 @@ fn real_main() -> Result<(), String> {
                 attack_queued: false,
                 gpu3d,
                 pending_world: None,
+                weather,
+                last_camera: None,
+                last_grid: (GRID_W, GRID_H),
             }
         }
 
         fn tick_once(&mut self) {
             self.client_tick = self.client_tick.saturating_add(1);
+            if self.movement_axes().0.abs() < 0.01 && self.movement_axes().1.abs() < 0.01 {
+                if let Some((direction, _step)) = self.click_path.pop_front() {
+                    self.facing_target = match direction {
+                        Direction::North => 0.0,
+                        Direction::South => std::f32::consts::PI,
+                        Direction::East => std::f32::consts::FRAC_PI_2,
+                        Direction::West => -std::f32::consts::FRAC_PI_2,
+                        Direction::NorthEast => std::f32::consts::FRAC_PI_4,
+                        Direction::NorthWest => -std::f32::consts::FRAC_PI_4,
+                        Direction::SouthEast => 3.0 * std::f32::consts::FRAC_PI_4,
+                        Direction::SouthWest => -3.0 * std::f32::consts::FRAC_PI_4,
+                    };
+                    self.pending.push(Command::Move(direction));
+                }
+            }
             let mut commands = Vec::new();
             for command in self.pending.drain(..) {
                 commands.push((PLAYER_ID, ClientCommand::new(self.client_tick, command)));
@@ -345,8 +622,10 @@ fn real_main() -> Result<(), String> {
             self.sim.advance_tick_with(commands);
         }
 
-        /// WASD/arrows held (screen axes): dx east-ish, dy south-ish.
-        fn held_axes(&self) -> (f32, f32) {
+        /// WASD/arrows held as fixed world axes: W/North, S/South, A/West,
+        /// D/East. The motion model snaps the result to the eight protocol
+        /// directions before sending an intent to the server.
+        fn movement_axes(&self) -> (f32, f32) {
             let north = self.held.contains(&KeyCode::KeyW) || self.held.contains(&KeyCode::ArrowUp);
             let south =
                 self.held.contains(&KeyCode::KeyS) || self.held.contains(&KeyCode::ArrowDown);
@@ -359,26 +638,12 @@ fn real_main() -> Result<(), String> {
             (f32::from(dx), f32::from(dy))
         }
 
-        /// Camera-relative input: screen-up walks the camera forward, snapped
-        /// by the motion model to the 8 compass steps (same loop as the TUI's
-        /// orbit mode, fed through `camera_axes` before `update`).
-        fn camera_axes(&self) -> (f32, f32) {
-            let (screen_dx, screen_dy) = self.held_axes();
-            if screen_dx == 0.0 && screen_dy == 0.0 {
-                return (0.0, 0.0);
-            }
-            let (fwd, right) = ground_frame(self.cam_yaw);
-            let world_dx = fwd.0 * -screen_dy + right.0 * screen_dx;
-            let world_dy = fwd.1 * -screen_dy + right.1 * screen_dx;
-            (world_dx, world_dy)
-        }
-
         /// Advance sim ticks + local motion for the elapsed frame time. Owns the
         /// `last_t` bookkeeping; callers reuse the returned `dt` for smoothing.
         fn advance(&mut self, t: f32) -> (f32, WorldSnapshot) {
             let dt = (t - self.last_t).max(0.0);
             self.last_t = t;
-            let input = self.camera_axes();
+            let input = self.movement_axes();
             let input_len = input.0.hypot(input.1);
             if input_len > 0.01 {
                 self.facing_target = f32::atan2(input.0, input.1);
@@ -399,7 +664,7 @@ fn real_main() -> Result<(), String> {
             }
             let speed = self.motion.velocity().0.hypot(self.motion.velocity().1);
             let phase_dt = dt.clamp(0.0, 0.1);
-            if input_len > 0.01 || speed > 0.12 {
+            if input_len > 0.01 || speed > 0.12 || self.click_target.is_some() {
                 // Faster motion produces a quicker, but still bounded, stride.
                 self.gait_phase = (self.gait_phase + phase_dt * (5.5 + speed * 2.2))
                     .rem_euclid(std::f32::consts::TAU);
@@ -421,6 +686,9 @@ fn real_main() -> Result<(), String> {
                 self.tick_once();
             }
             let snapshot = self.sim.snapshot_for(PLAYER_ID);
+            if self.click_target == Some(snapshot.player.position) && self.click_path.is_empty() {
+                self.click_target = None;
+            }
             self.observe_combat_fx(&snapshot, t);
             (dt, snapshot)
         }
@@ -447,10 +715,10 @@ fn real_main() -> Result<(), String> {
             *entry
         }
 
-        /// Orbit camera for this frame: pan-glides toward the smoothed
-        /// player anchor and looks down along the drag-yaw/pitch. The raster
-        /// camera has no look-at, so pose = place the eye at `aim − fwd·d`
-        /// (the forward ray then passes exactly through the anchor).
+        /// Fixed oblique camera for this frame: pan-glides toward the smoothed
+        /// player anchor and looks down along the constant yaw/pitch. The
+        /// raster camera has no look-at, so pose = place the eye at
+        /// `aim − fwd·d` (the forward ray then passes exactly through anchor).
         fn camera3(&mut self, w: i32, world_h: i32, dt: f32, snapshot: &WorldSnapshot) -> Camera3 {
             let id = snapshot.player.id;
             let target = *self.smoothed.get(&id).unwrap_or(&(
@@ -469,29 +737,27 @@ fn real_main() -> Result<(), String> {
                 }
             };
             self.follow = Some(next);
-            let (sp, cp) = self.cam_pitch.sin_cos();
-            let (sy, cy) = self.cam_yaw.sin_cos();
+            let (sp, cp) = CAM_PITCH.sin_cos();
+            let (sy, cy) = CAM_YAW.sin_cos();
             let fwd = Vec3::new(sy * cp, sp, cy * cp);
             let aim = Vec3::new(next.0, 1.6, next.1); // hips anchor
             let eye = Vec3::new(
-                aim.x - fwd.x * self.cam_dist,
-                aim.y - fwd.y * self.cam_dist,
-                aim.z - fwd.z * self.cam_dist,
+                aim.x - fwd.x * CAM_DIST,
+                aim.y - fwd.y * CAM_DIST,
+                aim.z - fwd.z * CAM_DIST,
             );
-            // Preserve gameplay scale across resizes: a wider/taller window
-            // should reveal more context without shrinking the controlled
-            // character into a few cells.
+            // Preserve gameplay scale across resizes: fullscreen often adds
+            // far more rows than the 160x56 window preset. Using the smaller
+            // scale here made the camera reveal extra vertical world while
+            // keeping the actor at the old size, which turned fullscreen into
+            // sparse horizontal terrain bands with unreadable silhouettes.
+            // Match the largest axis so the controlled character keeps its
+            // readable cell height; the larger frustum is intentional only
+            // when the surface itself is genuinely larger in both axes.
             let width_scale = w as f32 / GRID_W as f32;
             let height_scale = world_h as f32 / (GRID_H as i32 - HUD_H - LOG_H) as f32;
-            let focal_scale = width_scale.min(height_scale).clamp(0.82, 1.28);
-            Camera3::new(
-                eye,
-                self.cam_yaw,
-                self.cam_pitch,
-                CAM_FOCAL * focal_scale,
-                w,
-                world_h,
-            )
+            let focal_scale = width_scale.max(height_scale).clamp(0.82, 2.25);
+            Camera3::new(eye, CAM_YAW, CAM_PITCH, CAM_FOCAL * focal_scale, w, world_h)
         }
 
         /// Presentation-side combat FX: watch the sim's message log the
@@ -539,15 +805,35 @@ fn real_main() -> Result<(), String> {
                 ),
                 dt,
             );
+            // The same smoothed focus the camera aims at, so coverage and
+            // frustum always agree on "here".
+            let focus = player;
+            // Camera-following coverage anchors. The lattices below slide
+            // with the player but stay locked to the world's even grid, so
+            // every decal keeps one permanent world position (hash inputs
+            // are absolute coordinates). The z margin covers the fullscreen
+            // fog-limited ground span (~40 units at the fixed pull-back) with headroom;
+            // the x margin covers the horizontal frustum at ink-visible depths.
+            // Beyond the fog radius the fill renders pure void regardless,
+            // so wider margins would only burn triangles.
+            let focus_x = focus.0.round() as i32;
+            let focus_z = focus.1.round() as i32;
+            let even = |v: i32| v.div_euclid(2) * 2;
+            let zone_x0 = even(focus_x);
+            let zone_z0 = even(focus_z);
+            const COVERAGE_DZ: i32 = 46;
+            const COVERAGE_DX: i32 = 34;
+            let weather = weather_profile(self.weather, t);
 
             // The world has no coloured floor, skybox, fog card, or terrain
             // fill. Selective decals and small solids describe the path,
             // shoreline, grass, and stones; every other viewport cell is the
             // presenter's exact black clear colour.
-            for z in -30..=30 {
+            for z in (zone_z0 - COVERAGE_DZ)..=(zone_z0 + COVERAGE_DZ) {
                 if z % 2 != 0 {
                     continue;
                 }
+
                 let skip = scene_hash(z, z + 17) % 5 == 0;
                 if !skip {
                     for side in [-1.0f32, 1.0] {
@@ -583,14 +869,17 @@ fn real_main() -> Result<(), String> {
                 }
             }
             // A deterministic terrain weave keeps the meadow legible at
-            // wide zoom without reverting to a solid floor. The repeated
+            // wide fullscreen surface without reverting to a solid floor. The repeated
             // 2-cell motif alternates direction by row, skips the highway
             // corridor, and leaves generous black negative space between
-            // ink marks.
-            for gz in (-28i32..=30).step_by(2) {
-                let row = (gz + 28) / 2;
-                for gx in (-24i32..=24).step_by(2) {
-                    let column = (gx + 24) / 2;
+            // ink marks. The lattice spans the camera-following coverage
+            // box: world-locked (absolute gx/gz hash + absolute row/column
+            // motif indices), so walking or camera-following never re-shuffles the
+            // pattern underfoot.
+            for gz in (zone_z0 - COVERAGE_DZ..=(zone_z0 + COVERAGE_DZ)).step_by(2) {
+                let row = gz.div_euclid(2);
+                for gx in (zone_x0 - COVERAGE_DX..=(zone_x0 + COVERAGE_DX)).step_by(2) {
+                    let column = gx.div_euclid(2);
                     let motif = (column + row * 3).rem_euclid(7);
                     if motif > 1 || (gx.abs() <= 4 && row % 3 != 0) {
                         continue;
@@ -617,7 +906,7 @@ fn real_main() -> Result<(), String> {
             for row in 0..8 {
                 let z = 36.0 + row as f32 * 2.8;
                 let color = if row < 2 { WORLD.sand } else { WORLD.water };
-                for segment in -7..=7 {
+                for segment in -14..=14 {
                     if scene_hash(segment, row + 40) % 3 == 0 {
                         continue;
                     }
@@ -631,37 +920,108 @@ fn real_main() -> Result<(), String> {
                 }
             }
             // Sparse grass tufts are intentional detail, not a per-cell
-            // carpet. Hashing keeps their positions stable while the player
-            // moves and preserves a quiet black surround.
-            for i in 0..72i32 {
-                let x = (scene_hash(i, 91) % 28) as f32 - 14.0;
-                let z = (scene_hash(i, 137) % 34) as f32 - 17.0;
-                if x.abs() < 4.4 || z.abs() > 29.0 {
-                    continue;
-                }
-                meshes.push(Mesh::decal_y(
-                    Vec3::new(x, 0.022, z),
-                    if scene_hash(i, 211) & 1 == 0 {
+            // carpet. They live on a world-locked coarse lattice that
+            // scrolls with the coverage anchors (hash inputs are absolute
+            // coordinates), so positions stay stable while the player
+            // moves and the black surround stays quiet. Unlike the older
+            // ground-only decals, each tuft has a grounded blade whose tip
+            // leans with the current weather gust.
+            for gz in (zone_z0 - COVERAGE_DZ..=(zone_z0 + COVERAGE_DZ)).step_by(4) {
+                for gx in (zone_x0 - COVERAGE_DX..=(zone_x0 + COVERAGE_DX)).step_by(4) {
+                    if scene_hash(gx, gz + 91) % 2 != 0 {
+                        continue;
+                    }
+                    let x = gx as f32 + (scene_hash(gx, gz) % 3) as f32 * 0.33;
+                    let z = gz as f32 + (scene_hash(gx, gz + 3) % 3) as f32 * 0.9;
+                    if x.abs() < 4.4 {
+                        continue;
+                    }
+                    let phase = hash01(scene_hash(gx + 17, gz - 23)) * std::f32::consts::TAU
+                        + x * 0.37
+                        + z * 0.19;
+                    let sway = (t * weather.grass_speed + phase).sin();
+                    let cross = (t * weather.grass_speed * 0.71 + phase * 1.7).cos();
+                    let tip_offset = Vec3::new(
+                        sway * weather.grass_amplitude,
+                        0.0,
+                        cross * weather.grass_amplitude * 0.38,
+                    );
+                    let height =
+                        0.26 + (scene_hash(gx, gz + 401) % 5) as f32 * 0.045 + sway.abs() * 0.035;
+                    let yaw = if scene_hash(gx, gz + 211) & 1 == 0 {
                         0.18
                     } else {
                         -0.18
-                    },
-                    0.24,
-                    0.045,
-                    WORLD.grass,
-                ));
-                if scene_hash(i, 313) & 1 == 0 {
-                    meshes.push(Mesh::decal_y(
-                        Vec3::new(x + 0.08, 0.024, z + 0.05),
-                        if scene_hash(i, 317) & 1 == 0 {
-                            0.72
-                        } else {
-                            -0.72
-                        },
-                        0.18,
-                        0.035,
-                        WORLD.foliage_moon,
+                    };
+                    meshes.push(Mesh::blade_y(
+                        Vec3::new(x, 0.022, z),
+                        height,
+                        0.055,
+                        tip_offset,
+                        yaw,
+                        WORLD.grass,
                     ));
+                    meshes.push(Mesh::decal_y(
+                        Vec3::new(x, 0.022, z),
+                        yaw,
+                        0.24,
+                        0.045,
+                        WORLD.grass,
+                    ));
+                    if scene_hash(gx, gz + 313) & 1 == 0 {
+                        meshes.push(Mesh::decal_y(
+                            Vec3::new(x + 0.08, 0.024, z + 0.05),
+                            if scene_hash(gx, gz + 317) & 1 == 0 {
+                                0.72
+                            } else {
+                                -0.72
+                            },
+                            0.18,
+                            0.035,
+                            WORLD.foliage_moon,
+                        ));
+                    }
+                }
+            }
+
+            // Directional rain is a presentation-only field. World-locked
+            // seeds keep drops stable as the camera follows, while the
+            // fractional fall phase and wind drift move each streak smoothly
+            // through depth instead of replacing one terminal slash with
+            // another. Storms increase density, fall speed, and lean.
+            if weather.rain_density > 0 {
+                for rz in (zone_z0 - COVERAGE_DZ..=(zone_z0 + COVERAGE_DZ)).step_by(4) {
+                    for rx in (zone_x0 - COVERAGE_DX..=(zone_x0 + COVERAGE_DX)).step_by(4) {
+                        if scene_hash(rx, rz + 701) % 100 >= weather.rain_density {
+                            continue;
+                        }
+                        let seed = scene_hash(rx + 31, rz - 47);
+                        let phase = hash01(seed);
+                        let depth = (seed % 100) as f32 / 99.0;
+                        let fall = (t * weather.rain_speed + phase).fract();
+                        let base_x = rx as f32 + (scene_hash(rx, rz + 703) % 17) as f32 * 0.11;
+                        let base_z = rz as f32 + (scene_hash(rx, rz + 709) % 17) as f32 * 0.11;
+                        let top_y = 5.0 + depth * 2.6;
+                        let y = top_y - fall * 7.0;
+                        if y < -0.8 || y > 7.8 {
+                            continue;
+                        }
+                        let drift = fall * 1.4;
+                        let start = Vec3::new(
+                            base_x + weather.wind_x * drift,
+                            y,
+                            base_z + weather.wind_z * drift,
+                        );
+                        let length = 0.58 + depth * 0.42;
+                        let end = start
+                            + Vec3::new(weather.wind_x * 0.30, -length, weather.wind_z * 0.30);
+                        meshes.push(Mesh::streak(
+                            start,
+                            end,
+                            0.018 + depth * 0.012,
+                            weather.rain_color,
+                        ));
+                    }
                 }
             }
 
@@ -725,27 +1085,50 @@ fn real_main() -> Result<(), String> {
                 }
             }
 
-            // Torches are visible glyph geometry and their light is applied to
-            // nearby visible faces in the raster pass. There is deliberately
-            // no circular pool mesh underneath them.
-            for (tx, tz) in [(-7.5, -3.5), (8.5, 4.0), (-4.5, 1.5)] {
+            // Torches are visible glyph geometry and their synchronized point
+            // lights are applied to nearby visible faces in the raster pass.
+            // Crackles are short-lived world sparks: warm, directional and
+            // fully deterministic, with no circular pool mesh underneath.
+            for (i, (tx, tz)) in torch_spots().into_iter().enumerate() {
+                let pulse = torch_pulse(t, i);
+                let flame = WORLD.fire.lerp(WORLD.ember, pulse.light_gain * 0.42);
                 meshes.push(Mesh::boxed(
                     Vec3::new(tx, 0.95, tz),
                     Vec3::new(0.16, 1.9, 0.16),
                     WORLD.bark,
                 ));
                 meshes.push(Mesh::boxed(
-                    Vec3::new(tx, 1.88, tz),
-                    Vec3::new(0.34, 0.22, 0.34),
-                    WORLD.ember,
+                    Vec3::new(tx + pulse.offset.0, 1.88, tz + pulse.offset.1),
+                    Vec3::new(
+                        0.34 * pulse.flame_scale,
+                        0.22 * pulse.flame_scale,
+                        0.34 * pulse.flame_scale,
+                    ),
+                    flame,
                 ));
                 meshes.push(Mesh::cone(
-                    Vec3::new(tx, 1.92, tz),
-                    0.28,
-                    0.62,
+                    Vec3::new(tx + pulse.offset.0, 1.92, tz + pulse.offset.1),
+                    0.28 * pulse.flame_scale,
+                    0.62 * pulse.flame_scale,
                     7,
-                    WORLD.fire,
+                    flame,
                 ));
+                for crackle_index in 0..TORCH_CRACKLE_COUNT {
+                    let Some((position, color, fade)) = torch_crackle(
+                        t,
+                        i,
+                        crackle_index,
+                        (tx + pulse.offset.0, tz + pulse.offset.1),
+                    ) else {
+                        continue;
+                    };
+                    let size = 0.07 + 0.045 * fade;
+                    meshes.push(Mesh::boxed(
+                        position,
+                        Vec3::new(size, size * 1.35, size),
+                        color,
+                    ));
+                }
             }
 
             // One ancient stone gate gives the forest a memorable destination
@@ -951,6 +1334,40 @@ fn real_main() -> Result<(), String> {
                 }
             }
 
+            // Point-and-click destination and a short, quiet path preview.
+            // These are ground decals, so they share the same depth ordering
+            // as terrain and never become a screen-fixed UI element.
+            for (index, (_direction, point)) in self.click_path.iter().take(12).enumerate() {
+                let tint = if index % 2 == 0 {
+                    WORLD.path_edge
+                } else {
+                    mix(WORLD.path_edge, TARGET_ORANGE, 0.45)
+                };
+                meshes.push(Mesh::decal_y(
+                    Vec3::new(point.x as f32, 0.042, point.y as f32),
+                    0.0,
+                    0.18,
+                    0.055,
+                    tint,
+                ));
+            }
+            if let Some(destination) = self.click_target {
+                for i in 0..8 {
+                    let angle = i as f32 * std::f32::consts::TAU / 8.0;
+                    meshes.push(Mesh::decal_y(
+                        Vec3::new(
+                            destination.x as f32 + angle.sin() * 0.72,
+                            0.048,
+                            destination.y as f32 + angle.cos() * 0.72,
+                        ),
+                        angle + std::f32::consts::FRAC_PI_2,
+                        0.18,
+                        0.08,
+                        TARGET_ORANGE,
+                    ));
+                }
+            }
+
             // Combat FX: telegraph decal ring → core/ring burst → embers,
             // the mesh re-expression of the TUI's FX packs.
             for fx in &self.combat_fx {
@@ -1059,17 +1476,37 @@ fn real_main() -> Result<(), String> {
                 dt,
             );
             let camera = self.camera3(w, world_h, dt, &snapshot);
+            self.last_camera = Some(camera);
+            self.last_grid = (width, height);
             let mut scene = Scene::default();
 
             // ---- HUD band ----
             let mut hud = Layer::new("hud", 0);
             hud.fill_rect(0, 0, w, HUD_H, Cell::new(' ', HUD_TEXT, PANEL_BG));
             hud.border_rect(0, 0, w, HUD_H, PANEL_EDGE, PANEL_BG);
-            hud.push_text(2, 5, "MOONLIT WILDERNESS  |  SAFE PATH", HUD_DIM, PANEL_BG);
-            hud.push_text(
+            let hud_text_x = 18.min((w - 2).max(1));
+            let hud_text_width = (w - hud_text_x - 1).max(0);
+            hud.push_text_clipped_bold(
+                hud_text_x,
+                0,
+                hud_text_width,
+                "WHISPERING FOREST",
+                DIGIT_GOLD,
+                PANEL_BG,
+            );
+            let status = format!(
+                "{}   HP {}/{}   TICK {}",
+                scene_zone(&snapshot),
+                snapshot.player.stats.hp,
+                snapshot.player.stats.max_hp,
+                snapshot.tick
+            );
+            hud.push_text_clipped(hud_text_x, 1, hud_text_width, &status, HUD_TEXT, PANEL_BG);
+            hud.push_text_clipped(
                 2,
                 3,
-                "WASD Move   F Attack   1-3 Cast   I Inventory   R Rest   RMB Orbit   Wheel Zoom   Q Quit",
+                (w - 4).max(0),
+                "WASD / Left-click Move   F Attack   1-3 Cast   I Inventory   R Rest   F11 Fullscreen   Q Quit",
                 HUD_DIM,
                 PANEL_BG,
             );
@@ -1089,28 +1526,30 @@ fn real_main() -> Result<(), String> {
             );
             let hud_idx = scene.layers.len();
             scene.layers.push(hud);
-            scene.overlay_text.push(TextRun {
-                x: 15.0,
-                y: 0.35,
-                text: "WHISPERING FOREST".into(),
-                size: 1.35,
-                fg: [0.92, 0.84, 0.58],
-                bg: [0.02, 0.03, 0.06],
-            });
-            scene.overlay_text.push(TextRun {
-                x: 15.0,
-                y: 1.8,
-                text: format!(
-                    "{}   HP {}/{}   TICK {}",
-                    scene_zone(&snapshot),
-                    snapshot.player.stats.hp,
-                    snapshot.player.stats.max_hp,
-                    snapshot.tick
-                ),
-                size: 1.0,
-                fg: [0.82, 0.90, 0.98],
-                bg: [0.02, 0.03, 0.06],
-            });
+
+            // Emit into the engine light buffer at the exact projected flame
+            // anchor. This layer is below the 3D world, so its blank source
+            // cell never occludes terrain; `compose::apply_glow` washes the
+            // torch colour over existing world glyphs for the soft reference
+            // halo instead of painting a flat screen-space circle.
+            let mut torch_glow = Layer::new("torch-glow", -1);
+            for (i, (tx, tz)) in torch_spots().into_iter().enumerate() {
+                let pulse = torch_pulse(t, i);
+                if let Some((sx, sy)) = project(
+                    Vec3::new(tx + pulse.offset.0, 1.92, tz + pulse.offset.1),
+                    &camera,
+                ) {
+                    let glow_color = WORLD.fire.lerp(WORLD.ember, 0.30);
+                    torch_glow.push(AnimCell::still(
+                        sx,
+                        sy,
+                        Cell::new(' ', glow_color, Rgb::new(0, 0, 0))
+                            .with_glow(0.82 * pulse.light_gain),
+                    ));
+                }
+            }
+            let torch_glow_idx = scene.layers.len();
+            scene.layers.push(torch_glow);
 
             // ---- World partition: one raster pass + screen labels ----
             //
@@ -1128,11 +1567,27 @@ fn real_main() -> Result<(), String> {
                 moon_tint: Rgb::new(178, 198, 238),
                 moonlight_strength: 0.22,
             };
-            let mut lights = vec![
-                PointLight::new(Vec3::new(-7.5, 1.8, -3.5), WORLD.fire, 5.0, 1.15),
-                PointLight::new(Vec3::new(8.5, 1.8, 4.0), WORLD.fire, 5.0, 1.15),
-                PointLight::new(Vec3::new(-4.5, 1.8, 1.5), WORLD.fire, 4.5, 1.0),
-            ];
+            let mut lights = Vec::with_capacity(3 + 3 * TORCH_CRACKLE_COUNT + self.combat_fx.len());
+            for (i, (tx, tz)) in torch_spots().into_iter().enumerate() {
+                let pulse = torch_pulse(t, i);
+                lights.push(PointLight::new(
+                    Vec3::new(tx + pulse.offset.0, 1.8, tz + pulse.offset.1),
+                    WORLD.fire.lerp(WORLD.ember, 0.28),
+                    5.0 * pulse.radius_scale,
+                    1.15 * pulse.light_gain,
+                ));
+                for crackle_index in 0..TORCH_CRACKLE_COUNT {
+                    let Some((position, color, fade)) = torch_crackle(
+                        t,
+                        i,
+                        crackle_index,
+                        (tx + pulse.offset.0, tz + pulse.offset.1),
+                    ) else {
+                        continue;
+                    };
+                    lights.push(PointLight::new(position, color, 0.95 * fade, 0.34 * fade));
+                }
+            }
             for fx in &self.combat_fx {
                 let age = t - fx.born_s;
                 if age >= 0.0 && age < fx.telegraph_s + bridge::FX_BURST_S {
@@ -1154,6 +1609,7 @@ fn real_main() -> Result<(), String> {
                     camera,
                     sun,
                     opts,
+                    lights: lights.clone(),
                     z: 0,
                     layer_slot: terrain_idx,
                 });
@@ -1194,11 +1650,12 @@ fn real_main() -> Result<(), String> {
                         _ => Rgb::new(255, 230, 220),
                     };
                     let name = format!(" {} ", entity.name);
-                    let name_x = sx - name.chars().count() as i32 / 2;
+                    let name_width = cell_text_width(&name) as i32;
+                    let name_x = sx - name_width / 2;
                     labels.fill_rect(
                         name_x - 1,
                         sy - 1,
-                        name.chars().count() as i32 + 2,
+                        name_width + 2,
                         3,
                         Cell::new(' ', fg, LABEL_BG),
                     );
@@ -1210,7 +1667,7 @@ fn real_main() -> Result<(), String> {
                     let mini = format!("{}{}", "█".repeat(lit), "░".repeat(8 - lit));
                     let row = format!("{} {} ", mini, entity.stats.hp.max(0));
                     labels.push_text(
-                        sx - row.chars().count() as i32 / 2,
+                        sx - cell_text_width(&row) as i32 / 2,
                         sy + 1,
                         &row,
                         HP_FILL,
@@ -1232,7 +1689,7 @@ fn real_main() -> Result<(), String> {
                 if let Some((sx, sy)) = project(Vec3::new(fx.origin.0, lift, fx.origin.1), &camera)
                 {
                     labels.push_text_bold(
-                        sx - fx.digits.chars().count() as i32 / 2,
+                        sx - cell_text_width(&fx.digits) as i32 / 2,
                         sy,
                         &fx.digits,
                         DIGIT_GOLD,
@@ -1254,8 +1711,7 @@ fn real_main() -> Result<(), String> {
                 .take((LOG_H - 1) as usize)
                 .enumerate()
             {
-                let shown: String = message.chars().take((w - 4) as usize).collect();
-                log.push_text(2, 1 + i as i32, &shown, HUD_DIM, PANEL_BG);
+                log.push_text_clipped(2, 1 + i as i32, (w - 4).max(0), message, HUD_DIM, PANEL_BG);
             }
             let log_idx = scene.layers.len();
             scene.layers.push(log);
@@ -1269,7 +1725,7 @@ fn real_main() -> Result<(), String> {
                 HUD_H,
                 w,
                 world_h,
-                vec![terrain_idx, labels_idx],
+                vec![torch_glow_idx, terrain_idx, labels_idx],
                 true,
             ));
             scene.partitions.push(Partition::new(
@@ -1324,9 +1780,10 @@ fn real_main() -> Result<(), String> {
                 modal.push_text(mw / 2 + 4, 4, " /  Rusted Sword", HUD_TEXT, PANEL_BG);
                 modal.push_text(mw / 2 + 4, 5, " O  Forest Shield", HUD_TEXT, PANEL_BG);
                 modal.push_text(mw / 2 + 4, 6, " *  Moss Charm", HUD_TEXT, PANEL_BG);
-                modal.push_text(
+                modal.push_text_clipped(
                     4,
                     mh - 3,
+                    (mw - 8).max(0),
                     "Fixture inventory (matches the terminal's TUI modal); data-driven gear is a later slice.",
                     HUD_DIM,
                     PANEL_BG,
@@ -1385,6 +1842,8 @@ fn real_main() -> Result<(), String> {
                 | KeyCode::ArrowLeft
                 | KeyCode::ArrowRight => {
                     if pressed {
+                        self.click_path.clear();
+                        self.click_target = None;
                         self.held.insert(code);
                     } else {
                         self.held.remove(&code);
@@ -1395,17 +1854,29 @@ fn real_main() -> Result<(), String> {
         }
 
         fn pointer(&mut self, event: PointerEvent) {
-            // Right-drag orbits; drag-y tilts between a low sweep and a high
-            // top-down. Wheel dollies the orbit distance (OSRS-zoom feel).
-            if event.held[1] {
-                self.cam_yaw += event.delta.0 * 0.006;
-                self.cam_pitch =
-                    (self.cam_pitch + event.delta.1 * 0.003).clamp(CAM_PITCH_MIN, CAM_PITCH_MAX);
+            if self.inv_open || !event.pressed[0] {
+                return;
             }
-            if event.wheel != 0.0 {
-                let factor = if event.wheel > 0.0 { 0.92 } else { 1.08 };
-                self.cam_dist = (self.cam_dist * factor).clamp(CAM_DIST_MIN, CAM_DIST_MAX);
-            }
+            let Some(camera) = self.last_camera else {
+                return;
+            };
+            let Some(target) =
+                pointer_world_target(&event, &camera, self.last_grid.0, self.last_grid.1)
+            else {
+                return;
+            };
+            let start = self.sim.snapshot_for(PLAYER_ID).player.position;
+            let Some(path) = path_to_target(start, target) else {
+                self.click_path.clear();
+                self.click_target = None;
+                return;
+            };
+            self.click_path = path.into_iter().collect();
+            self.click_target = if self.click_path.is_empty() {
+                None
+            } else {
+                Some(target)
+            };
         }
     }
 
@@ -1451,14 +1922,148 @@ fn real_main() -> Result<(), String> {
                 scene.partitions.len()
             ));
         }
-        if scene.overlay_text.len() < 2 {
-            return Err("check: readable title/status overlays missing".into());
+        let hud = scene
+            .layer("hud")
+            .and_then(|i| scene.layers.get(i))
+            .ok_or("check: HUD layer missing")?;
+        if !hud.cells.iter().any(|cell| cell.cell.glyph == 'W')
+            || !hud.cells.iter().any(|cell| cell.cell.glyph == 'H')
+            || !hud.cells.iter().any(|cell| cell.cell.glyph == 'Q')
+        {
+            return Err("check: cell-aligned HUD title/status/help text missing".into());
+        }
+        if !scene.overlay_text.is_empty() {
+            return Err("check: play HUD still relies on fractional overlay text".into());
+        }
+        let torch_glow = scene
+            .layer("torch-glow")
+            .and_then(|i| scene.layers.get(i))
+            .ok_or("check: torch glow layer missing")?;
+        if !torch_glow
+            .cells
+            .iter()
+            .any(|cell| cell.cell.glow.is_finite() && cell.cell.glow > 0.0)
+        {
+            return Err("check: torch glow layer emitted no light-buffer sources".into());
+        }
+        let composed = compose(&scene, &Camera::default(), 0.06);
+        let mut tinted_world_cells = 0usize;
+        for cell in &terrain.cells {
+            let Some(resolved) = composed.get(cell.x, cell.y) else {
+                continue;
+            };
+            if resolved.glyph != cell.cell.glyph {
+                continue;
+            }
+            let delta = resolved
+                .fg
+                .r
+                .abs_diff(cell.cell.fg.r)
+                .max(resolved.fg.g.abs_diff(cell.cell.fg.g))
+                .max(resolved.fg.b.abs_diff(cell.cell.fg.b));
+            if delta > 0 {
+                tinted_world_cells += 1;
+            }
+        }
+        if tinted_world_cells == 0 {
+            return Err("check: composed torch glow warmed no world ink".into());
         }
 
-        // Movement path: default camera looks north, so screen-right (D)
-        // walks the world-west step that the raster projects back screen-
-        // right — the input is basis-relative end to end. (CPU raster, as
-        // above: headless check.)
+        // Fixed-control path: D always sends the world-east intent regardless
+        // of presentation input, and the fixed camera never exposes a pointer
+        // mutation. (CPU raster, as above: headless check.)
+        let mut camera_game = LocalGame::with_gpu3d(true);
+        camera_game.pointer(PointerEvent {
+            position: Some((640.0, 320.0)),
+            surface_size: (1280, 640),
+            held: [false, true],
+            pressed: [false, false],
+            released: [false, false],
+            delta: (480.0, -180.0),
+            wheel: 6.0,
+        });
+        camera_game.scene_at(0.0);
+        let first_camera = camera_game
+            .pending_world
+            .as_ref()
+            .map(|world| world.camera)
+            .ok_or("check: fixed camera world missing")?;
+        camera_game.scene_at(0.05);
+        let second_camera = camera_game
+            .pending_world
+            .as_ref()
+            .map(|world| world.camera)
+            .ok_or("check: fixed camera world missing after pointer input")?;
+        if (first_camera.yaw - CAM_YAW).abs() > 1e-6
+            || (first_camera.pitch - CAM_PITCH).abs() > 1e-6
+            || (first_camera.focal - CAM_FOCAL).abs() > 1e-6
+            || (second_camera.pos.x - first_camera.pos.x).abs() > 1e-6
+            || (second_camera.pos.y - first_camera.pos.y).abs() > 1e-6
+            || (second_camera.pos.z - first_camera.pos.z).abs() > 1e-6
+            || (second_camera.yaw - first_camera.yaw).abs() > 1e-6
+            || (second_camera.pitch - first_camera.pitch).abs() > 1e-6
+            || (second_camera.focal - first_camera.focal).abs() > 1e-6
+        {
+            return Err("check: pointer input changed the fixed camera".into());
+        }
+
+        let click_path = path_to_target(Point { x: 2, y: 2 }, Point { x: 5, y: 2 })
+            .ok_or("check: ground click produced no walkable path")?;
+        if click_path.last().map(|(_, point)| *point) != Some(Point { x: 5, y: 2 }) {
+            return Err("check: click path did not end at its ground target".into());
+        }
+        if path_to_target(Point { x: 2, y: 2 }, Point { x: -8, y: -5 }).is_some() {
+            return Err("check: click path accepted an obstructed ground tile".into());
+        }
+
+        let mut torch_game = LocalGame::with_gpu3d(true);
+        let mut crackle_frame_found = false;
+        for frame in 0..32 {
+            torch_game.scene_at(frame as f32 * 0.05);
+            let world = torch_game
+                .pending_world
+                .as_ref()
+                .ok_or("check: torch GPU world missing")?;
+            if world.lights.len() > 3 {
+                crackle_frame_found = true;
+                break;
+            }
+        }
+        if !crackle_frame_found {
+            return Err("check: torch crackle lights never became active".into());
+        }
+
+        let clear_profile = weather_profile(Weather::Clear, 0.75);
+        let rain_profile = weather_profile(Weather::Rain, 0.75);
+        let storm_profile = weather_profile(Weather::Storm, 0.75);
+        if clear_profile.rain_density != 0
+            || storm_profile.rain_density <= rain_profile.rain_density
+            || storm_profile.grass_amplitude <= rain_profile.grass_amplitude
+        {
+            return Err("check: weather profiles do not increase storm motion/density".into());
+        }
+        let mut clear_game = LocalGame::with_gpu3d_and_weather(true, Weather::Clear);
+        clear_game.scene_at(0.75);
+        let clear_meshes = clear_game
+            .pending_world
+            .as_ref()
+            .ok_or("check: clear-weather GPU world missing")?
+            .meshes
+            .len();
+        let mut storm_game = LocalGame::with_gpu3d_and_weather(true, Weather::Storm);
+        storm_game.scene_at(0.75);
+        let storm_meshes = storm_game
+            .pending_world
+            .as_ref()
+            .ok_or("check: storm-weather GPU world missing")?
+            .meshes
+            .len();
+        if storm_meshes <= clear_meshes {
+            return Err(format!(
+                "check: storm weather did not add rain geometry (clear={clear_meshes}, storm={storm_meshes})"
+            ));
+        }
+
         let mut game = LocalGame::with_gpu3d(false);
         game.key(KeyCode::KeyD, true);
         game.scene_at(0.0);
@@ -1466,7 +2071,7 @@ fn real_main() -> Result<(), String> {
             game.scene_at(frame as f32 * 0.05);
         }
         let x = game.sim.snapshot_for(PLAYER_ID).player.position.x;
-        if x >= 2 {
+        if x <= 2 {
             return Err(format!("check: held D did not move the player (x={x})"));
         }
 
@@ -1498,7 +2103,7 @@ fn real_main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--check") {
         run_check()?;
-        eprintln!("play check ok: 3D world, FX digits, orbit movement, inventory modal");
+        eprintln!("play check ok: 3D world, FX digits, fixed camera/controls, inventory modal");
         return Ok(());
     }
     let frames = args
@@ -1511,7 +2116,7 @@ fn real_main() -> Result<(), String> {
         LocalGame::new(),
         PresentOptions {
             // GPU raster is the default; `--cpu` forces the CPU fill.
-            title: "ASCII MMORPG — 3D orbit camera (OSRS controls)".into(),
+            title: "ASCII MMORPG — fixed oblique 2.5D camera".into(),
             cell_px: 10.0,
             width_cells: GRID_W,
             height_cells: GRID_H,

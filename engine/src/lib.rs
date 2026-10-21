@@ -29,6 +29,7 @@ pub mod bridge;
 mod cell;
 mod color;
 mod compose;
+pub mod continuous;
 pub mod demo;
 pub mod fx;
 mod layer;
@@ -44,8 +45,13 @@ pub use anim::{sample, Anim, Axis, EaseKind, Sample, Track};
 pub use cell::Cell;
 pub use color::{ColorTrack, Rgb};
 pub use compose::{compose, Frame};
+pub use continuous::{
+    Animation as ContinuousAnimation, ColorGradient, ContinuousScene, Emission, GradientAxis,
+    Material as ContinuousMaterial, Point2, Primitive, PrimitiveKind, ResolvedPrimitive,
+    Transform2,
+};
 pub use demo::{wave_scene, VIEW_H, VIEW_W};
-pub use layer::{AnimCell, Layer, Shade};
+pub use layer::{cell_text_width, AnimCell, Layer, Shade};
 pub use partition::Partition;
 pub use scene::{Camera, Scene, Wash};
 pub use sprite::{

@@ -41,6 +41,8 @@ pub struct World3d {
     bind: Option<wgpu::BindGroup>,
     tri_buf: wgpu::Buffer,
     tri_cap: usize,
+    light_buf: wgpu::Buffer,
+    light_cap: usize,
     bin_buf: wgpu::Buffer,
     bin_cap: u64,
     idx_buf: wgpu::Buffer,
@@ -56,8 +58,8 @@ pub struct World3d {
 /// One uploaded fill triangle: screen-space supersample coordinates,
 /// perspective-correct 1/z per vertex, and the flat shade — exactly the
 /// inputs `raster::fill_tri` consumes after `clip_near` + projection.
-/// 68 bytes (screen vertices, inverse depth, colour, luminance, view normal,
-/// and material index).
+/// 80 bytes (screen vertices, inverse depth, colour, luminance, view normal,
+/// material index, and face-centre world position).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct GpuTri {
@@ -68,6 +70,7 @@ struct GpuTri {
     lum: f32,
     normal: [f32; 3],
     material: f32,
+    center: [f32; 3],
 }
 
 /// Compute-side uniforms: sample-space extents, uploaded tri count, and
@@ -79,6 +82,15 @@ struct FillUniform {
     h2: u32,
     tri_count: u32,
     tiles_x: u32,
+    light_count: u32,
+    _pad: [u32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuLight {
+    position_radius: [f32; 4],
+    color_intensity: [f32; 4],
 }
 
 /// Sample tiles are 64x64 samples; bins keep `fill_tri`'s bbox visitation
@@ -87,6 +99,7 @@ const TILE: u32 = 64;
 
 const FILL_SHADER: &str = r#"struct FillU {
     w2: u32, h2: u32, tri_count: u32, tiles_x: u32,
+    light_count: u32, _pad0: u32, _pad1: u32, _pad2: u32,
 };
 // A screened fill triangle: the exact inputs `raster::fill_tri` loops over.
 // array<f32,3> members keep 4-byte alignment, matching the Rust struct.
@@ -98,6 +111,11 @@ struct CTri {
     lum: f32,
     normal: array<f32, 3>,
     material: f32,
+    center: array<f32, 3>,
+};
+struct CLight {
+    position_radius: vec4<f32>,
+    color_intensity: vec4<f32>,
 };
 @group(0) @binding(0) var<storage, read> tris: array<CTri>;
 @group(0) @binding(1) var<uniform> fu: FillU;
@@ -108,9 +126,18 @@ struct CTri {
 // appending in upload order, so per-sample tri order matches the CPU fill.
 @group(0) @binding(3) var<storage, read> bins: array<vec2<u32>>;
 @group(0) @binding(4) var<storage, read> idxs: array<u32>;
+@group(0) @binding(5) var<storage, read> lights: array<CLight>;
 
 fn edge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+}
+
+fn light_response(material: f32) -> f32 {
+    if (material == 8.0) { return 0.82; }
+    if (material == 5.0) { return 0.52; }
+    if (material == 1.0 || material == 3.0) { return 0.72; }
+    if (material == 6.0 || material == 7.0) { return 0.95; }
+    return 0.64;
 }
 
 @compute @workgroup_size(8, 8)
@@ -138,6 +165,9 @@ fn fill(@builtin(global_invocation_id) gid: vec3<u32>) {
     var bny = 0.0;
     var bnz = 1.0;
     var bm = 0.0;
+    var bcx = 0.0;
+    var bcy = 0.0;
+    var bcz = 0.0;
     let span = bins[(py / 64u) * fu.tiles_x + (px / 64u)];
     var k = span.x;
     while (k < span.x + span.y) {
@@ -161,11 +191,34 @@ fn fill(@builtin(global_invocation_id) gid: vec3<u32>) {
                         bny = tri.normal[1];
                         bnz = tri.normal[2];
                         bm = tri.material;
+                        bcx = tri.center[0];
+                        bcy = tri.center[1];
+                        bcz = tri.center[2];
                     }
                 }
             }
         }
         k += 1u;
+    }
+    if (bd >= 0.0) {
+        var lit = vec3<f32>(br, bg, bb);
+        let response = light_response(bm);
+        var li = 0u;
+        while (li < fu.light_count) {
+            let light = lights[li];
+            let delta = vec3<f32>(bcx, bcy, bcz) - light.position_radius.xyz;
+            let radius = max(light.position_radius.w, 0.001);
+            let distance = length(delta);
+            let falloff = max(1.0 - distance / radius, 0.0);
+            let contribution = falloff * falloff * max(light.color_intensity.w, 0.0) * response;
+            lit += light.color_intensity.xyz * contribution;
+            li += 1u;
+        }
+        lit = clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0));
+        br = lit.x;
+        bg = lit.y;
+        bb = lit.z;
+        bl = dot(lit, vec3<f32>(0.2126, 0.7152, 0.0722));
     }
     let base = (py * w2 + px) * 10u;
     out[base] = bd;
@@ -236,6 +289,16 @@ impl World3d {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -268,6 +331,13 @@ impl World3d {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let light_cap = 64usize;
+        let light_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("world3d-lights"),
+            size: (light_cap * size_of::<GpuLight>()).max(1) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Ok(Self {
             layout: bgl,
             pipeline,
@@ -275,6 +345,8 @@ impl World3d {
             bind: None,
             tri_buf,
             tri_cap,
+            light_buf,
+            light_cap,
             bin_buf: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("world3d-bins"),
                 size: 1,
@@ -328,6 +400,10 @@ impl World3d {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: self.idx_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.light_buf.as_entire_binding(),
                 },
             ],
         });
@@ -493,6 +569,36 @@ impl World3d {
             self.rebuild_bind(device);
         }
 
+        let light_data: Vec<GpuLight> = world
+            .lights
+            .iter()
+            .map(|light| GpuLight {
+                position_radius: [
+                    light.position.x,
+                    light.position.y,
+                    light.position.z,
+                    light.radius,
+                ],
+                color_intensity: [
+                    f32::from(light.color.r) / 255.0,
+                    f32::from(light.color.g) / 255.0,
+                    f32::from(light.color.b) / 255.0,
+                    light.intensity,
+                ],
+            })
+            .collect();
+        if light_data.len() > self.light_cap {
+            let new_cap = (light_data.len() * 2).max(64);
+            self.light_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("world3d-lights"),
+                size: (new_cap * size_of::<GpuLight>()).max(1) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.light_cap = new_cap;
+            self.rebuild_bind(device);
+        }
+
         let readback = self.readback.as_ref().expect("readback target");
         let bind = self.bind.as_ref().expect("world3d bind");
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
@@ -505,11 +611,16 @@ impl World3d {
         if !idxs.is_empty() {
             queue.write_buffer(&self.idx_buf, 0, bytemuck::cast_slice(&idxs));
         }
+        if !light_data.is_empty() {
+            queue.write_buffer(&self.light_buf, 0, bytemuck::cast_slice(&light_data));
+        }
         let uniform = FillUniform {
             w2,
             h2,
             tri_count: tri_count as u32,
             tiles_x,
+            light_count: light_data.len() as u32,
+            _pad: [0; 3],
         };
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniform));
         {
@@ -622,6 +733,11 @@ fn screen_tris(meshes: &[Mesh], cam: &Camera3, sun: Vec3, opts: &DepthOpts) -> V
             // Flat diffuse from the world-space face normal (two-sided,
             // shared verbatim with the CPU fill).
             let (sr, sg, sb, lum) = raster::shade_face(tri, sun, opts.ambient);
+            let center = Vec3::new(
+                (tri.v[0].x + tri.v[1].x + tri.v[2].x) / 3.0,
+                (tri.v[0].y + tri.v[1].y + tri.v[2].y) / 3.0,
+                (tri.v[0].z + tri.v[1].z + tri.v[2].z) / 3.0,
+            );
             let n = (tri.v[1] - tri.v[0]).cross(tri.v[2] - tri.v[0]).norm();
             let view_normal = Vec3::new(n.dot(right), n.dot(up), n.dot(fwd)).norm();
             let material = raster::MaterialKind::classify(tri.albedo).index() as f32;
@@ -643,6 +759,7 @@ fn screen_tris(meshes: &[Mesh], cam: &Camera3, sun: Vec3, opts: &DepthOpts) -> V
                     lum,
                     normal: [view_normal.x, view_normal.y, view_normal.z],
                     material,
+                    center: [center.x, center.y, center.z],
                 });
             }
         }
@@ -653,13 +770,14 @@ fn screen_tris(meshes: &[Mesh], cam: &Camera3, sun: Vec3, opts: &DepthOpts) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raster::shade_face;
+    use crate::raster::{shade_face, PointLight};
     use crate::Rgb;
 
     #[test]
-    fn screen_tri_layout_is_packed_68_bytes() {
-        assert_eq!(size_of::<GpuTri>(), 68);
-        assert_eq!(size_of::<FillUniform>(), 16);
+    fn gpu_world_buffer_layout_is_packed_for_lights() {
+        assert_eq!(size_of::<GpuTri>(), 80);
+        assert_eq!(size_of::<FillUniform>(), 32);
+        assert_eq!(size_of::<GpuLight>(), 32);
     }
 
     #[test]
@@ -734,6 +852,24 @@ mod tests {
         assert!((front.iz[0] - 1.0 / 14.025).abs() < 1e-4);
     }
 
+    #[test]
+    fn point_lights_are_resolved_by_the_compute_shader() {
+        let cam = Camera3::new(Vec3::new(0.0, 3.0, -9.0), 0.0, 0.0, 60.0, 96, 35);
+        let sun = Vec3::new(0.55, 0.85, 0.3);
+        let opts = DepthOpts::default();
+        let wall = Mesh::boxed(
+            Vec3::new(0.0, 1.0, 5.0),
+            Vec3::new(10.0, 4.0, 0.05),
+            Rgb::new(120, 90, 70),
+        );
+        let tris = screen_tris(&[wall], &cam, sun.norm(), &opts);
+        assert!(!tris.is_empty());
+        assert!(tris[0].center.iter().all(|value| value.is_finite()));
+        assert!(FILL_SHADER.contains("light_count"));
+        assert!(FILL_SHADER.contains("light_response"));
+        assert!(FILL_SHADER.contains("@group(0) @binding(5)"));
+    }
+
     /// The real contract: a scene through the GPU fill must resolve to the
     /// same glyphs/colors as the CPU fill. Skips (instead of failing) when
     /// no GPU adapter exists (CI never compiles `present`, so this runs
@@ -787,7 +923,13 @@ mod tests {
             Rgb::new(90, 60, 40),
         );
         let meshes = vec![slab, cube, wood];
-        let cpu = raster::render_layer(&meshes, &cam, sun, &opts, 2);
+        let lights = vec![PointLight::new(
+            Vec3::new(0.0, 1.8, 0.0),
+            Rgb::new(255, 148, 48),
+            5.0,
+            1.15,
+        )];
+        let cpu = raster::render_layer_with_lights(&meshes, &cam, sun, &opts, &lights, 2);
         let mut world3d = World3d::new(&device).expect("world3d pipeline");
         let gpu = world3d
             .run(
@@ -798,6 +940,7 @@ mod tests {
                     camera: cam,
                     sun,
                     opts,
+                    lights,
                     z: 2,
                     layer_slot: 0,
                 },

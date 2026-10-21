@@ -85,6 +85,58 @@ impl Layer {
         self.push_text_styled(x, y, text, fg, bg, true);
     }
 
+    /// Stamp text while limiting each line to a fixed number of terminal
+    /// cells. This is the cell-safe boundary for HUD/modal copy: callers can
+    /// lay out a panel first, then guarantee that text cannot spill into its
+    /// border or an adjacent partition.
+    pub fn push_text_clipped(&mut self, x: i32, y: i32, width: i32, text: &str, fg: Rgb, bg: Rgb) {
+        self.push_text_clipped_with_style(
+            x,
+            y,
+            width,
+            text,
+            TextStyle {
+                fg,
+                bg,
+                bold: false,
+            },
+        );
+    }
+
+    /// [`Layer::push_text_clipped`] with a bold flag for headings.
+    pub fn push_text_clipped_bold(
+        &mut self,
+        x: i32,
+        y: i32,
+        width: i32,
+        text: &str,
+        fg: Rgb,
+        bg: Rgb,
+    ) {
+        self.push_text_clipped_with_style(x, y, width, text, TextStyle { fg, bg, bold: true });
+    }
+
+    fn push_text_clipped_with_style(
+        &mut self,
+        x: i32,
+        y: i32,
+        width: i32,
+        text: &str,
+        style: TextStyle,
+    ) {
+        if width <= 0 {
+            return;
+        }
+        for (dy, line) in text.split('\n').enumerate() {
+            let clipped: String = line
+                .chars()
+                .filter(|glyph| *glyph != '\r')
+                .take(width as usize)
+                .collect();
+            self.push_text_styled(x, y + dy as i32, &clipped, style.fg, style.bg, style.bold);
+        }
+    }
+
     fn push_text_styled(&mut self, x: i32, y: i32, text: &str, fg: Rgb, bg: Rgb, bold: bool) {
         for (dy, line) in text.split('\n').enumerate() {
             for (dx, glyph) in line.chars().filter(|c| *c != '\r').enumerate() {
@@ -171,6 +223,25 @@ impl Layer {
     }
 }
 
+#[derive(Clone, Copy)]
+struct TextStyle {
+    fg: Rgb,
+    bg: Rgb,
+    bold: bool,
+}
+
+/// Count the terminal cells occupied by a single-line text string.
+///
+/// Windowed HUD text intentionally uses the engine's single-cell glyph
+/// contract. Carriage returns are ignored because they are line-ending
+/// plumbing, not visible cells; callers that need to handle newlines should
+/// measure each line independently.
+pub fn cell_text_width(text: &str) -> usize {
+    text.chars()
+        .filter(|glyph| *glyph != '\r' && *glyph != '\n')
+        .count()
+}
+
 /// Palette for [`Layer::fill_shaded_rect`]: block glyph plus vertical
 /// gradient ends and background. Grouped so the call stays under the clippy
 /// argument limit.
@@ -208,6 +279,20 @@ mod tests {
         assert_eq!(layer.cells[2].y, 5);
         assert_eq!(layer.cells[2].cell.glyph, 'A');
         assert_eq!(layer.cells[3].x, 12);
+    }
+
+    #[test]
+    fn clipped_text_stays_inside_requested_cell_width() {
+        let mut layer = Layer::new("hud", 0);
+        layer.push_text_clipped(2, 3, 4, "ABCDE", Rgb::new(255, 255, 255), Rgb::new(0, 0, 0));
+
+        let xs: Vec<i32> = layer.cells.iter().map(|cell| cell.x).collect();
+        assert_eq!(xs, vec![2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn cell_text_width_ignores_line_ending_plumbing() {
+        assert_eq!(cell_text_width("A\rB"), 2);
     }
 
     #[test]

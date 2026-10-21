@@ -1,6 +1,104 @@
 # ASCII MMORPG — session handoff
 
-Updated: 2026-10-20. This is the resumable engineering record, not a full transcript.
+Updated: 2026-10-21. This is the resumable engineering record, not a full transcript.
+
+## Remote map sync and continuous renderer specification (2026-10-21)
+
+- Fetched `origin/main` and fast-forwarded local `main` from `5af8e8e` to
+  `a0cb694` (`feat: add Veyrath ASCII map integration`). The update adds the
+  Veyrath authoring assets, political/geography exports, heightmap, ASCII atlas,
+  and client World Map modal/module.
+- Existing uncommitted renderer work was stashed before the sync and restored
+  afterward. The stash remains as a safety copy because the restore encountered
+  a handoff-document conflict; no existing work was discarded, committed, or
+  pushed.
+- Resolved `docs/SESSION_HANDOFF.md` by retaining both the Veyrath map history
+  and the renderer history. The renderer rebuild plan is recorded in
+  `docs/RENDERER_REBUILD_SPEC.md` and published as GitHub issue #1:
+  `Rebuild world renderer as continuous Veyrath-backed GPU primitives`.
+- The agreed rebuild uses a continuous GPU canvas with a black background,
+  independent glyph/particle/ribbon primitives, floating-point emission and
+  bloom, fixed elevated 2.5D depth, cell-aligned HUD compatibility, and the
+  existing grid renderer as fallback. Veyrath is initially a shared visual/data
+  model only; its provisional authoring coordinates do not become authoritative
+  collision or server simulation.
+- Post-sync validation exposed a portability bug in
+  `assets/maps/veyrath/validate_political_checkpoint.py`: it assumed CRLF and a
+  fixed 53-line map stream, while the checked-out map is valid LF with a
+  pretty-printed SVG spanning 175 physical lines. The validator now uses
+  `splitlines()` and checks the required structural minimum instead of a fixed
+  physical line count.
+
+### Verification after sync
+
+- `cargo fmt --all -- --check` passed.
+- `cargo test --workspace --locked` passed (`110` client tests, `121` engine
+  tests, and all other workspace suites).
+- `python assets/maps/veyrath/validate_design.py` passed.
+- `python assets/maps/veyrath/validate_political_checkpoint.py` passed after the
+  line-ending/format portability fix.
+- `python -m py_compile assets/maps/veyrath/*.py` passed.
+- `git diff --check` passed.
+- GitHub issue #1 was created with labels `enhancement` and `ready-for-agent`.
+
+### Published implementation tickets
+
+- #2 Continuous primitive scene seam — no blocker.
+- #3 Continuous GPU canvas and aspect-preserving presentation — blocked by #2.
+- #4 Floating-point emission and bloom — blocked by #3.
+- #5 Torch and sun showcase — blocked by #4.
+- #6 Veyrath visual data model — blocked by #2.
+- #7 Veyrath-backed continuous world — blocked by #3 and #6.
+- #8 Animated layered characters — blocked by #3 and #4.
+- #9 Weather and environmental effects — blocked by #3 and #4.
+- #10 Play-path integration and fallback retirement — blocked by #5, #7, #8,
+  and #9.
+
+All nine tickets are child issues of #1 and carry `ready-for-agent`.
+
+## Ticket #2: continuous primitive scene seam (2026-10-21)
+
+### Changed
+
+- Added the renderer-agnostic `continuous` presentation module and public
+  re-exports. It defines continuous `Point2` coordinates, independent depth,
+  scale, rotation, skew/tilt, opacity, foreground/background colour, gradients,
+  and emission metadata.
+- Added primitive families for glyphs, particles, ribbons, streaks, and rays.
+  Geometry stays descriptive; the future GPU presenter decides how each family
+  becomes quads, masks, or ribbons.
+- Added deterministic animation channels for fractional velocity,
+  acceleration, rotation, scale, and opacity. Sampling is pure and
+  presentation-only; it never reads or mutates server snapshots.
+- Added `ContinuousScene::sample`, which resolves animations at a fixed time
+  and stably depth-sorts primitives while preserving equal-depth authoring
+  order.
+- Added safe handling for invalid time/animation inputs so NaN/infinite values
+  cannot poison the continuous scene output.
+
+### Verification
+
+- `cargo fmt --all -- --check` passed.
+- `cargo test --locked -p ascii-mmorpg-engine --lib continuous::tests` passed
+  (`5` tests).
+- `cargo test --workspace --locked` passed (`110` client tests, `126` engine
+  tests, `8` server library tests, `3` server binary tests, `14` shared tests,
+  `2` tools tests, and all doc tests).
+- `cargo check --locked -p ascii-mmorpg-engine --features present --examples`
+  passed.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` passed.
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play
+  -- --check` passed.
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play
+  -- --frames 30` passed a 30-frame Vulkan smoke run on the NVIDIA GeForce GTX
+  1650.
+- `git diff --check` passed.
+
+### Next action
+
+Ticket #2 is green and closed. Do not begin ticket #3's GPU canvas/bloom work in
+this slice; the next session may start it only as a separate bounded task after
+preserving this verified seam and keeping the grid-first presenter as fallback.
 
 ## Latest: Veyrath map authoring — political checkpoint and standalone atlas export reviewed; placement acceptance pending (2026-10-20)
 
@@ -84,11 +182,411 @@ variance-aware selection, extra tree/road/gate detail, and richer close actor
 planes. The world-black foreground-only contract remains intact. The next
 human check is a live close/medium/far comparison of glyph density and
 silhouette readability.
+## Renderer rebuild baseline (2026-10-21)
+
+Latest slice: the windowed renderer now has the fixed elevated oblique 2.5D
+camera foundation, cell-safe HUD/modal text, a fullscreen logical-grid cap,
+left-click ground movement, and the GPU/compose torch-lighting path. The torch
+source preservation bug is now fixed: a lower `Cell::glow` emitter remains in
+the light buffer even when the later rasterized terrain overwrites that same
+cell. World glow response is now strong enough to survive low-resolution
+foreground quantization. The play renderer also has presentation-only
+weather-driven grass sway and directional rain geometry with fractional
+world-space motion. Torch pulse still drives the flame geometry and localized
+point lights; deterministic red, orange, and yellow crackles rise from the
+pulsed flame anchor, fade, and vanish. No commit or push was made.
+
+## Weather-driven grass and directional rain (2026-10-21)
+
+### Changed
+- `engine/src/raster.rs`: added `Mesh::blade_y`, a crossed-ribbon grass
+  primitive whose base stays grounded while its tip leans, and `Mesh::streak`,
+  a crossed-ribbon rain primitive for thin diagonal drops.
+- `engine/src/raster.rs`: added small `Vec3` addition/scalar-multiplication
+  operators required by the new presentation geometry.
+- `engine/examples/play.rs`: added `Weather::{Clear,Rain,Storm}` and bounded
+  profiles for grass amplitude/speed, rain density/speed, wind direction, and
+  rain colour. `--weather clear|rain|storm` selects the presentation mode;
+  the default remains rain.
+- `engine/examples/play.rs`: sparse world-locked grass tufts now use a
+  deterministic per-tuft phase and fractional tip offsets driven by time and
+  weather gusts. The authoritative ground base, collision cells, and server
+  snapshot remain untouched.
+- `engine/examples/play.rs`: rain is generated from world-locked seeds with a
+  fractional fall phase, depth variation, and directional wind drift. Storm
+  increases density, speed, and grass motion without changing simulation
+  state.
+- `engine/examples/play.rs`: `play --check` now asserts clear/rain/storm
+  profile ordering and verifies storm adds rain mesh geometry.
+
+### Torch visibility diagnosis
+- The supplied screenshot still showed only normal colouring after the source
+  preservation fix. A temporary tagged measurement on the actual GPU play
+  scene found `51` world targets changed but the maximum foreground channel
+  delta was only `7`, so the halo was technically present but visually lost at
+  the `160x56` logical grid.
+- `engine/src/compose.rs`: world emitters now use a stronger bounded light
+  amplitude (`0.42` versus `0.12` for pinned UI/background washing), while
+  retaining the existing 5-cell falloff and world-ink-only contract. The
+  measured maximum delta became `26`; the temporary diagnostics were removed.
+- The compose regression now requires the hidden lower-layer emitter to warm a
+  nearby world glyph to at least a visibly distinct channel level.
+
+### Verification (2026-10-21, Windows)
+- `cargo fmt --all -- --check` passed.
+- `cargo test --locked -p ascii-mmorpg-engine --features present --lib raster::tests` passed (`28` tests).
+- `cargo test --workspace --locked` passed (`121` engine tests plus all other workspace suites).
+- `cargo run --locked -p ascii-mmorpg-tools -- content` passed (`11` definitions).
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` passed.
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play -- --check` passed.
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play -- --weather storm --frames 30` presented 30 Vulkan frames on the NVIDIA GeForce GTX 1650.
+- `git diff --check` passed; no commit or push was made.
+
+### Next action
+Visually relaunch `play` with `--weather rain` and `--weather storm` and
+compare against the reference: grass tips should wave coherently with gusts,
+rain should fall diagonally with depth variation, and the torch surroundings
+should show a warm foreground halo rather than only a local flame colour.
+Then tune the visual amplitudes from the screenshot and continue with the TUI
+map/character-sheet slice.
+
+## Composed light-source preservation (2026-10-21)
+
+### Root cause
+- `compose::apply_glow` reconstructed emitters by scanning only the final
+  topmost `Frame` cells.
+- The playable scene intentionally placed `torch-glow` at z=-1 beneath the
+  rasterized world layer. When terrain occupied the projected flame cell, the
+  terrain glyph correctly won composition and the lower glow source vanished
+  before the light-buffer pass ran.
+- The automated `play --check` only proved that the source layer existed; it
+  did not prove that a hidden source warmed nearby composed world ink.
+
+### Correction
+- `engine/src/compose.rs`: collect resolved glow emitters while traversing
+  layers, preserving their screen position and world-partition flag even if a
+  later layer overwrites the visible cell.
+- `apply_glow` now consumes that emitter list instead of inferring sources
+  from the final visible frame. Existing transparent-cell and world-ink-only
+  behavior remains unchanged.
+- Added `glow_source_survives_a_later_layer_at_the_same_cell`, which reproduces
+  the torch layering arrangement and verifies that nearby world ink warms
+  while the terrain glyph still wins the source cell.
+
+### Verification (2026-10-21, Windows)
+- `cargo fmt --all -- --check` passed.
+- `cargo test --locked -p ascii-mmorpg-engine --lib glow_source_survives_a_later_layer_at_the_same_cell` passed.
+- `cargo test --locked -p ascii-mmorpg-engine --features present --lib compose::tests` passed (`12` tests).
+- `cargo test --workspace --locked` passed (`119` engine tests plus the other workspace suites).
+- `cargo check --locked -p ascii-mmorpg-engine --features present --examples` passed.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` passed.
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play -- --check` passed.
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play -- --frames 30` presented 30 Vulkan frames on the NVIDIA GeForce GTX 1650.
+- `git diff --check` passed; no commit or push was made.
+
+### Next action
+Relaunch the play example and visually confirm that the three torch locations
+now warm nearby terrain glyphs while void cells remain black. After that,
+implement the next bounded presentation slice: weather-driven grass wave and
+directional rain using fractional cell motion/scale rather than integer-only
+terminal-cell replacement.
+
+## Torch reference correction: halo, shader lights, and spark anchoring (2026-10-21)
+
+### Reference analysis
+- Source: `D:\Personal\codes\Projects\ASCII-Game\data\videos\WhatsApp Video
+  2026-10-10 at 11.13.42 PM.mp4`.
+- Probe: `720x1280`, native `30 FPS`, `51.452562 s`, `1540` frames; the
+  requested 25 FPS resample produced `1285` decoded frames at `0.04 s` cadence.
+- Analyzed the full clip at 25 FPS plus 25 FPS zooms around `0.00–4.00 s`,
+  `4.00–8.00 s`, and `36.00–40.00 s`.
+- Torch-heavy crops show a compact yellow/white multi-glyph flame with a warm
+  local wash over existing world glyphs. In the first 4 seconds, the tracked
+  warm component varies roughly `122–592` thresholded pixels while its local
+  12–36 px ring remains materially brighter than the dark background. The
+  halo is therefore not a standalone spark color; it is a persistent light
+  field with a fading animated core.
+- The flame anchor drifts with the scene, while crackles launch from that same
+  flame position and then move upward/outward. The current screenshot's
+  detached sparks and absent surrounding luminance matched the implementation
+  gaps below.
+
+### Root cause
+- The earlier point-light work only pre-shaded triangles on the CPU side of
+  the GPU path; the compute shader had no light buffer or light loop.
+- The playable torch never emitted a `Cell::glow` source into the engine's
+  existing compose light buffer, so empty/sparse world cells could not receive
+  a warm halo.
+- Crackle origins used the unpulsed torch coordinate while the flame geometry
+  used a pulsed offset, so sparks could visually detach from the flame.
+
+### Correction
+- `engine/src/present/gpu3d.rs`: added a GPU light storage buffer, light-count
+  uniforms, face-centre triangle positions, and a WGSL point-light loop with
+  material response/falloff. The CPU and GPU parity test now includes a warm
+  point light.
+- `engine/examples/play.rs`: added a lower-z `torch-glow` world layer that
+  emits `Cell::glow` at the projected flame anchor. Existing world glyphs are
+  washed by the compose light buffer instead of painting a flat halo into void
+  cells. Crackles now use the same pulsed flame offset for their origin.
+- `engine/examples/play.rs`: `play --check` verifies that torch glow sources
+  exist and active crackle lights reach the GPU world contract.
+
+### Verification (2026-10-21, Windows)
+- Full reference video extracted/analyzed at 25 FPS; interval zoom crops and
+  per-frame warm-component measurements completed.
+- `cargo fmt --all -- --check` passed.
+- `cargo check --locked -p ascii-mmorpg-engine --features present --examples`
+  passed.
+- `cargo test --locked -p ascii-mmorpg-engine --features present --lib
+  present::gpu3d::tests` passed (`6` tests, including GPU/CPU parity with a
+  localized warm light).
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play
+  -- --check` passed.
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play
+  -- --frames 30` presented 30 Vulkan frames on the NVIDIA GeForce GTX 1650.
+- Full workspace checks passed after this correction; live visual confirmation
+  remains pending.
+
+### Next action
+Relaunch the play example and visually compare the three torch locations with
+the reference crops: the world glyphs around each torch should warm over a
+roughly 4–5-cell radius, while void cells remain black; sparks should visibly
+leave the flame anchor and fade. Then rerun the full workspace verification and
+continue with the TUI map/character-sheet slice.
+
+## Torch lighting and crackles — initial implementation (superseded 2026-10-21)
+
+The initial slice below added deterministic flame/crackle geometry and CPU-side
+point-light data, but it did not complete the GPU shader light loop or emit a
+world `Cell::glow` source. The correction above is the current source of truth.
+
+### Changed
+- `engine/src/present.rs`: `GpuWorld` now carries localized `PointLight` values
+  from a scene source into the GPU world pre-pass.
+- `engine/src/raster.rs`: extracted shared coarse face-centre point-light
+  shading so CPU fallback and GPU triangle pre-shading use the same response.
+- `engine/src/present/gpu3d.rs`: GPU screen-triangle preparation now applies
+  the shared point-light response before upload. Added a focused light-response
+  regression test.
+- `engine/examples/play.rs`: torch positions are centralized. Each torch gets
+  a deterministic time-varying pulse that synchronizes flame scale/offset,
+  light radius, and light intensity. Six seeded crackle emitters per torch use
+  red/orange/yellow colors, random-looking directional drift, rising motion,
+  brightness fade, and a short point-light glow before disappearing.
+- `engine/examples/play.rs`: the headless `play --check` now confirms that
+  active torch crackle lights reach the GPU world contract.
+
+### Verification (2026-10-21, Windows)
+- `cargo fmt --all -- --check` passed.
+- `cargo test --workspace --locked` passed.
+- `cargo run --locked -p ascii-mmorpg-tools -- content` passed (`11` definitions).
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` passed.
+- `cargo check --locked -p ascii-mmorpg-engine --features present --examples`
+  passed.
+- `cargo test --locked -p ascii-mmorpg-engine --features present --lib` passed
+  (`138` tests).
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play
+  -- --check` passed.
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play
+  -- --frames 30` presented 30 Vulkan frames on the NVIDIA GeForce GTX 1650.
+- `git diff --check` passed; no commit or push was made.
+
+### Next action
+Live-check the relaunching play window near the three torches. Confirm the
+flame and nearby terrain brighten together, crackles visibly drift in warm
+red/orange/yellow colors, each spark fades instead of popping, and fullscreen
+still retains the same readable scene density. Then continue with the TUI map
+and character-sheet modal port.
+
+## Point-and-click ground movement (2026-10-21)
+
+### Changed
+- `engine/src/present.rs`: `PointerEvent` now carries the physical surface
+  dimensions alongside the cursor position, so consumers can map clicks to an
+  explicit logical grid during windowed/fullscreen scaling. Pointer tracking
+  updates that size on initialization and resize while preserving button-edge
+  and focus-loss behavior.
+- `engine/examples/play.rs`: left-clicks in the world partition are converted
+  through the fixed `Camera3` ray onto the y=0 ground plane. HUD/log clicks,
+  right-clicks, modal clicks, invalid ray intersections, and obstructed target
+  tiles are ignored.
+- `engine/examples/play.rs`: reachable targets use a bounded BFS over the
+  shared overworld collision registry with cardinal directions only. Each step
+  is sent through the existing `Command::Move(Direction)` path; no protocol
+  change or client-authored position was introduced. Keyboard movement cancels
+  the click path.
+- `engine/examples/play.rs`: added a short ground path preview and orange
+  destination ring. The marker clears when the authoritative snapshot reaches
+  the target.
+
+### Verification (2026-10-21, Windows)
+- `cargo fmt --all -- --check` passed.
+- `cargo test --workspace --locked` passed.
+- `cargo run --locked -p ascii-mmorpg-tools -- content` passed (`11` definitions).
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` passed.
+- `cargo test --locked -p ascii-mmorpg-engine --features present --lib` passed
+  (`137` tests).
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play
+  -- --check` passed, including reachable and obstructed click-path checks.
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play
+  -- --frames 30` presented 30 Vulkan frames on the NVIDIA GeForce GTX 1650.
+- `git diff --check` passed; no commit or push was made.
+
+### Next action
+Live-check left-click movement in the relaunching play window: click open
+ground, confirm the path preview and destination ring, confirm the actor walks
+there, then click an obstacle and confirm it does not walk through it. After
+that, the next bounded slice is porting the TUI map and character sheet into
+the windowed modal/HUD path.
+
+## Fullscreen sparse-band diagnosis and logical-grid cap (2026-10-21)
+
+### Evidence
+- The supplied fullscreen capture is `1920x1080`; with the current 10px atlas
+  height it requests approximately `320x108` logical cells, versus the play
+  example's authored `160x56` grid.
+- The same scene emits `1186` world meshes at both sizes. The diagnostic path
+  measured focal/actor projection and CPU raster output at both grids; the
+  fullscreen-equivalent grid produced a lower scene-density ratio because the
+  authored sparse world was spread across roughly four times as many logical
+  cells. The symptom matched the screenshot: terrain punctuation became thin
+  horizontal bands and the actor read degraded.
+
+### Fix
+- `engine/src/present.rs`: explicit nonzero `PresentOptions.width_cells` and
+  `height_cells` now act as logical-grid caps during initialization and resize.
+  Zero dimensions retain native surface-derived grids for presenters that opt
+  into that behavior.
+- Added a regression test covering fullscreen capping, smaller surfaces, and
+  uncapped zero dimensions.
+- Removed the temporary diagnostic instrumentation after the cause was isolated.
+
+### Verification (2026-10-21, Windows)
+- `cargo fmt --all -- --check` passed.
+- `cargo test --workspace --locked` passed.
+- `cargo run --locked -p ascii-mmorpg-tools -- content` passed (`11` definitions).
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` passed.
+- Logical-grid regression test passed.
+- `play --check` passed.
+- `play --frames 30` presented 30 Vulkan frames on the NVIDIA GeForce GTX 1650.
+
+### Next action
+Repeat the user's F11 fullscreen check. The expected result is a 160x56 logical
+scene scaled across the monitor: actor/model size and world density should stay
+close to the working windowed view while the HUD remains cell-aligned.
+
+## Fixed-camera and cell-safe UI foundation (2026-10-21)
+
+### Changed
+- `engine/examples/play.rs`: fixed elevated oblique camera, fixed world-axis
+  movement, pointer-driven orbit/zoom disabled, and help/title text updated.
+- `engine/src/present.rs`: pointer events now carry absolute surface pixels and
+  left/right press-release edges for the future point-and-click consumer.
+- `engine/src/layer.rs`: added bounded cell-safe text stamping and shared
+  single-line cell-width measurement for HUD/modal layout.
+- `engine/src/overlay.rs`: fractional text positions/sizes snap to whole
+  terminal cells at tessellation time, preventing fullscreen text drift.
+- `engine/examples/play.rs`: title/status/help/log/modal footer text is clipped
+  to its panel, and labels/damage digits use the shared cell-width helper.
+
+### Verification (2026-10-21, Windows)
+- `cargo fmt --all -- --check` passed.
+- `cargo test --workspace --locked` passed.
+- `cargo run --locked -p ascii-mmorpg-tools -- content` passed (`11` definitions).
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` passed.
+- `cargo test --locked -p ascii-mmorpg-engine --features present --lib` passed
+  (`136` tests).
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play
+  -- --check` passed.
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play
+  -- --frames 30` presented 30 Vulkan frames on the NVIDIA GeForce GTX 1650.
+- `git diff --check` passed; no commit or push was made.
+
+### Next action
+User live-check: launch the fixed-camera example, toggle F11, and verify that
+fullscreen terrain density, actor readability, top HUD text, and inventory
+alignment now match the windowed view. If that is acceptable, the next bounded
+slice is point-and-click ground targeting plus the TUI map/character-sheet
+port. Global material lighting/reflections and torch crackles follow after that
+input/UI foundation.
+
+## Fixed camera play slice (2026-10-21)
+
+### Changed
+- `engine/examples/play.rs`: removed mutable orbit yaw/pitch/distance state;
+  retained a smoothed player-follow anchor with fixed `CAM_YAW`, `CAM_PITCH`,
+  and `CAM_DIST`.
+- `engine/examples/play.rs`: replaced camera-relative movement with fixed
+  world-axis WASD/arrows (`W/North`, `S/South`, `A/West`, `D/East`).
+- `engine/examples/play.rs`: made `SceneSource::pointer` an explicit no-op;
+  presenter F11 fullscreen behavior is unchanged. Updated HUD/help/title text
+  and `--check` assertions. Point-and-click remains deferred.
+
+### Verification (2026-10-21, Windows)
+- `rustfmt --edition 2021 --check engine/examples/play.rs` passed.
+- `cargo check --locked -p ascii-mmorpg-engine --features present --example play`
+  passed.
+- `cargo clippy --locked -p ascii-mmorpg-engine --features present --example
+   play -- -D warnings` passed.
+- `cargo test --locked -p ascii-mmorpg-engine --features present --lib` passed
+  (133 tests).
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play
+  -- --check` passed (`3D world, FX digits, fixed camera/controls, inventory
+  modal`).
+- Workspace `cargo fmt --all -- --check` passed after the cell-safe text changes.
+
+### Next action
+Live-check the fixed camera, fixed WASD directions, F11 fullscreen toggle, and
+existing FX/fullscreen readability in the windowed example. Do not add
+point-and-click movement in that check.
+
+## Pointer input data slice (2026-10-21)
+
+### Changed
+- `engine/src/present.rs`: `PointerEvent` now carries the latest absolute
+  cursor position in physical surface pixels when known, plus independent
+  `pressed` and `released` edge arrays for the left/right slots. Existing
+  `held`, `delta`, and `wheel` behavior remains unchanged.
+- `PointerTrack` preserves the absolute position across button and wheel
+  events, reports only transition edges, and emits synthetic release edges on
+  focus loss before clearing its baseline.
+- `PointerEvent::grid_position` maps a surface-pixel position to a grid cell
+  for a future point-and-click consumer. It does not select targets or perform
+  pathfinding.
+- Focused tests cover first/changed cursor positions, press/release and
+  duplicate-edge behavior, focus reset, and pixel-to-grid conversion.
+
+### Verification (2026-10-21, Windows)
+- `cargo fmt --all -- --check`: passed.
+- `cargo test --locked -p ascii-mmorpg-engine --features present --lib
+  pointer`: passed — 2 focused tests.
+- `git diff --check -- engine/src/present.rs`: passed; the repository's
+  standing LF/CRLF conversion warning remains.
+- Pre-existing worktree changes in `AGENTS.md`, `engine/examples/play.rs`,
+  `engine/src/fx.rs`, `engine/examples/fx.rs`, `docs/SESSION_HANDOFF.md`, and
+  `docs/agents/` were preserved. No commit or push was made.
+
+### Next action
+If point-and-click is requested, use the event's absolute position or
+`grid_position` in a separate consumer slice; do not add pathfinding here.
+
+## Repo setup — agent-skill configuration (2026-10-18)
+
+Config-only turn (no code changes): ran `/setup-matt-pocock-skills` in
+`ascii-mmorpg/`. Wrote `docs/agents/issue-tracker.md` (GitHub Issues on
+`NexiSynapse/ascii-mmorpg` via the `gh` CLI; PRs-as-request-surface flag
+off) and `docs/agents/domain.md` (single-context: root `GLOSSARY.md` +
+`docs/adr/`, created lazily by `/domain-modeling`), and appended the
+`## Agent skills` block to `AGENTS.md`. No triage labels (the `triage`
+skill isn't installed). No cargo checks applicable to a docs/config
+change. No blockers; engineering next action unchanged (user live F11
+fullscreen verdict, then the playbook slice choice).
 
 ## Start here
 
-Workspace: `ASCII-Game/`; application repository: `ascii-mmorpg/`. Read the parent and repository `AGENTS.md` files. Latest turn: "Game feel, character animation & visual fidelity refinement" section at the end — the 3D play path now uses joint-pivot humanoid poses, responsive facing/gait/attack presentation state, focus-safe input, faceted cones/road landmarks, and improved actor labels; the terminal GPU path now has attack-driven poses, grounded limbs/grass, distinct road/sand/stone materials, slope normals, static non-foliage organic surfaces, and differentiated storm weather. The next human check remains the live 3D window plus the 156x44 TUI.
-Repository status (verified 2026-10-18, Windows): checked-out `main` is at `2984ff1` and is up to date with `origin/main`; local `rendering_gra_update` also points at the merge commit while its remote tracking branch remains separate. The high-density slice and the fetched `origin/main` optimizations are committed and published. The pre-existing user modification to `play_ansi.bat` was restored after publication and is the only current worktree change. Future commits/pushes still require an explicit user request. CRLF-vs-LF warnings are historical; current diffs are real content.
+Workspace: `ASCII-Game/`; application repository: `ascii-mmorpg/`. Read the parent and repository `AGENTS.md` files. Latest turn: twentieth slice — the fullscreen sparse-band complaint was root-caused to world-coverage lattices fixed around the map origin (not the camera focal rule): road/weave/grass lattices in `play.rs::world_meshes` now slide with the camera focus on world-locked absolute hashes (see "Follow-up: bands survived — camera-following world coverage"). All checks green; the user's live F11 fullscreen verdict is the next human check, then the choice between wiring Slice 2 FX into `play`'s combat stream vs playbook Slice 3.
+Repository status (verified 2026-10-18, Windows): on `main`, fast-forwarded to `origin/main` at `5af8e8e` (`docs: refresh renderer handoff`); the rendering overhaul (`b1afcfd`, `4450951`) and our GPU-fill commits (`a644a50`, `751b953`) are all in that published history. Current uncommitted worktree changes (verified intact): `engine/examples/play.rs` (fullscreen camera focal fix + camera-following world coverage — see the twentieth slice), `engine/src/fx.rs` + `engine/examples/fx.rs` (look-parity Slice 2 FX archetypes), `AGENTS.md` (fx showcase note), `docs/SESSION_HANDOFF.md`. Future commits/pushes require an explicit user request. CRLF-vs-LF warnings are historical; current diffs are real content.
 Latest integrated direction: the windowed `play` example now routes its
 triangle fill through `engine/src/present/gpu3d.rs` by default, while retaining
 the CPU path behind `--cpu`. The GPU pass replays the screened triangle fill
@@ -324,6 +822,73 @@ The latest read-only GPU review identified the smallest high-value slice:
 6. **Defer more grass geometry** — crossed grass blades now exist. More instances could multiply cost under 4× SSAA; profile first.
 
 ## Active TODO checklist
+- [x] NEW 2026-10-21 (torch correction): reference video was resampled and
+  inspected at 25 FPS; the missing world glow source, missing GPU light loop,
+  and detached crackle anchor were corrected. The torch now emits through the
+  compose light buffer, GPU WGSL resolves localized lights, and sparks share
+  the pulsed flame anchor. Focused GPU/CPU parity tests, example checks, and a
+  30-frame Vulkan smoke run passed. Full workspace verification passed; live
+  visual confirmation remains pending.
+- [x] NEW 2026-10-21 (torch lighting/crackles, initial implementation):
+  deterministic flame/light flicker and six red/orange/yellow crackles were
+  added, but the attempt was superseded because it lacked the GPU shader light
+  loop and world glow-buffer source.
+- [x] NEW 2026-10-21 (point-and-click ground movement): pointer events now
+  include surface dimensions; the play example raycasts left-clicks through the
+  fixed camera, finds a shared-collision BFS path, queues existing movement
+  commands, cancels on keyboard movement, and renders a path preview plus
+  destination ring. Workspace tests, content validation, clippy, 137 present
+  library tests, `play --check`, and a 30-frame Vulkan smoke run passed. Live
+  click-path verification remains pending.
+- [x] NEW 2026-10-21 (fullscreen sparse-band diagnosis): explicit logical grids
+  now remain capped during fullscreen/resizes, so the play example no longer
+  expands from `160x56` to the sparse `320x108` scene. Regression test,
+  workspace tests, content validation, clippy, `play --check`, and a 30-frame
+  Vulkan smoke run passed. User F11 visual confirmation remains pending.
+- [x] NEW 2026-10-21 (cell-safe HUD/layout): `engine/src/layer.rs` now clips
+  text to panel cell widths and exports shared cell-width measurement;
+  `engine/src/overlay.rs` snaps fractional text runs to terminal cells;
+  `engine/examples/play.rs` uses the contract for title/status/help/log/modal
+  text and label centering. Focused tests, workspace tests, formatting, clippy,
+  content validation, `play --check`, and a 30-frame Vulkan smoke run passed.
+- [x] NEW 2026-10-21 (pointer input data slice): `engine/src/present.rs`
+  forwards absolute cursor surface pixels plus left/right press and release
+  edges while preserving held/delta/wheel behavior; focused pointer tests and
+  the local pixel-to-grid helper pass. Point-and-click pathfinding remains
+  deferred. No commit or push.
+- [x] NEW 2026-10-18 (repo setup): agent-skill configuration written —
+  `docs/agents/issue-tracker.md` (GitHub Issues via `gh`),
+  `docs/agents/domain.md` (single-context), `## Agent skills` block appended
+  to `AGENTS.md`. Config-only; no code touched, no cargo checks applicable.
+  No triage labels (skill not installed).
+- [x] NEW 2026-10-18 (twentieth slice): bands survived the focal fix; diagnosed
+  with headless row histograms, root cause = world-coverage lattices fixed
+  around the map origin. `world_meshes` now slides world-locked coverage
+  lattices (road / weave / grass; shoreline widened) with the camera focus
+  (`COVERAGE_DZ=46, COVERAGE_DX=34`, absolute-coordinate hashes keep decal
+  positions permanent). Verified: fmt 0; workspace tests green (engine 115,
+  present lib 132); tools content ok; clippy clean; `play`/`fx` `--check`
+  green; visual screenshots at windowed + fullscreen-size grids show dense
+  ground ink and readable actor silhouettes incl. the `(20,-28)` repro.
+  Temporary diagnostics stripped. User live F11 fullscreen verdict pending.
+- [x] NEW 2026-10-21 (fixed-camera play slice): `engine/examples/play.rs`
+  now keeps a fixed elevated oblique camera while preserving player-follow and
+  the inherited fullscreen focal/coverage work; right-drag orbit and wheel zoom
+  are disabled, WASD/arrows use fixed world axes, HUD orbit/zoom help was
+  removed, and `--check` verifies pointer-invariant camera values plus eastward
+  `D` movement. Verified with example check, example cargo check, and 133
+  feature-present engine library tests. Workspace fmt remains blocked by
+  pre-existing `engine/src/present.rs` formatting differences.
+- [x] NEW 2026-10-18 (nineteenth slice): fullscreen camera-focal fix in
+  `engine/examples/play.rs` — `camera3` now scales focal by the LARGER
+  surface ratio (clamp 0.82..2.25) instead of the smaller one (was clamped
+  1.28), so tall fullscreen surfaces keep readable actor cell heights instead
+  of exposing a sparse horizontal-band world; the 160x56 window preset is
+  unchanged. Re-verified by the follow-up session (see the fullscreen section
+  and its re-verification block). Live rerun showed bands surviving at a
+  displaced/zoomed camera — superseded by the twentieth slice above, which
+  fixes the actual cause (fixed coverage window); the focal rule is retained
+  and was proven not to be the distinguishing variable.
 - [x] NEW 2026-10-18 (eighteenth slice): GPU 3D fill — a wgpu compute pass
   (`engine/src/present/gpu3d.rs`, new) replays `raster::fill_tri`'s exact
   math from CPU-screened triangles + 64-sample tile bins; output is
@@ -334,11 +899,16 @@ The latest read-only GPU review identified the smallest high-value slice:
   workspace tests green (engine default 100, `--features present` lib 117);
   tools content ok; clippy clean both feature sets; `play -- --check` green.
   See "GPU 3D fill — compute replay of `raster::fill_tri`".
+- [x] NEW 2026-10-18 (look-parity Slice 2): `engine/src/fx.rs` adds bounded,
+  deterministic `LightningColumn`, `IcicleWave`, and `SmokeRing` emitters;
+  `engine/examples/fx.rs` showcases and checks all eight effect families.
+  This is the pure engine FX/data slice; it does not yet wire these archetypes
+  into the windowed `play` combat event stream.
 - [ ] Optional perf follow-up (only if the user wants the GPU path clearly
   above 60 fps): move `resolve_layer` into WGSL or slim the readback round
   trip (~2-3 ms; resolve itself ~3-5 ms stays CPU-identical today — moving it
   is a language-parity project, not a quick toggle). Otherwise prefer the
-  playbook Slice 2 below.
+  playbook Slice 3 below.
 - [x] NEW 2026-10-18 (seventeenth slice): `shape_glyph` now gates entity-0
   dark-field terrain strokes (`luma < 0.08` sRGB) behind `edge_mag > 1.0`;
   shader tests, the 156x44 dump/study, CI order, and `--features present`
@@ -348,8 +918,8 @@ The latest read-only GPU review identified the smallest high-value slice:
   (likely meadow tuft ink or a non-`shape_glyph` path) before changing the
   stroke threshold again; rerun the same 156x44 measurement.
 - [ ] External-agent playbook remaining slices (re-check overlap with REPORT.md #4–#7 first):
-  Slice 2 lightning column + icicle sweep + smoke ring; Slice 3 fog canopy + oak/banners/lamp
-  posts; Slice 4 3D `play.rs` parity + boss bar. Multi-scale glyph billboards in `present.rs`
+  Slice 3 fog canopy + oak/banners/lamp posts; Slice 4 3D `play.rs` parity +
+  boss bar. Multi-scale glyph billboards in `present.rs`
   remain a separate study (needs the 2x–3x overlay atlas).
 
 - [x] NEW 2026-10-18 (game-feel refinement): completed 12 bounded refinement passes across the depth-raster play path and terminal GPU path — articulated pose/gait/attack timing, shortest-path facing, focus-safe input, actor grounding/label anchors, faceted environment silhouettes, distinct surface materials, slope-aware terrain lighting, foliage/static-organic separation, storm differentiation, and defensive lighting cleanup. See "Game feel, character animation & visual fidelity refinement" at the end.
@@ -1842,3 +2412,184 @@ The windowed path had three independent background sources: `raster::resolve_cel
 Captured comparable windowed output at `%TEMP%\omnirush\reco-analysis\ascii_black_world.png`, `ascii_black_world2.png`, and `ascii_black_orbit_zoom.png`. The world viewport is visibly black between glyphs; tree foliage, bark, stone, water, magic, fire, player/enemy silhouettes, labels, and combat marks are foreground-colored glyphs. The second capture shows denser material-specific foliage/branch silhouettes while retaining large black negative space; the orbit/zoom capture was taken after sending a right-drag and wheel event to the live window.
 
 The automated checks cannot judge artistic parity or camera feel. The remaining human review is to run the live window, right-drag orbit, wheel zoom, walk, `F`, `1/2/3`, and `I`, then compare a close and wide view against the reference. No commit or push was made.
+
+## Fullscreen sparse-band readability fix (2026-10-18)
+
+User supplied a fullscreen screenshot showing the HUD across the display but a
+mostly black world made of thin repeated green horizontal bands and scattered
+coloured marks; actors were not readable at the fullscreen scale.
+
+### Diagnosis and correction
+
+The relevant path is `play.rs::camera3` → `Camera3` projection → the depth
+raster/GPU-fill path. The fullscreen surface supplies substantially more rows
+than the 160x56 window preset. `camera3` previously scaled `focal` by the
+*smaller* width/height ratio, so a tall fullscreen surface exposed much more
+vertical world while retaining roughly the old actor size. That made the
+selective foreground-only world geometry resolve as sparse horizontal bands
+and reduced silhouettes to an unreadable few cells. The HUD was not the source
+of the symptom: it is composed from the same live grid and spans the display.
+
+`engine/examples/play.rs` now scales the camera focal length by the larger
+surface ratio (clamped to 2.25) instead of the smaller ratio (previously
+clamped to 1.28). The normal 160x56 preset is unchanged; fullscreen gets a
+larger readable actor projection rather than an excessively expanded vertical
+frustum. This is intentionally a narrow camera/presentation fix and does not
+change server state, mesh ownership, or the GPU fill algorithm.
+
+### Verification (2026-10-18, Windows)
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo test --locked -p ascii-mmorpg-engine --features present --lib`:
+  passed — 132 tests.
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play
+  -- --check`: passed.
+- `cargo test --workspace --locked`: passed — all workspace suites.
+- `cargo run --locked -p ascii-mmorpg-tools -- content`: passed,
+  `content ok: 11 definitions`.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: passed.
+- `git diff --check`: passed; only existing LF/CRLF conversion warnings were
+  reported.
+
+### Remaining live check
+
+The attached screenshot is the reproduction evidence, but automated checks do
+not establish visual readability. Re-run the fullscreen `play` window and
+confirm that the player/actors occupy readable silhouettes and that the world
+no longer presents as only horizontal bands. If bands remain, the next
+investigation is dynamic fullscreen world-coverage bounds, not another camera
+focal adjustment. No commit or push was made.
+
+## Follow-up: bands survived — camera-following world coverage (2026-10-18)
+
+User re-ran fullscreen: "Its not fixed" (two screenshots: windowed spawn view
+dense; the fullscreen view still sparse bands + tiny actor marks at tick 154).
+Evidence-first diagnosis, all measurements headless on the real fill:
+
+- The max-ratio focal rule pins the vertical world span to the preset's
+  (~`atan(22/48)` = 24.7° half-angle) for any surface — so windowed vs
+  fullscreen frustums are the same world window; focal was never the
+  distinguishing variable at fixed zoom.
+- Added temporary `PRESENT_PROFILE` row-histogram diagnostics (removed after
+  the fix) plus temporary `PLAY_GRID`/`PLAY_DIST`/`PLAY_POS` env overrides
+  (removed after the fix). Row occupancy of the resolved terrain layer
+  (240x123 grid, `d=13.5`): spawn `(2,2)` 115/123 rows inked;
+  `(18,14)` 101/123; `(28,24)` 79/123; `(20,-28)` **31/123 rows in
+  fragmented runs** — exactly the screenshot's look. At wheel-out
+  (`d=24`) spawn also loses its top rows.
+- Root cause (code + measurement): the world-coverage lattices were fixed
+  windows around the world origin — road `z∈[−30,30]`, terrain weave
+  `z∈[−28,30] × |x|≤24`, grass in a `±14/±17` patch, shoreline `|x|≤18` —
+  while collision allows `±35` and the fullscreen/wheel-out frustum reaches
+  ~±40 ground units within fog. Beyond the fixed coverage the fill renders
+  the black clear color by design, so walking near the map edge (the tick-154
+  run) or zooming out produces the sparse-band appearance.
+
+### Fix (`engine/examples/play.rs`, uncommitted)
+
+`world_meshes` now derives camera-following coverage anchors from the same
+smoothed focus the camera aims at: `zone_x0/zone_z0` snap to the world's even
+grid, and the road, terrain weave, and grass-tuft lattices span a
+`COVERAGE_DZ=46 / COVERAGE_DX=34` box around the focus. Hash and motif inputs
+stay **absolute world coordinates** (`div_euclid(2)` indexing), so every decal
+keeps one permanent world position — walking/zooming never re-shuffles the
+pattern underfoot; decals pop in only beyond fog. Same per-area keep-rates
+(weave 2-in-7 motif, grass 1-in-2 on a 4-cell lattice, road skips) preserve
+the quiet-ground negative-space contract. The shoreline segment range widened
+`-7..=7` → `-14..=14` so southward views fill their fog rect. Scene mesh count
+~642 → ~1200 (`gpu` fill uploads tris 2728 incl. boxes; stage total ~9 ms;
+release still comfortably above vsync).
+
+### Verification (2026-10-18, Windows)
+
+- Visual re-check with real window screenshots: windowed spawn dense with twin
+  actor plates + silhouettes; forced-fullscreen-size spawn shows trees, road
+  ink, and both actors readable; the `(20,-28)` repro now shows dim even
+  ground ink with no band artifact (86–99/123 rows).
+- `cargo fmt --all -- --check`: clean.
+- `cargo test --workspace --locked`: green (engine lib 115).
+- `cargo test --locked -p ascii-mmorpg-engine --features present --lib`:
+  green — 132 tests.
+- `cargo run --locked -p ascii-mmorpg-tools -- content`: `content ok: 11`.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: clean.
+- `play -- --check` and `fx -- --check` (release, `--features present`): both
+  green. 240-frame GPU smoke presented with `PRESENT_PROFILE`.
+- Temporary diagnostics fully stripped (row histogram, env overrides,
+  `diag_pos_offset` field); `git status` dirty set reduced to the standing
+  five files.
+
+### Remaining live check
+
+User verdict on a real F11 fullscreen run still pending. If the fullscreen
+view at spawn still looks wrong, capture which state (zoom level/idle tick);
+the coverage/focal path now re-verified headless.
+
+## Look-parity Slice 2 — lightning, icicle wave, and smoke ring FX (2026-10-18)
+
+This bounded slice revisits `video-tools/REPORT.md` items #4–#6 after the
+published combat-readability work. The existing `Effect` API already had
+generic burst, ring, chain, spike, implosion, and number primitives, but it
+could not express the reference's vertical lightning column, row-advancing
+ice wave, or diffuse rising smoke ring without embedding bespoke scripts in an
+example or caller.
+
+### Implemented
+
+- `engine/src/fx.rs`:
+  - `LightningColumn` reveals a vertical bolt over time, with deterministic
+    lateral jitter and occasional side branches. It stays cell-based and can
+    be paired by a caller with a frame `Wash` for the reference's whole-screen
+    lightning flash.
+  - `IcicleWave` reveals parallel rows of directional spikes, with configurable
+    row spacing, spike length, direction, and reveal cadence.
+  - `SmokeRing` expands a deterministic ring of `o/O/@/*` puffs while drifting
+    upward, providing a softer cloud language than the existing hard `Ring`.
+  - All three retain the existing finite-input validation, lifetime fade,
+    coordinate bounds, and `MAX_CELLS` safety contract.
+- `engine/examples/fx.rs`: added all three archetypes to the showcase and
+  extended `--check` to verify visibility, growth, release, and determinism
+  across eight effect families.
+- Added focused unit tests for column branching, parallel wave growth, and
+  rising smoke glyphs.
+
+This slice intentionally stops at the pure engine effect/data layer. The
+windowed `play` combat event stream still uses its existing mesh FX recipes;
+wiring spell-specific lightning/ice/smoke events into that path is a separate
+bounded integration task.
+
+### Verification (2026-10-18, Windows)
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo test --workspace --locked`: passed — all workspace suites, including
+  engine default 115 tests; doc tests clean.
+- `cargo run --locked -p ascii-mmorpg-tools -- content`: passed,
+  `content ok: 11 definitions`.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: passed.
+- `cargo test --locked -p ascii-mmorpg-engine --features present --lib`:
+  passed — 132 tests, including GPU-fill parity.
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play
+  -- --check`: passed — 3D world, FX digits, orbit movement, inventory modal.
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example fx
+  -- --check`: passed — eight data-driven effects grow and release.
+- `git diff --check`: passed; only the repository's existing LF/CRLF
+  conversion warnings were reported.
+
+### Next action
+
+The next bounded look-parity candidate is Slice 3 (fog canopy plus big organic
+trees, banners, and standing torches), but first re-check overlap with
+`video-tools/REPORT.md` items #6–#7 and decide whether to integrate the new FX
+archetypes into `play.rs` before expanding the environment pass. Keep the
+existing uncommitted handoff and implementation changes; do not commit or
+push unless explicitly requested.
+
+### Re-verified (2026-10-18, follow-up session)
+
+The full battery above was re-run by the review session and confirmed green:
+fmt 0; workspace tests pass (engine default 115, `--features present` lib 132
+including the three new FX tests and GPU-fill parity); `play -- --check` and
+`fx -- --check` both ok; tools `content ok: 11`; clippy clean with and
+without `--features present`; `git diff --check` reports only the
+repository's standing LF/CRLF conversion warnings. Release exe rebuilt ahead
+of the user's fullscreen visual rerun. Both fixes remain uncommitted by
+design; nothing was pushed.

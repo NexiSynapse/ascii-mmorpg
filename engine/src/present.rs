@@ -10,7 +10,7 @@ pub mod gpu3d;
 
 use super::overlay::{tessellate, text_quads, OverlayVert, Stroke, TextRun};
 use super::{compose, Camera, Frame, Scene};
-use crate::raster::{Camera3, DepthOpts, Mesh, Vec3};
+use crate::raster::{Camera3, DepthOpts, Mesh, PointLight, Vec3};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
@@ -20,9 +20,12 @@ pub struct PresentOptions {
     pub title: String,
     /// Font size in px; also fixes the cell grid density.
     pub cell_px: f32,
-    /// Initial grid when a windowed window opens (grows/shrinks with resizes).
-    /// A zero dimension uses the monitor/surface size. This keeps existing
-    /// struct literals source-compatible while making `Default` fullscreen.
+    /// Logical grid when a windowed window opens. Explicit dimensions also cap
+    /// the logical grid during fullscreen/resizes; the presenter scales those
+    /// cells to the physical surface instead of silently increasing scene
+    /// resolution. A zero dimension uses the monitor/surface size with no cap.
+    /// This keeps existing struct literals source-compatible while making
+    /// `Default` fullscreen.
     pub width_cells: u32,
     pub height_cells: u32,
     /// Frame pacing: 0 = uncapped (Immediate present, benchmark mode).
@@ -72,6 +75,9 @@ pub struct GpuWorld {
     /// Flat-shading sun direction (normalized inside the pass).
     pub sun: Vec3,
     pub opts: DepthOpts,
+    /// Localized world lights used by the same coarse face-centre lighting
+    /// contract as the CPU raster fallback.
+    pub lights: Vec<PointLight>,
     /// Layer depth tag for the produced layer.
     pub z: i32,
     /// Index of the placeholder `scene.layers` entry to replace.
@@ -97,8 +103,9 @@ pub trait SceneSource {
     /// Key press (`pressed`) / release. Esc/Q and close always exit in
     /// addition to this; return value is reserved (currently ignored).
     fn key(&mut self, _code: winit::keyboard::KeyCode, _pressed: bool) {}
-    /// Pointer feedback: button edges, cursor deltas, and wheel ticks in
-    /// one event (OSRS-style camera orbit wants exactly these three).
+    /// Pointer feedback: absolute surface-pixel position, surface size, button edges,
+    /// cursor deltas, and wheel ticks in one event (OSRS-style camera orbit
+    /// wants the latter three; point-and-click can use the first two).
     /// Buttons: slot 0 = left, slot 1 = right. Cursor deltas are physical
     /// pixels since the previous pointer event. No-op by default.
     fn pointer(&mut self, _event: PointerEvent) {}
@@ -113,8 +120,18 @@ pub trait SceneSource {
 /// Pointer state snapshot handed to [`SceneSource::pointer`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointerEvent {
+    /// Absolute cursor position in physical surface pixels. `None` means the
+    /// presenter has not received a cursor position yet (or focus was reset).
+    pub position: Option<(f32, f32)>,
+    /// Physical surface dimensions used to convert `position` into the
+    /// presenter's authored logical grid.
+    pub surface_size: (u32, u32),
     /// Buttons currently held: 0 = left, 1 = right.
     pub held: [bool; 2],
+    /// Button press edges in this event: 0 = left, 1 = right.
+    pub pressed: [bool; 2],
+    /// Button release edges in this event: 0 = left, 1 = right.
+    pub released: [bool; 2],
     /// Cursor delta in physical pixels since the previous pointer event
     /// (zero for button and wheel events, which do not move the cursor).
     pub delta: (f32, f32),
@@ -122,35 +139,89 @@ pub struct PointerEvent {
     pub wheel: f32,
 }
 
+impl PointerEvent {
+    /// Convert the absolute surface position into a grid cell, rejecting
+    /// positions outside the surface.
+    ///
+    /// This only maps screen coordinates; it deliberately does not select a
+    /// world target or perform any pathfinding.
+    pub fn grid_position(
+        &self,
+        surface_width: u32,
+        surface_height: u32,
+        grid_width: u32,
+        grid_height: u32,
+    ) -> Option<(u32, u32)> {
+        let (x, y) = self.position?;
+        if surface_width == 0
+            || surface_height == 0
+            || grid_width == 0
+            || grid_height == 0
+            || !x.is_finite()
+            || !y.is_finite()
+            || x < 0.0
+            || y < 0.0
+            || x >= surface_width as f32
+            || y >= surface_height as f32
+        {
+            return None;
+        }
+        let gx = (x * grid_width as f32 / surface_width as f32).floor() as u32;
+        let gy = (y * grid_height as f32 / surface_height as f32).floor() as u32;
+        Some((gx.min(grid_width - 1), gy.min(grid_height - 1)))
+    }
+}
+
 /// App-side pointer bookkeeping: last cursor position and held buttons.
 #[derive(Default)]
 struct PointerTrack {
     last_pos: Option<(f64, f64)>,
     held: [bool; 2],
+    surface_size: (u32, u32),
 }
 
 impl PointerTrack {
+    fn event(
+        &self,
+        delta: (f32, f32),
+        wheel: f32,
+        pressed: [bool; 2],
+        released: [bool; 2],
+    ) -> PointerEvent {
+        PointerEvent {
+            position: self.last_pos.map(|(x, y)| (x as f32, y as f32)),
+            surface_size: self.surface_size,
+            held: self.held,
+            pressed,
+            released,
+            delta,
+            wheel,
+        }
+    }
+
+    fn set_surface_size(&mut self, width: u32, height: u32) {
+        self.surface_size = (width, height);
+    }
+
     /// Drop all physical button state after the window loses focus.  Without
     /// this, a right-drag can remain logically held after Alt-Tab and the next
     /// cursor event unexpectedly rotates the camera.
     fn clear_focus(&mut self) -> PointerEvent {
+        let released = self.held;
         self.held = [false; 2];
         self.last_pos = None;
-        PointerEvent {
-            held: self.held,
-            delta: (0.0, 0.0),
-            wheel: 0.0,
-        }
+        self.event((0.0, 0.0), 0.0, [false; 2], released)
     }
 
     /// Handle a button edge and return the event to forward.
     fn button(&mut self, slot: usize, pressed: bool) -> Option<PointerEvent> {
+        let was_held = self.held[slot];
         self.held[slot] = pressed;
-        Some(PointerEvent {
-            held: self.held,
-            delta: (0.0, 0.0),
-            wheel: 0.0,
-        })
+        let mut pressed_edges = [false; 2];
+        let mut released_edges = [false; 2];
+        pressed_edges[slot] = pressed && !was_held;
+        released_edges[slot] = !pressed && was_held;
+        Some(self.event((0.0, 0.0), 0.0, pressed_edges, released_edges))
     }
 
     /// Handle a cursor move: accumulate the delta into this event.
@@ -160,20 +231,12 @@ impl PointerTrack {
             None => (0.0, 0.0),
         };
         self.last_pos = Some((x, y));
-        Some(PointerEvent {
-            held: self.held,
-            delta,
-            wheel: 0.0,
-        })
+        Some(self.event(delta, 0.0, [false; 2], [false; 2]))
     }
 
     /// Handle a wheel tick line event.
     fn wheel(&mut self, ticks: f32) -> Option<PointerEvent> {
-        Some(PointerEvent {
-            held: self.held,
-            delta: (0.0, 0.0),
-            wheel: ticks,
-        })
+        Some(self.event((0.0, 0.0), ticks, [false; 2], [false; 2]))
     }
 }
 
@@ -645,7 +708,14 @@ impl App {
             cache: None,
         });
 
-        let (grid_w, grid_h) = grid_for_surface(w, h, self.atlas.cell_w, self.atlas.cell_h);
+        let (grid_w, grid_h) = grid_for_surface_limited(
+            w,
+            h,
+            self.atlas.cell_w,
+            self.atlas.cell_h,
+            self.opts.width_cells,
+            self.opts.height_cells,
+        );
         let instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("instances"),
             size: instance_capacity(grid_w, grid_h),
@@ -661,6 +731,7 @@ impl App {
             mapped_at_creation: false,
         });
         self.window = Some(window);
+        self.pointer.set_surface_size(w, h);
         self.gpu = Some(Gpu {
             _instance: instance,
             device,
@@ -683,6 +754,7 @@ impl App {
     }
 
     fn resize(&mut self, width: u32, height: u32) {
+        self.pointer.set_surface_size(width, height);
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
@@ -692,8 +764,14 @@ impl App {
         gpu.config.width = width;
         gpu.config.height = height;
         gpu.surface.configure(&gpu.device, &gpu.config);
-        (gpu.grid_w, gpu.grid_h) =
-            grid_for_surface(width, height, self.atlas.cell_w, self.atlas.cell_h);
+        (gpu.grid_w, gpu.grid_h) = grid_for_surface_limited(
+            width,
+            height,
+            self.atlas.cell_w,
+            self.atlas.cell_h,
+            self.opts.width_cells,
+            self.opts.height_cells,
+        );
         let required = (gpu.grid_w * gpu.grid_h) as usize;
         if required > gpu.instance_cap {
             gpu.instance_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1106,6 +1184,29 @@ fn grid_for_surface(width: u32, height: u32, cell_w: u32, cell_h: u32) -> (u32, 
     ((width / cell_w).max(1), (height / cell_h).max(1))
 }
 
+fn grid_for_surface_limited(
+    width: u32,
+    height: u32,
+    cell_w: u32,
+    cell_h: u32,
+    max_width: u32,
+    max_height: u32,
+) -> (u32, u32) {
+    let (grid_w, grid_h) = grid_for_surface(width, height, cell_w, cell_h);
+    (
+        if max_width == 0 {
+            grid_w
+        } else {
+            grid_w.min(max_width.max(1))
+        },
+        if max_height == 0 {
+            grid_h
+        } else {
+            grid_h.min(max_height.max(1))
+        },
+    )
+}
+
 /// Upload one atlas (256-byte padded rows) and return its texture view.
 /// Shared by the base and 2x overlay atlases.
 fn upload_atlas(
@@ -1345,6 +1446,8 @@ impl winit::application::ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                // Winit's cursor position is already relative to this window
+                // in physical surface pixels; retain it for click mapping.
                 if let Some(ev) = self.pointer.moved(position.x, position.y) {
                     self.source.pointer(ev);
                 }
@@ -1445,8 +1548,8 @@ fn ofs(i: OOut) -> @location(0) vec4<f32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        frame_instances, glide_camera, grid_for_surface, instance_capacity, GlyphInstance,
-        OVERLAY_SHADER, SHADER,
+        frame_instances, glide_camera, grid_for_surface, grid_for_surface_limited,
+        instance_capacity, GlyphInstance, OVERLAY_SHADER, SHADER,
     };
     use crate::{Axis, Cell, Frame, Rgb};
 
@@ -1454,6 +1557,22 @@ mod tests {
     fn grid_uses_surface_pixels_and_keeps_small_surfaces_visible() {
         assert_eq!(grid_for_surface(1920, 1080, 20, 32), (96, 33));
         assert_eq!(grid_for_surface(3, 3, 20, 32), (1, 1));
+    }
+
+    #[test]
+    fn explicit_logical_grid_caps_fullscreen_without_changing_small_windows() {
+        assert_eq!(
+            grid_for_surface_limited(1920, 1080, 6, 10, 160, 56),
+            (160, 56)
+        );
+        assert_eq!(
+            grid_for_surface_limited(640, 480, 6, 10, 160, 56),
+            (106, 48)
+        );
+        assert_eq!(
+            grid_for_surface_limited(1920, 1080, 6, 10, 0, 0),
+            grid_for_surface(1920, 1080, 6, 10)
+        );
     }
 
     #[test]
@@ -1514,28 +1633,45 @@ mod tests {
     }
 
     #[test]
-    fn pointer_track_emits_button_move_and_wheel_edges() {
+    fn pointer_track_emits_absolute_position_and_button_edges() {
         use super::PointerTrack;
         let mut track = PointerTrack::default();
         // Wheel: single slot with held-up ticks, zero delta.
         let wheel = track.wheel(1.0).expect("wheel event");
+        assert_eq!(wheel.position, None, "no cursor position before movement");
         assert!(!wheel.held[0] && !wheel.held[1]);
+        assert_eq!(wheel.pressed, [false, false]);
+        assert_eq!(wheel.released, [false, false]);
         assert_eq!(wheel.delta, (0.0, 0.0));
         assert_eq!(wheel.wheel, 1.0);
         // Right press flips the held slot; drag then reports it with deltas.
         let down = track.button(1, true).expect("button event");
+        assert_eq!(down.position, None);
         assert!(down.held[1], "right slot held");
+        assert_eq!(down.pressed, [false, true]);
+        assert_eq!(down.released, [false, false]);
         assert_eq!(down.delta, (0.0, 0.0));
         let drag = track.moved(400.0, 300.0).expect("first move");
+        assert_eq!(drag.position, Some((400.0, 300.0)));
         assert_eq!(drag.delta, (0.0, 0.0), "first move has no previous cursor");
         let drag = track.moved(364.0, 300.0).expect("second move");
+        assert_eq!(drag.position, Some((364.0, 300.0)));
         assert_eq!(drag.delta, (-36.0, 0.0));
         assert!(drag.held[1], "held slot sticks across moves");
+        assert_eq!(drag.pressed, [false, false]);
+        assert_eq!(drag.released, [false, false]);
         // Release clears the slot; left wheel of 0 is dropped by the caller.
         let up = track.button(1, false).expect("button event");
+        assert_eq!(up.position, Some((364.0, 300.0)));
         assert!(!up.held[1]);
+        assert_eq!(up.pressed, [false, false]);
+        assert_eq!(up.released, [false, true]);
+        let duplicate_up = track.button(1, false).expect("button event");
+        assert_eq!(duplicate_up.pressed, [false, false]);
+        assert_eq!(duplicate_up.released, [false, false]);
         track.last_pos = Some((10.0, 10.0));
         let tick = track.wheel(-2.0).expect("wheel event");
+        assert_eq!(tick.position, Some((10.0, 10.0)));
         assert_eq!(tick.wheel, -2.0);
         assert_eq!(
             tick.delta,
@@ -1544,7 +1680,46 @@ mod tests {
         );
         let cleared = track.clear_focus();
         assert_eq!(cleared.held, [false, false]);
+        assert_eq!(cleared.pressed, [false, false]);
+        assert_eq!(cleared.released, [false, false]);
+        assert_eq!(cleared.position, None);
         assert_eq!(track.last_pos, None, "focus reset drops the drag baseline");
+    }
+
+    #[test]
+    fn pointer_event_maps_surface_pixels_to_grid_cells() {
+        use super::{PointerEvent, PointerTrack};
+
+        let event = PointerEvent {
+            position: Some((639.0, 479.0)),
+            surface_size: (640, 480),
+            held: [false; 2],
+            pressed: [false; 2],
+            released: [false; 2],
+            delta: (0.0, 0.0),
+            wheel: 0.0,
+        };
+        assert_eq!(event.grid_position(640, 480, 80, 30), Some((79, 29)));
+        assert_eq!(event.grid_position(640, 480, 0, 30), None);
+
+        let outside = PointerEvent {
+            position: Some((640.0, 480.0)),
+            ..event
+        };
+        assert_eq!(outside.grid_position(640, 480, 80, 30), None);
+        assert_eq!(
+            PointerEvent {
+                position: None,
+                ..event
+            }
+            .grid_position(640, 480, 80, 30),
+            None
+        );
+
+        let mut held = PointerTrack::default();
+        held.button(0, true).expect("button event");
+        let cleared = held.clear_focus();
+        assert_eq!(cleared.released, [true, false]);
     }
 
     #[test]

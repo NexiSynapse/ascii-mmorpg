@@ -48,6 +48,24 @@ pub enum Effect {
         direction: (f32, f32),
         grow: f32,
     },
+    /// A vertical spell column that reveals upward, with deterministic jagged
+    /// side branches.  The caller can pair it with a [`crate::Wash`] for the
+    /// reference's whole-screen lightning flash.
+    LightningColumn {
+        height: usize,
+        width: usize,
+        grow: f32,
+        seed: u32,
+    },
+    /// Parallel icicles advancing as a wave.  `direction` is the direction
+    /// each spike points; rows are laid out on its perpendicular axis.
+    IcicleWave {
+        rows: usize,
+        length: usize,
+        direction: (f32, f32),
+        spacing: f32,
+        grow: f32,
+    },
     /// Telegraph: a dashed ring that starts at `radius` and sweeps inward
     /// (plus a slow rotation) reaching the origin exactly when the emitter
     /// expires — the reference's "wind-up closes before the hit" language.
@@ -56,6 +74,14 @@ pub enum Effect {
     Implosion {
         count: usize,
         radius: f32,
+    },
+    /// A loose, rising smoke ring.  Unlike [`Effect::Ring`], puffs use a
+    /// small deterministic glyph family and drift upward as the ring opens.
+    SmokeRing {
+        count: usize,
+        radius: f32,
+        rise: f32,
+        seed: u32,
     },
     Number {
         text: String,
@@ -162,6 +188,82 @@ pub fn layer(name: impl Into<String>, z: i32, emitters: &[Emitter], time: f32) -
                     );
                 }
             }
+            Effect::LightningColumn {
+                height,
+                width,
+                grow,
+                seed,
+            } => {
+                if *height == 0 || *width == 0 || !valid_grow(*grow) {
+                    continue;
+                }
+                let revealed = ((age / *grow).floor() as usize).min(*height).min(MAX_CELLS);
+                let half = (*width / 2) as i32;
+                for row in 0..revealed {
+                    let jitter = ((hash_unit(seed.wrapping_add(row as u32)) / 45.0).round() as i32
+                        % (*width as i32))
+                        - half;
+                    let y = emitter.origin.1 - row as f32;
+                    let glyph = if row % 4 == 0 { '+' } else { '|' };
+                    push(
+                        &mut out,
+                        emitter,
+                        emitter.origin.0 + jitter as f32,
+                        y,
+                        glyph,
+                        age,
+                    );
+                    if row > 1 && row % 3 == 0 {
+                        let side = if row % 2 == 0 { 1.0 } else { -1.0 };
+                        push(
+                            &mut out,
+                            emitter,
+                            emitter.origin.0 + jitter as f32 + side,
+                            y + 1.0,
+                            if side > 0.0 { '/' } else { '\\' },
+                            age,
+                        );
+                    }
+                }
+            }
+            Effect::IcicleWave {
+                rows,
+                length,
+                direction,
+                spacing,
+                grow,
+            } => {
+                if *rows == 0
+                    || *length == 0
+                    || !valid_grow(*grow)
+                    || !spacing.is_finite()
+                    || *spacing < 0.0
+                    || !valid_direction(*direction)
+                {
+                    continue;
+                }
+                let revealed_rows = ((age / *grow).floor() as usize).min(*rows).min(MAX_CELLS);
+                let norm = (direction.0 * direction.0 + direction.1 * direction.1)
+                    .sqrt()
+                    .max(1.0e-6);
+                let (dx, dy) = (direction.0 / norm, direction.1 / norm);
+                let (px, py) = (-dy, dx);
+                for row in 0..revealed_rows {
+                    let base_x = emitter.origin.0 + px * row as f32 * *spacing;
+                    let base_y = emitter.origin.1 + py * row as f32 * *spacing;
+                    for i in 0..(*length).min(MAX_CELLS) {
+                        let distance = i as f32 + 1.0;
+                        push(
+                            &mut out,
+                            emitter,
+                            base_x + dx * distance,
+                            base_y + dy * distance,
+                            if i == 0 { '^' } else { ray_glyph(*direction) },
+                            age,
+                        );
+                    }
+                }
+            }
             Effect::Implosion { count, radius } => {
                 if *count == 0 || !radius.is_finite() || *radius < 0.0 {
                     continue;
@@ -186,6 +288,46 @@ pub fn layer(name: impl Into<String>, z: i32, emitters: &[Emitter], time: f32) -
                         emitter,
                         emitter.origin.0 + radians.cos() * r,
                         emitter.origin.1 + radians.sin() * r,
+                        glyph,
+                        age,
+                    );
+                }
+            }
+            Effect::SmokeRing {
+                count,
+                radius,
+                rise,
+                seed,
+            } => {
+                if *count == 0
+                    || !radius.is_finite()
+                    || *radius < 0.0
+                    || !rise.is_finite()
+                    || *rise < 0.0
+                {
+                    continue;
+                }
+                let n = (*count).min(MAX_CELLS);
+                let progress = (age / emitter.lifetime).clamp(0.0, 1.0);
+                let r = *radius * (0.35 + progress * 0.65);
+                for i in 0..n {
+                    let angle = (i as f32 * 360.0 / n as f32
+                        + hash_unit(seed.wrapping_add(i as u32)) * 0.18
+                        + age * 18.0)
+                        .to_radians();
+                    let wobble = 1.0 + 0.12 * (age * 3.0 + i as f32).sin();
+                    let glyph = match (hash_unit(seed.wrapping_add(i as u32 + 17)) / 90.0) as usize
+                    {
+                        0 => 'o',
+                        1 => 'O',
+                        2 => '@',
+                        _ => '*',
+                    };
+                    push(
+                        &mut out,
+                        emitter,
+                        emitter.origin.0 + angle.cos() * r * wobble,
+                        emitter.origin.1 + angle.sin() * r * wobble - *rise * age,
                         glyph,
                         age,
                     );
@@ -405,6 +547,56 @@ mod tests {
         assert_eq!(layer("x", 0, &chain, 2.5).cells.len(), 1);
         assert_eq!(layer("x", 0, &chain, 3.1).cells.len(), 2);
         assert_eq!(layer("x", 0, &spike, 3.9).cells.len(), 2);
+    }
+
+    #[test]
+    fn lightning_column_reveals_branches_upward() {
+        let column = [e(Effect::LightningColumn {
+            height: 6,
+            width: 5,
+            grow: 0.5,
+            seed: 12,
+        })];
+        let early = layer("x", 0, &column, 1.5);
+        let late = layer("x", 0, &column, 4.0);
+        assert!(late.cells.len() > early.cells.len());
+        assert!(late.cells.iter().any(|c| c.cell.glyph == '+'));
+        assert!(late.cells.iter().any(|c| c.y < 3));
+    }
+
+    #[test]
+    fn icicle_wave_reveals_parallel_rows() {
+        let wave = [e(Effect::IcicleWave {
+            rows: 3,
+            length: 4,
+            direction: (1.0, 0.0),
+            spacing: 2.0,
+            grow: 1.0,
+        })];
+        assert_eq!(layer("x", 0, &wave, 3.9).cells.len(), 8);
+        let full = layer("x", 0, &wave, 4.0);
+        assert_eq!(full.cells.len(), 12);
+        assert!(full.cells.iter().any(|c| c.cell.glyph == '^'));
+        assert!(full.cells.iter().any(|c| c.y != 3));
+    }
+
+    #[test]
+    fn smoke_ring_rises_and_uses_cloud_glyphs() {
+        let smoke = [e(Effect::SmokeRing {
+            count: 12,
+            radius: 3.0,
+            rise: 0.5,
+            seed: 4,
+        })];
+        let low = layer("x", 0, &smoke, 1.2);
+        let high = layer("x", 0, &smoke, 3.0);
+        assert_eq!(low.cells.len(), 12);
+        assert_eq!(high.cells.len(), 12);
+        assert!(high.cells.iter().any(|c| c.y < low.cells[0].y));
+        assert!(high
+            .cells
+            .iter()
+            .all(|c| matches!(c.cell.glyph, 'o' | 'O' | '@' | '*')));
     }
 
     #[test]
