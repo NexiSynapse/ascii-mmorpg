@@ -1,49 +1,33 @@
-//! Compact ASCII atlas for Veyrath — The Dying Crown.
+//! Compact printable Veyrath atlas backed by the shared semantic model.
 //!
-//! The source checkpoint stays editable in Azgaar. This derived atlas is the
-//! terminal-native view used by the in-game World Map modal; it deliberately
-//! uses only printable ASCII so it remains legible in plain terminals.
+//! The atlas is a derived/fallback terminal view. Political colours, faction
+//! names, region metadata, roads, rivers, settlements, and landmarks come from
+//! `ascii-mmorpg-shared::veyrath`, so the World Map does not maintain a second
+//! hand-authored copy of the visual facts.
 
-pub const ASCII_ATLAS: &str = include_str!("../../assets/maps/veyrath/veyrath-04-ascii.txt");
+use ascii_mmorpg_shared::veyrath::{self, Color};
 
-pub const REGION_LEGEND: &[(&str, char, (u8, u8, u8))] = &[
-    ("Ashen Synod", 'a', (190, 195, 205)),
-    ("House Gallowmere", 'g', (110, 165, 135)),
-    ("Crown of Veyrath", 'c', (205, 190, 155)),
-    ("Greyfall Compact", 'v', (180, 165, 130)),
-    ("Mire Courts", 'm', (125, 170, 180)),
-    ("Blackwake League", 'b', (120, 155, 175)),
-];
-
-pub const ATLAS_NOTE: &str = "Millhaven (*): starter settlement in Greyfall Vale";
-
-pub fn atlas_lines(max_width: usize, max_height: usize) -> Vec<String> {
-    ASCII_ATLAS
-        .lines()
-        .take(max_height)
-        .map(|line| line.chars().take(max_width).collect())
-        .collect()
+pub fn ascii_atlas() -> &'static str {
+    veyrath::visual_data().atlas
 }
 
-pub fn glyph_color(glyph: char) -> (u8, u8, u8) {
-    match glyph {
-        'a' => (190, 195, 205),
-        'g' => (110, 165, 135),
-        'c' => (205, 190, 155),
-        'v' => (180, 165, 130),
-        'm' => (125, 170, 180),
-        'b' => (120, 155, 175),
-        'A' | 'D' | 'G' | 'M' | 'B' => (255, 215, 120),
-        '@' => (255, 255, 255),
-        '*' => (120, 255, 160),
-        '^' => (175, 180, 190),
-        '~' => (70, 135, 195),
-        ':' => (85, 180, 215),
-        '=' => (205, 155, 90),
-        '.' => (145, 135, 125),
-        '+' | '-' | '|' => (90, 120, 100),
-        _ => (150, 155, 165),
-    }
+pub fn region_legend() -> impl Iterator<Item = (&'static str, char, Color)> {
+    veyrath::visual_data()
+        .factions
+        .iter()
+        .map(|faction| (faction.name.as_str(), faction.atlas_glyph, faction.color))
+}
+
+pub fn atlas_note() -> String {
+    veyrath::visual_data().atlas_note()
+}
+
+pub fn atlas_lines(max_width: usize, max_height: usize) -> Vec<String> {
+    veyrath::visual_data().atlas_lines(max_width, max_height)
+}
+
+pub fn glyph_color(glyph: char) -> Color {
+    veyrath::visual_data().glyph_color(glyph)
 }
 
 #[cfg(test)]
@@ -52,12 +36,13 @@ mod tests {
 
     #[test]
     fn atlas_is_printable_and_contains_the_checkpoint_shape() {
-        assert!(ASCII_ATLAS.lines().count() >= 16);
-        assert!(ASCII_ATLAS.lines().all(|line| line.is_ascii()));
-        assert!(ASCII_ATLAS.contains('@'));
-        assert!(ASCII_ATLAS.contains('*'));
-        assert!(ASCII_ATLAS.contains('~'));
-        assert!(ASCII_ATLAS.contains('^'));
+        let atlas = ascii_atlas();
+        assert!(atlas.lines().count() >= 16);
+        assert!(atlas.lines().all(|line| line.is_ascii()));
+        assert!(atlas.contains('@'));
+        assert!(atlas.contains('*'));
+        assert!(atlas.contains('~'));
+        assert!(atlas.contains('^'));
     }
 
     #[test]
@@ -65,5 +50,20 @@ mod tests {
         let lines = atlas_lines(38, 16);
         assert_eq!(lines.len(), 16);
         assert!(lines.iter().all(|line| line.chars().count() <= 38));
+    }
+
+    #[test]
+    fn map_view_uses_shared_faction_colours_and_provisional_status() {
+        let legend: Vec<_> = region_legend().collect();
+        assert_eq!(legend.len(), 6);
+        assert_eq!(
+            legend.iter().find(|(_, glyph, _)| *glyph == 'v').unwrap().2,
+            [138, 123, 96]
+        );
+        assert_eq!(
+            ascii_mmorpg_shared::veyrath::visual_data().coordinate_status,
+            ascii_mmorpg_shared::veyrath::CoordinateStatus::Provisional
+        );
+        assert!(atlas_note().contains("Millhaven"));
     }
 }

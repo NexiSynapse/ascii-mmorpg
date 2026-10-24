@@ -1,4 +1,4 @@
-use super::{sample, Camera, Cell, ColorTrack, Rgb, Scene, Wash};
+use super::{emission::EmissionSource, sample, Camera, Cell, ColorTrack, Rgb, Scene, Wash};
 
 /// One flattened frame: resolved glyphs + style per grid cell. This is what a
 /// presenter (terminal today, windowed GUI next) draws; the engine itself
@@ -13,6 +13,9 @@ pub struct Frame {
     /// renderer contract: the world has a pure black void and only glyph
     /// foregrounds carry environmental colour.
     world_cells: Vec<bool>,
+    /// Glow sources retained independently of the visible topmost cell. This
+    /// preserves lower-layer emitters for float bloom after composition.
+    emission_sources: Vec<EmissionSource>,
 }
 
 impl Frame {
@@ -22,6 +25,7 @@ impl Frame {
             h,
             cells: vec![Cell::CLEAR; w.max(0) as usize * h.max(0) as usize],
             world_cells: vec![false; w.max(0) as usize * h.max(0) as usize],
+            emission_sources: Vec::new(),
         }
     }
 
@@ -54,6 +58,20 @@ impl Frame {
         self.world_cells[(y * self.w + x) as usize]
     }
 
+    /// Bounded world glow sources sampled before lighting, including emitters
+    /// hidden under a later opaque layer. UI and noncontributors are excluded.
+    pub fn emission_sources(&self) -> &[EmissionSource] {
+        &self.emission_sources
+    }
+
+    fn retain_world_emission(&mut self, x: i32, y: i32, cell: Cell) {
+        if self.emission_sources.len() < super::emission::MAX_SOURCE_COUNT {
+            if let Some(source) = EmissionSource::from_world_cell(x, y, cell) {
+                self.emission_sources.push(source);
+            }
+        }
+    }
+
     /// Plain glyph rows (for tests and headless previews; presenter adds color).
     pub fn rows(&self) -> Vec<String> {
         (0..self.h)
@@ -71,6 +89,17 @@ impl Frame {
 /// each animated cell is sampled, camera-shifted (camera partitions only),
 /// clipped to the partition rect, and the topmost non-transparent cell wins.
 pub fn compose(scene: &Scene, camera: &Camera, t: f32) -> Frame {
+    compose_inner(scene, camera, t, false)
+}
+
+/// Compose raw world foregrounds for continuous emission/bloom. World glow is
+/// retained as sources instead of being baked into 8-bit foreground colours;
+/// pinned UI glow and the scene's background wash keep their legacy behaviour.
+pub fn compose_for_continuous(scene: &Scene, camera: &Camera, t: f32) -> Frame {
+    compose_inner(scene, camera, t, true)
+}
+
+fn compose_inner(scene: &Scene, camera: &Camera, t: f32, continuous: bool) -> Frame {
     let w = scene
         .partitions
         .iter()
@@ -126,7 +155,12 @@ pub fn compose(scene: &Scene, camera: &Camera, t: f32) -> Frame {
                         let mut resolved = cell.cell;
                         resolved.fg = flat;
                         if resolved.glow.is_finite() && resolved.glow > 0.0 {
-                            glow_sources.push((x, y, resolved, partition.camera));
+                            if partition.camera {
+                                frame.retain_world_emission(x, y, resolved);
+                            }
+                            if !continuous || !partition.camera {
+                                glow_sources.push((x, y, resolved, partition.camera));
+                            }
                         }
                         frame.set_partition_cell(x, y, resolved, partition.camera);
                         continue;
@@ -150,7 +184,12 @@ pub fn compose(scene: &Scene, camera: &Camera, t: f32) -> Frame {
                 );
                 resolved.fg = resolved.fg.scaled(s.bright);
                 if resolved.glow.is_finite() && resolved.glow > 0.0 {
-                    glow_sources.push((x, y, resolved, partition.camera));
+                    if partition.camera {
+                        frame.retain_world_emission(x, y, resolved);
+                    }
+                    if !continuous || !partition.camera {
+                        glow_sources.push((x, y, resolved, partition.camera));
+                    }
                 }
                 frame.set_partition_cell(x, y, resolved, partition.camera);
             }
@@ -605,5 +644,234 @@ mod tests {
         scene.layers[0].cells[0].cell.glow = f32::MAX;
         let extreme = compose(&scene, &Camera::default(), 0.0);
         assert!(extreme.get(7, 3).unwrap().bg.r > 0);
+    }
+
+    #[test]
+    fn continuous_composition_replaces_legacy_world_glow() {
+        let mut scene = Scene::default();
+        let mut world = Layer::new("world", 0);
+        world.push(AnimCell::still(
+            0,
+            0,
+            Cell::new('*', Rgb::new(255, 0, 0), Rgb::new(0, 0, 0)).with_glow(1.0),
+        ));
+        let ink = Cell::new('#', Rgb::new(20, 20, 20), Rgb::new(0, 0, 0))
+            .with_fg_gradient(Rgb::new(5, 10, 15), Axis::X);
+        world.push(AnimCell::still(1, 0, ink));
+        scene.layers.push(world);
+        scene
+            .partitions
+            .push(Partition::new("world", 0, 0, 2, 1, vec![0], true));
+
+        let legacy = compose(&scene, &Camera::default(), 0.0);
+        let mut continuous =
+            crate::compose::compose_for_continuous(&scene, &Camera::default(), 0.0);
+        assert_eq!(legacy.get(1, 0).unwrap().fg, Rgb::new(60, 19, 19));
+        assert_eq!(continuous.get(1, 0), Some(ink));
+
+        let field = crate::emission::BloomField::from_frame(&continuous);
+        field.apply_to_frame_world_ink(&mut continuous);
+        let lit = continuous.get(1, 0).unwrap();
+        assert_eq!(lit.fg, Rgb::new(77, 20, 20), "float spill is applied once");
+        assert_eq!(lit.fg_end, Rgb::new(62, 10, 15));
+        assert_eq!(lit.bg, Rgb::new(0, 0, 0));
+    }
+
+    #[test]
+    fn continuous_hud_over_world_keeps_legacy_ui_glow_and_wash() {
+        let mut scene = Scene::default();
+        let mut world = Layer::new("world", 0);
+        world.push(AnimCell::still(
+            0,
+            0,
+            Cell::new('*', Rgb::new(255, 0, 0), Rgb::new(0, 0, 0)).with_glow(1.0),
+        ));
+        let ink = Cell::new('#', Rgb::new(20, 20, 20), Rgb::new(0, 0, 0));
+        world.push(AnimCell::still(1, 0, ink));
+        let mut hud = Layer::new("hud", 1);
+        hud.push(AnimCell::still(
+            0,
+            0,
+            Cell::new('H', Rgb::new(0, 255, 0), Rgb::new(1, 2, 3)).with_glow(1.0),
+        ));
+        scene.layers = vec![world, hud];
+        scene.partitions = vec![
+            Partition::new("world", 0, 0, 2, 1, vec![0], true),
+            Partition::new("hud", 0, 0, 1, 1, vec![1], false),
+        ];
+        scene.wash = Some(Wash {
+            tint: Rgb::new(10, 20, 30),
+            strength: 0.5,
+        });
+
+        let legacy = compose(&scene, &Camera::default(), 0.0);
+        let mut continuous = compose_for_continuous(&scene, &Camera::default(), 0.0);
+        let ui = continuous.get(0, 0).unwrap();
+        assert!(!continuous.is_world(0, 0));
+        assert_eq!(ui, legacy.get(0, 0).unwrap());
+        assert_eq!(ui.bg, Rgb::new(6, 42, 18));
+        assert_eq!(
+            continuous.get(1, 0),
+            Some(ink),
+            "UI glow cannot light world ink"
+        );
+
+        let field = crate::emission::BloomField::from_frame(&continuous);
+        assert_eq!(
+            field.source_count(),
+            1,
+            "only the hidden world source emits"
+        );
+        field.apply_to_frame_world_ink(&mut continuous);
+        assert_eq!(continuous.get(0, 0), Some(ui));
+        assert!(!continuous.is_world(0, 0));
+        assert_eq!(continuous.get(1, 0).unwrap().fg, Rgb::new(77, 20, 20));
+    }
+
+    #[test]
+    fn continuous_source_budget_skips_ui_and_invalid_world_emitters() {
+        use crate::emission::MAX_SOURCE_COUNT;
+
+        let red = Rgb::new(255, 0, 0);
+        let mut scene = Scene::default();
+        let mut hud = Layer::new("hud", 0);
+        let mut world = Layer::new("world", 0);
+        for _ in 0..=MAX_SOURCE_COUNT {
+            hud.push(AnimCell::still(
+                0,
+                0,
+                Cell::new('H', red, Rgb::new(0, 0, 0)).with_glow(1.0),
+            ));
+            for (color, glow) in [
+                (Rgb::new(0, 0, 0), 1.0),
+                (red, 0.0),
+                (red, f32::NAN),
+                (red, f32::INFINITY),
+            ] {
+                let mut cell = Cell::new('*', color, Rgb::new(0, 0, 0));
+                cell.glow = glow;
+                world.push(AnimCell::still(0, 0, cell));
+            }
+        }
+        let emitter = Cell::new('*', Rgb::new(255, 90, 20), Rgb::new(0, 0, 0)).with_glow(1.0);
+        world.push(AnimCell::still(1, 0, emitter));
+        scene.layers = vec![hud, world];
+        scene.partitions = vec![
+            Partition::new("hud", 0, 0, 2, 1, vec![0], false),
+            Partition::new("world", 0, 0, 2, 1, vec![1], true),
+        ];
+
+        let frame = compose_for_continuous(&scene, &Camera::default(), 0.0);
+        assert_eq!(frame.emission_sources().len(), 1);
+        let sources = EmissionSource::from_frame(&frame);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].color, emitter.fg);
+        assert!(sources[0].world);
+
+        for _ in 0..=MAX_SOURCE_COUNT {
+            scene.layers[1].push(AnimCell::still(1, 0, emitter));
+        }
+        let capped = compose_for_continuous(&scene, &Camera::default(), 0.0);
+        assert_eq!(capped.emission_sources().len(), MAX_SOURCE_COUNT);
+        assert_eq!(EmissionSource::from_frame(&capped).len(), MAX_SOURCE_COUNT);
+    }
+
+    #[test]
+    fn continuous_retains_hidden_fractional_emitters_in_both_sampling_paths() {
+        use crate::emission::EmissionPosition;
+        use crate::Point2;
+
+        for animated in [false, true] {
+            let mut scene = Scene::default();
+            let mut glow = Layer::new("glow", -1);
+            let mut emitter = AnimCell::still(
+                5,
+                3,
+                Cell::new(' ', Rgb::new(255, 80, 20), Rgb::new(0, 0, 0))
+                    .with_glow(1.0)
+                    .with_offset(0.25, -0.5),
+            );
+            if animated {
+                emitter.anim = Anim::still().with(Track::Pulse {
+                    low: 0.5,
+                    high: 0.5,
+                    period: 1.0,
+                    phase: 0.0,
+                });
+            }
+            glow.push(emitter);
+            let mut terrain = Layer::new("terrain", 0);
+            let ink = Cell::new('#', Rgb::new(20, 20, 20), Rgb::new(0, 0, 0));
+            terrain.push(AnimCell::still(5, 3, ink));
+            scene.layers = vec![glow, terrain];
+            scene
+                .partitions
+                .push(Partition::new("world", 2, 1, 4, 3, vec![0, 1], true));
+            let camera = Camera {
+                x: 4,
+                y: 2,
+                ox: 0.3,
+                oy: 0.7,
+            };
+
+            let frame = compose_for_continuous(&scene, &camera, 0.25);
+            assert_eq!(frame.get(3, 2), Some(ink));
+            let sources = EmissionSource::from_frame(&frame);
+            assert_eq!(sources.len(), 1);
+            assert_eq!(
+                sources[0].position,
+                EmissionPosition::Continuous(Point2::new(3.25, 1.5))
+            );
+            assert_eq!(
+                sources[0].color,
+                if animated {
+                    Rgb::new(127, 40, 10)
+                } else {
+                    Rgb::new(255, 80, 20)
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_glow_is_not_capped_by_the_continuous_source_budget() {
+        for (world, animated) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut scene = Scene::default();
+            let mut layer = Layer::new("emitters", 0);
+            let emitter = Cell::new('*', Rgb::new(255, 0, 0), Rgb::new(0, 0, 0)).with_glow(1.0);
+            for _ in 0..=crate::emission::MAX_SOURCE_COUNT {
+                layer.push(AnimCell::still(0, 0, emitter));
+            }
+            // The last emitter is isolated from the first 129. Check both
+            // sampling paths independently for an accidental legacy cap.
+            let anim = if animated {
+                Anim::still().with(Track::Pulse {
+                    low: 1.0,
+                    high: 1.0,
+                    period: 1.0,
+                    phase: 0.0,
+                })
+            } else {
+                Anim::still()
+            };
+            layer.push(AnimCell::animated(16, 0, emitter, anim));
+            layer.push(AnimCell::still(
+                17,
+                0,
+                Cell::new('#', Rgb::new(20, 20, 20), Rgb::new(0, 0, 0)),
+            ));
+            scene.layers.push(layer);
+            scene
+                .partitions
+                .push(Partition::new("all", 0, 0, 18, 1, vec![0], world));
+
+            let frame = compose(&scene, &Camera::default(), 0.0);
+            let target = frame.get(17, 0).unwrap();
+            if world {
+                assert_eq!(target.fg, Rgb::new(60, 19, 19));
+            } else {
+                assert_eq!(target.bg, Rgb::new(21, 0, 0));
+            }
+        }
     }
 }

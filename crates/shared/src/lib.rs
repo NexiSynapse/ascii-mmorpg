@@ -6,6 +6,7 @@ pub mod combat;
 pub mod content;
 pub mod loot;
 pub mod protocol;
+pub mod veyrath;
 
 pub use collision::*;
 pub use combat::{in_melee_range, resolve_attack, CombatResult, MELEE_RANGE};

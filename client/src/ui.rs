@@ -1278,20 +1278,24 @@ impl RatatuiHud {
                     for glyph in line.chars() {
                         let color = veyrath::glyph_color(glyph);
                         if current_color != Some(color) && !current.is_empty() {
-                            let previous = current_color.unwrap_or((150, 155, 165));
+                            let previous = current_color.unwrap_or([150, 155, 165]);
                             spans.push(Span::styled(
                                 std::mem::take(&mut current),
-                                Style::default().fg(Color::Rgb(previous.0, previous.1, previous.2)),
+                                Style::default().fg(Color::Rgb(
+                                    previous[0],
+                                    previous[1],
+                                    previous[2],
+                                )),
                             ));
                         }
                         current_color = Some(color);
                         current.push(glyph);
                     }
                     if !current.is_empty() {
-                        let color = current_color.unwrap_or((150, 155, 165));
+                        let color = current_color.unwrap_or([150, 155, 165]);
                         spans.push(Span::styled(
                             current,
-                            Style::default().fg(Color::Rgb(color.0, color.1, color.2)),
+                            Style::default().fg(Color::Rgb(color[0], color[1], color[2])),
                         ));
                     }
                     Line::from(spans)
@@ -1312,7 +1316,10 @@ impl RatatuiHud {
             Line::from(vec![
                 Span::styled("Region: ", Style::default().fg(Color::Rgb(160, 160, 160))),
                 Span::styled(
-                    "Greyfall Vale",
+                    ascii_mmorpg_shared::veyrath::visual_data()
+                        .region("greyfall")
+                        .map(|region| region.name.as_str())
+                        .unwrap_or("provisional region"),
                     Style::default().fg(Color::Rgb(140, 190, 230)),
                 ),
             ]),
@@ -1321,17 +1328,17 @@ impl RatatuiHud {
                 Style::default().fg(Color::Rgb(255, 215, 120)),
             )]),
             Line::from(vec![Span::styled(
-                veyrath::ATLAS_NOTE,
+                veyrath::atlas_note(),
                 Style::default().fg(Color::Rgb(140, 190, 150)),
             )]),
         ];
-        for (name, glyph, color) in veyrath::REGION_LEGEND {
+        for (name, glyph, color) in veyrath::region_legend() {
             legend_lines.push(Line::from(vec![
                 Span::styled(
                     format!("{glyph} "),
-                    Style::default().fg(Color::Rgb(color.0, color.1, color.2)),
+                    Style::default().fg(Color::Rgb(color[0], color[1], color[2])),
                 ),
-                Span::styled(*name, Style::default().fg(Color::Rgb(190, 195, 205))),
+                Span::styled(name, Style::default().fg(Color::Rgb(190, 195, 205))),
             ]));
         }
         legend_lines.extend([

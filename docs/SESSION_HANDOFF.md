@@ -1,6 +1,177 @@
 # ASCII MMORPG — session handoff
 
-Updated: 2026-10-21. This is the resumable engineering record, not a full transcript.
+Updated: 2026-10-25. This is the resumable engineering record, not a full transcript.
+
+## Completed: ticket #4 review fixes and ticket #6 visual data slice (2026-10-25)
+
+### Root causes fixed
+
+- Native glyph instances add the presenter's half-cell centre translation, while
+  native emission sources did not; the emission bridge now uses the same centre.
+- `--continuous-torch` previously kept the legacy flame/crackle meshes while
+  also emitting native primitives; the gated mesh path now retains only the
+  torch base and leaves flame/crackles to the native scene.
+- `ContinuousScene::sample` previously sampled, allocated, and sorted every
+  authored primitive before truncating. It now selects a bounded nearest-depth
+  tail by authored order, then samples only retained primitives and sorts them
+  deterministically.
+- Continuous bloom is always prepared and encoded on continuous frames; the
+  non-owning path uploads an empty source list so a previous owning frame cannot
+  leak stale lighting.
+- Native primitive append no longer returns early for a zero-sized composed
+  frame.
+- Radial gradients now use a distinct radial distance blend in both glyph
+  shaders instead of silently taking the vertical path.
+
+### Ticket #6 implementation
+
+- Added `crates/shared/src/veyrath.rs`, a typed renderer-agnostic model parsed
+  from embedded `assets/maps/veyrath/world-design.json`. It exposes factions and
+  colours, regions, roads, rivers, settlements, landmarks, starter/social-hub
+  references, checkpoint status, and explicit provisional coordinate status.
+- `client/src/veyrath.rs` and the World Map modal now consume that shared model;
+  the printable `veyrath-04-ascii.txt` atlas remains a derived/fallback view.
+- `engine` now depends on the shared Veyrath model and the play HUD consumes its
+  region metadata. The source remains presentation-only; no server authority,
+  collision, protocol, or simulation positions use provisional coordinates.
+
+### Exact changed paths
+
+- `Cargo.lock`
+- `crates/shared/Cargo.toml`
+- `crates/shared/src/lib.rs`
+- `crates/shared/src/veyrath.rs`
+- `client/src/veyrath.rs`
+- `client/src/ui.rs`
+- `engine/Cargo.toml`
+- `engine/src/lib.rs`
+- `engine/src/continuous.rs`
+- `engine/src/emission.rs`
+- `engine/src/present.rs`
+- `engine/src/present/bloom.rs`
+- `engine/examples/play.rs`
+- `docs/SESSION_HANDOFF.md`
+
+### Verification (2026-10-25, Windows)
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo test --locked --workspace`: passed — 111 client tests, 143 engine
+  tests, 16 shared tests, and all other workspace/doc tests.
+- `cargo run --locked -p ascii-mmorpg-tools -- content`: passed — 11
+  definitions.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: passed.
+- `cargo check --locked -p ascii-mmorpg-engine --features present --examples`:
+  passed.
+- `cargo test --locked -p ascii-mmorpg-engine --features present --lib`: passed
+  — 175 tests, including Vulkan bloom readback and the new presenter contracts.
+- Focused Veyrath tests: shared 2 passed; client Veyrath 3 passed; World Map
+  modal regression 1 passed.
+- `cargo test --locked -p ascii-mmorpg-engine --lib continuous::tests`: passed
+  — 6 tests.
+- `cargo test --locked -p ascii-mmorpg-engine --features present --lib
+  emission::tests`: passed — 11 tests.
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example play
+  -- --check`: passed.
+- 30-frame Vulkan smoke runs passed on the NVIDIA GeForce GTX 1650 for default
+  continuous, `--continuous-torch`, and `--grid`.
+- `git diff --check`: passed; only the standing LF/CRLF conversion warnings
+  were reported.
+- `latest.patch` remains pre-existing, untracked, and untouched.
+
+### Ticket status and next action
+
+Ticket #4 review findings are fixed in the current uncommitted worktree. The
+smallest complete ticket #6 visual-data slice is implemented and verified; no
+issue state was changed. There are no known blockers. Next action: obtain the
+user's live visual acceptance for the continuous/default and native-torch paths,
+then decide whether to commit/close #4 and #6 or continue the next renderer
+slice.
+
+## Review-fix handoff and next ticket (2026-10-24)
+
+The current uncommitted ticket #4 work was reviewed read-only against commit
+`84b441d` (`feat: add continuous canvas presentation`). The review found six
+actionable issues. A fresh agent should fix these first, then continue with the
+next unblocked GitHub ticket. Do not include the pre-existing untracked
+`latest.patch` artifact in any commit.
+
+### Review findings to fix
+
+1. **High — native emission is half-cell offset** (`engine/src/present.rs`,
+   native instance/emission conversion around the current append site). Native
+   glyph quads render at `primitive.position + 0.5`, while emission sources use
+   the unconverted primitive position. Align the emission centre with the glyph
+   centre and add an end-to-end regression assertion.
+2. **Medium — gated torches render legacy and native geometry twice**
+   (`engine/examples/play.rs`, `--continuous-torch`). Disable the legacy flame
+   and crackle meshes when native torch rendering is enabled; keep the default
+   legacy path unchanged.
+3. **Medium — primitive cap does not bound sampling work**
+   (`engine/src/continuous.rs`, `ContinuousScene::sample`). Avoid collecting
+   and sorting an unbounded primitive list before truncating to
+   `MAX_NATIVE_PRIMITIVES`; keep deterministic nearest-depth-tail semantics.
+4. **Medium — stale bloom survives ownership changes**
+   (`engine/src/present.rs`, continuous bloom encoding/sampling). When world
+   lighting ownership is disabled after being enabled, the shader must not keep
+   sampling the previous frame's bloom; clear/encode an empty field or gate the
+   sample explicitly.
+5. **Medium — native-only scenes render nothing**
+   (`engine/src/present.rs`, `frame_continuous_instances`). Native primitives
+   must still append when the composed frame has zero rows/columns.
+6. **Low — radial gradients are silently rendered as vertical**
+   (`engine/src/present.rs`, native gradient mapping/shader). Preserve radial
+   semantics or explicitly reject/document the unsupported material mode; add a
+   focused contract test.
+
+### Parallel-work ownership
+
+- The fixing agent owns the six findings above and the related files under
+  `engine/src/present.rs`, `engine/src/continuous.rs`, and
+  `engine/examples/play.rs`, plus focused tests and this handoff update.
+- The next GitHub ticket is **#6 — Veyrath visual data model**. Issues #2 and
+  #3 are closed, so #6 is the next unblocked child; #5, #8, and #9 remain
+  blocked by ticket #4, while #7 and #10 remain downstream.
+- Ticket #6 must expose one shared semantic source for the renderer and the
+  existing World Map UI: regions, faction colours, roads, rivers, settlements,
+  landmarks, and provisional/accepted status. Do not make provisional map
+  coordinates authoritative collision or server state.
+- Preserve `engine`/`client` authority boundaries, the `--grid` fallback, and
+  the existing uncommitted ticket #4 changes while working in parallel.
+
+### Required checks before handoff completion
+
+- `cargo fmt --all -- --check`
+- `cargo test --locked --workspace`
+- `cargo run --locked -p ascii-mmorpg-tools -- content`
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`
+- `cargo check --locked -p ascii-mmorpg-engine --features present --examples`
+- Focused tests for changed modules, `play --check`, and 30-frame Vulkan smoke
+  runs for default continuous, `--continuous-torch`, and `--grid`.
+- `git diff --check`
+- Verify `git status --short` and exclude `latest.patch`.
+
+### Suggested skills for the next agent
+
+- `diagnosing-bugs` or `project-debug` for the six review findings.
+- `project-feature` or `implement` for ticket #6.
+- `project-handoff` for the final resumable update.
+- `code-review` before committing the combined result.
+
+### Immediate next action
+
+Read this section and the temporary handoff supplied with the task, inspect the
+current worktree without resetting existing changes, fix findings 1–6 with
+regression tests, then implement the smallest complete ticket #6 slice and
+report exact checks and any remaining blockers. Commit/push only after the
+combined work is verified and the user has accepted the review result.
+
+### Delegation status
+
+The implementation delegation was attempted on 2026-10-24 but could not start:
+the agent runtime reported that every model seat was occupied and the request
+timed out while waiting. The temporary handoff is complete and ready to retry;
+no code changes, commits, pushes, issue comments, or issue closures were made
+by the attempted agent.
 
 ## Remote map sync and continuous renderer specification (2026-10-21)
 
@@ -44,9 +215,12 @@ Updated: 2026-10-21. This is the resumable engineering record, not a full transc
 ### Published implementation tickets
 
 - #2 Continuous primitive scene seam — no blocker.
-- #3 Continuous GPU canvas and aspect-preserving presentation — blocked by #2.
-- #4 Floating-point emission and bloom — blocked by #3.
-- #5 Torch and sun showcase — blocked by #4.
+- #3 Continuous GPU canvas and aspect-preserving presentation — implemented;
+  live visual acceptance remains pending.
+- #4 Floating-point emission and bloom — implemented; commit/push and issue
+  closure remain, with live visual acceptance pending.
+- #5 Torch and sun showcase — next bounded slice; blocked by #4 closure/live
+  visual acceptance.
 - #6 Veyrath visual data model — blocked by #2.
 - #7 Veyrath-backed continuous world — blocked by #3 and #6.
 - #8 Animated layered characters — blocked by #3 and #4.
@@ -150,6 +324,148 @@ live visual acceptance.
 Close ticket #3 after the commit/push. Ticket #4 can then add floating-point
 emission and bloom on top of this canvas; do not migrate the in-world torch
 path until the isolated showcase is visually accepted.
+
+## Ticket #4: floating-point emission and bloom (2026-10-23)
+
+### Changed
+
+- Added `engine/src/emission.rs` with the renderer-agnostic `EmissionSource`,
+  `FloatRgb`, and bounded `BloomField` public seam.
+- Sources accept either grid or continuous positions, carry `Rgb` colour,
+  strength, radius, and a world flag, and sanitize invalid values while
+  clamping source count, field dimensions, radius, strength, and work.
+- `BloomField` accumulates normalized floating-point RGB contributions with a
+  deterministic squared-linear spatial falloff. It samples safely and applies
+  coloured spill only to visible non-space world ink; transparent cells and
+  void spaces remain unchanged.
+- `EmissionSource::from_continuous_scene` samples an existing
+  `ContinuousScene` at one fixed time and extracts emissive primitives,
+  including opacity-scaled strength. `BloomField::from_continuous_scene`
+  provides the direct field-building path.
+- `Frame` now retains glow sources independently of the visible topmost cell,
+  so lower-layer emitters survive composition for the float bloom bridge.
+- Continuous composition now keeps raw world foregrounds and retained emitters
+  separate from the legacy 8-bit world glow pass, so the continuous path does
+  not double-light world ink while the grid fallback remains unchanged.
+- Added `engine/src/present/bloom.rs`: the presenter now accumulates bounded
+  emissive sources in GPU `Rgba32Float` textures, runs two fixed five-tap
+  separable blur passes, clears the field every frame, and samples the final
+  float texture in the continuous fragment shader before display conversion.
+- Native `ContinuousScene` primitives are now rendered as transformed glyph
+  instances (including particles, ribbons, streaks, and rays) as well as
+  contributing emission. The play showcase's in-world torch migration is
+  spec-gated: the default continuous canvas keeps the legacy point-light/8-bit
+  glow torch path, and `--continuous-torch` opts into native flame/crackle
+  primitives with fractional (sub-cell) projections while continuous float
+  bloom owns torch spill.
+- Empty world void and pinned HUD remain unlit. `--grid` keeps the legacy path
+  unchanged for comparison/fallback.
+- Exported the module and public types/constants from `engine/src/lib.rs` and
+  integrated the bridge in `engine/src/compose.rs` and
+  `engine/src/present.rs`.
+
+### Verification
+
+- `cargo fmt --all` ran; `cargo fmt --all -- --check` passed.
+- `cargo test --locked -p ascii-mmorpg-engine --lib emission::tests` passed
+  (`11` focused tests).
+- `cargo test --locked -p ascii-mmorpg-engine --lib compose::tests` passed
+  (`17` tests), including continuous no-double-lighting, HUD isolation,
+  retained hidden/fractional sources, and uncapped fallback glow.
+- `cargo test --locked -p ascii-mmorpg-engine --features present --lib
+  present::bloom::tests` passed (`5` tests total: `3` CPU field/budget tests
+  and `2` real Vulkan GPU readback tests).
+- Presenter tests passed (`16` tests), including native primitive transforms,
+  fitted canvas behaviour, and shader texture sampling contracts.
+- `cargo check --locked -p ascii-mmorpg-engine --features present --examples`
+  passed.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` passed,
+  including the present-enabled engine clippy run.
+- `cargo test --locked --workspace` passed (`142` engine tests and all other
+  workspace crates/doc tests).
+- `cargo test --locked -p ascii-mmorpg-engine --features present --lib`
+  passed (`171` tests, including GPU parity and Vulkan bloom readback).
+- `cargo run --locked -p ascii-mmorpg-tools -- content` passed.
+- Default continuous Vulkan smoke run passed for `30` frames on the NVIDIA
+  GeForce GTX 1650.
+- Legacy fallback Vulkan smoke run passed for `30` frames with `--grid` on the
+  NVIDIA GeForce GTX 1650.
+- `git diff --check` passed.
+
+### Code review consolidation and fixes (2026-10-23)
+
+Two independent reviews of the uncommitted #4 diff vs `84b441d` (each <300
+words) converged; all findings were re-verified live in the current worktree
+and are now addressed in this same session, before any commit:
+
+- Grid-snapped torch motion (High): `play::project` rounded the pulsed
+  flame/crackle anchors to integer cells before continuous authoring. Added
+  `project_frac` (same fill math, no rounding); the gated continuous torch
+  path now keeps sub-cell offsets, and `play --check` asserts exact
+  fractional-projection equality for the flame anchor plus sub-cell motion
+  between two deterministic samples.
+- Emission/glyph coordinate alignment (High, clarified): the GPU bloom field
+  already aligns with the `+0.5`-centred glyph quads — its half-texel mapping
+  (`(position + 0.5) / grid`, `present/bloom.rs`) reads the field back at the
+  same logical coverage, so the review's half-cell claim does not reproduce at
+  any position. The real drift risk was undocumented convention, so
+  `EmissionSource::from_resolved_primitive` now documents the cell-corner
+  authoring space and the require-both-sides-together rule.
+- Spec gate (High): the in-world torch migration no longer runs by default on
+  the continuous canvas. New `SceneSource::continuous_bloom_owns_world_lighting`
+  (trait default `false`) decides ownership: off → legacy point lights AND the
+  CPU 8-bit world glow pass (presenter composes with `compose`, so torches are
+  grid-identical); `--continuous-torch` opts in to native flame/crackles +
+  float-bloom torch spill with legacy point lights off (no double lighting).
+  `play --check` now asserts both configurations headlessly, including a
+  native-primitive emission coupling assertion (closure of the
+  "check exercises legacy CPU glow only" gap).
+- Unbounded GPU work (High): `ContinuousScene::sample` now caps output at
+  `MAX_NATIVE_PRIMITIVES = 1024` (exported from `lib.rs`), keeping the
+  nearest-depth tail deterministically behind/farthest-first truncation.
+  New test `sample_output_is_capped_and_keeps_the_nearest_depth_tail`.
+- Depth loss (Medium, narrowed guarantee, as one review allowed): documented
+  on `native_continuous_instance` and the presenter append site — native
+  primitives render above composed cells in their own depth order only, no
+  instance depth channel, ribbons/streaks/rays collapse to `-`/`^`; true
+  primitive geometry/depth interleaving is deferred to a dedicated milestone.
+- `--grid` fallback independence (Medium): `GpuBloom` and the continuous
+  pipeline are now created only when `PresentOptions.mode == Continuous`
+  (fields became `Option`); the fallback allocates neither float textures nor
+  a continuous pipeline.
+- Verification overstatement (Low): the bloom test-count claim is corrected
+  to 3 CPU tests + 2 Vulkan readback tests (see the ticket #4 list above).
+
+`latest.patch` (untracked, 2026-10-21) is a stale earlier-session patch
+export, not part of this slice; left untouched.
+
+### Verification of the fixes (2026-10-23)
+
+- `cargo fmt --all -- --check` passed.
+- `cargo test --locked --workspace` passed (`110` client, `143` engine, and
+  all other workspace suites).
+- Focused suites passed: `continuous::tests` (`6`, includes the new cap
+  test), `emission::tests` (`11`), `compose::tests` (`17`), present lib
+  (`172`, including GPU parity and Vulkan bloom readback).
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` passed.
+- `cargo run --locked -p ascii-mmorpg-tools -- content` passed (`11`
+  definitions).
+- `play --check` passed with the extended continuous-canvas assertions
+  (3D world, FX digits, fixed camera/controls, inventory modal, continuous
+  canvas torch gate).
+- 30-frame Vulkan smoke runs passed in all three configurations on the
+  NVIDIA GTX 1650: default continuous, `--continuous-torch` (gated
+  migration, bloom + native primitives), `--grid` (fallback, no bloom alloc).
+- `git diff --check` passed (historical CRLF warnings only).
+
+### Next action
+
+Ticket #4 is now review-clean and spec-aligned: commit/push this slice, then
+close #4 per its acceptance criteria; live visual acceptance remains the
+follow-up gate. The next bounded task is the isolated torch/sun showcase
+(ticket #5), which is where the in-world torch migration completes; keep the
+legacy torch path (and `--grid`) available until that showcase is visually
+accepted. No commit or push was made this session.
 
 ## Latest: Veyrath map authoring — political checkpoint and standalone atlas export reviewed; placement acceptance pending (2026-10-20)
 
@@ -873,6 +1189,16 @@ The latest read-only GPU review identified the smallest high-value slice:
 6. **Defer more grass geometry** — crossed grass blades now exist. More instances could multiply cost under 4× SSAA; profile first.
 
 ## Active TODO checklist
+- [x] NEW 2026-10-23 (ticket #4 floating-point emission/bloom): added the
+  bounded `EmissionSource`/CPU reference seam plus a real GPU `Rgba32Float`
+  emission/blur/composite field. Continuous composition avoids legacy 8-bit
+  world double-lighting, native continuous primitives render with transforms,
+  and the play torch showcase projects flame/crackle primitives into the
+  continuous canvas while keeping the grid fallback. Void/HUD isolation,
+  hidden/fractional emitters, source bounds, deterministic CPU behaviour, real
+  Vulkan GPU accumulation/blur/clear, presenter contracts, workspace checks,
+  content validation, clippy, and both 30-frame Vulkan modes passed. Live
+  visual confirmation remains pending; commit/push and issue closure remain.
 - [x] NEW 2026-10-21 (torch correction): reference video was resampled and
   inspected at 25 FPS; the missing world glow source, missing GPU light loop,
   and detached crackle anchor were corrected. The torch now emits through the

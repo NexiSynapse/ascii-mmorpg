@@ -7,6 +7,12 @@
 //! Pass `--grid` to compare the legacy grid presenter with the default
 //! continuous, aspect-preserving canvas.
 //!
+//! Pass `--continuous-torch` to enable the spec-gated in-world torch
+//! migration (native flame/crackle primitives + continuous float bloom
+//! owning torch spill on the continuous canvas). Default continuous mode
+//! keeps the legacy point-light/8-bit-glow torch path until the standalone
+//! torch/sun showcase is visually accepted (`docs/RENDERER_REBUILD_SPEC.md`).
+//!
 //! Every frame builds a mesh list (zoned ground, ocean sheet, trees, item
 //! drops, humanoid actors, combat FX as world-space decals and boxes), one
 //! `raster::render_layer` pass carves it into the world partition, and a
@@ -45,7 +51,9 @@ fn real_main() -> Result<(), String> {
         self, Camera3, DepthOpts, HumanoidPose, Mesh, PointLight, Transform, Vec3,
     };
     use ascii_mmorpg_engine::{
-        bridge, cell_text_width, compose, AnimCell, Camera, Cell, Layer, Partition, Rgb, Scene,
+        bridge, cell_text_width, compose, AnimCell, Camera, Cell, ContinuousMaterial,
+        ContinuousScene, Emission, EmissionSource, Layer, Partition, Point2, Primitive,
+        PrimitiveKind, Rgb, Scene, Transform2, MAX_NATIVE_PRIMITIVES,
     };
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::time::Duration;
@@ -388,6 +396,17 @@ fn real_main() -> Result<(), String> {
     /// Project a world point to the raster view's cell coords (same mapping
     /// as `rasterize_tri`'s fill math) so labels glue to 3D bodies.
     fn project(p: Vec3, cam: &Camera3) -> Option<(i32, i32)> {
+        let (sx, sy) = project_frac(p, cam)?;
+        Some((sx.round() as i32, sy.round() as i32))
+    }
+
+    /// Fractional variant of `project` for continuous primitives: the flame
+    /// anchor and crackles keep their true sub-cell offsets and move through
+    /// the frame grid without snapping at column/row boundaries (spec:
+    /// glyphs must move between logical rows and columns, not behave like a
+    /// terminal). Render and emission use the same fractional cell-corner
+    /// coordinates, so the glyph and its bloom spread stay aligned.
+    fn project_frac(p: Vec3, cam: &Camera3) -> Option<(f32, f32)> {
         let (s, c) = cam.yaw.sin_cos();
         let (sp, cp) = cam.pitch.sin_cos();
         let fwd = Vec3::new(s * cp, sp, c * cp);
@@ -398,8 +417,8 @@ fn real_main() -> Result<(), String> {
         if depth < 0.4 {
             return None;
         }
-        let sx = (cam.width as f32 / 2.0 + cam.focal * rel.dot(right) / depth).round() as i32;
-        let sy = (cam.height as f32 / 2.0 - cam.focal * rel.dot(up) / depth).round() as i32;
+        let sx = cam.width as f32 / 2.0 + cam.focal * rel.dot(right) / depth;
+        let sy = cam.height as f32 / 2.0 - cam.focal * rel.dot(up) / depth;
         Some((sx, sy))
     }
 
@@ -563,6 +582,16 @@ fn real_main() -> Result<(), String> {
         /// Last logical world view used for click-to-ground projection.
         last_camera: Option<Camera3>,
         last_grid: (u32, u32),
+        /// Continuous bloom owns torch spill in the continuous presenter; the
+        /// grid fallback keeps the legacy point-light path.
+        continuous_canvas: bool,
+        /// Spec gate for the in-world torch migration (`--continuous-torch`).
+        /// The first vertical slice is the standalone torch/sun showcase; it
+        /// must be visually accepted before replacing the in-world torch
+        /// path, so the default continuous canvas keeps legacy point lights
+        /// and 8-bit world glow. Enabling the gate hands torch spill to
+        /// continuous float bloom and renders native flame/crackle primitives.
+        continuous_torch: bool,
     }
 
     impl LocalGame {
@@ -571,6 +600,15 @@ fn real_main() -> Result<(), String> {
                 !std::env::args().any(|arg| arg == "--cpu"),
                 weather_from_args(),
             )
+            .with_continuous_torch(std::env::args().any(|arg| arg == "--continuous-torch"))
+        }
+
+        /// Enable the spec-gated in-world torch migration (see the
+        /// `continuous_torch` field). Headless `--check` games default to
+        /// gate-off and simulate both sides directly.
+        fn with_continuous_torch(mut self, enabled: bool) -> Self {
+            self.continuous_torch = enabled;
+            self
         }
 
         fn with_gpu3d(gpu3d: bool) -> Self {
@@ -605,6 +643,8 @@ fn real_main() -> Result<(), String> {
                 weather,
                 last_camera: None,
                 last_grid: (GRID_W, GRID_H),
+                continuous_canvas: false,
+                continuous_torch: false,
             }
         }
 
@@ -1099,45 +1139,51 @@ fn real_main() -> Result<(), String> {
             // lights are applied to nearby visible faces in the raster pass.
             // Crackles are short-lived world sparks: warm, directional and
             // fully deterministic, with no circular pool mesh underneath.
+            // The gated native path keeps the wooden torch base in the world
+            // mesh but moves flame/crackle geometry to the continuous scene so
+            // the two representations cannot render on top of each other.
+            let native_torch = self.continuous_canvas && self.continuous_torch;
             for (i, (tx, tz)) in torch_spots().into_iter().enumerate() {
                 let pulse = torch_pulse(t, i);
-                let flame = WORLD.fire.lerp(WORLD.ember, pulse.light_gain * 0.42);
                 meshes.push(Mesh::boxed(
                     Vec3::new(tx, 0.95, tz),
                     Vec3::new(0.16, 1.9, 0.16),
                     WORLD.bark,
                 ));
-                meshes.push(Mesh::boxed(
-                    Vec3::new(tx + pulse.offset.0, 1.88, tz + pulse.offset.1),
-                    Vec3::new(
-                        0.34 * pulse.flame_scale,
-                        0.22 * pulse.flame_scale,
-                        0.34 * pulse.flame_scale,
-                    ),
-                    flame,
-                ));
-                meshes.push(Mesh::cone(
-                    Vec3::new(tx + pulse.offset.0, 1.92, tz + pulse.offset.1),
-                    0.28 * pulse.flame_scale,
-                    0.62 * pulse.flame_scale,
-                    7,
-                    flame,
-                ));
-                for crackle_index in 0..TORCH_CRACKLE_COUNT {
-                    let Some((position, color, fade)) = torch_crackle(
-                        t,
-                        i,
-                        crackle_index,
-                        (tx + pulse.offset.0, tz + pulse.offset.1),
-                    ) else {
-                        continue;
-                    };
-                    let size = 0.07 + 0.045 * fade;
+                if !native_torch {
+                    let flame = WORLD.fire.lerp(WORLD.ember, pulse.light_gain * 0.42);
                     meshes.push(Mesh::boxed(
-                        position,
-                        Vec3::new(size, size * 1.35, size),
-                        color,
+                        Vec3::new(tx + pulse.offset.0, 1.88, tz + pulse.offset.1),
+                        Vec3::new(
+                            0.34 * pulse.flame_scale,
+                            0.22 * pulse.flame_scale,
+                            0.34 * pulse.flame_scale,
+                        ),
+                        flame,
                     ));
+                    meshes.push(Mesh::cone(
+                        Vec3::new(tx + pulse.offset.0, 1.92, tz + pulse.offset.1),
+                        0.28 * pulse.flame_scale,
+                        0.62 * pulse.flame_scale,
+                        7,
+                        flame,
+                    ));
+                    for crackle_index in 0..TORCH_CRACKLE_COUNT {
+                        let Some((position, color, fade)) = torch_crackle(
+                            t,
+                            i,
+                            crackle_index,
+                            (tx + pulse.offset.0, tz + pulse.offset.1),
+                        ) else {
+                            continue;
+                        };
+                        let size = 0.07 + 0.045 * fade;
+                        meshes.push(Mesh::boxed(
+                            position,
+                            Vec3::new(size, size * 1.35, size),
+                            color,
+                        ));
+                    }
                 }
             }
 
@@ -1459,6 +1505,17 @@ fn real_main() -> Result<(), String> {
     }
 
     impl SceneSource for LocalGame {
+        fn present_mode(&mut self, mode: PresentMode) {
+            self.continuous_canvas = mode == PresentMode::Continuous;
+        }
+
+        /// Only the spec-gated migration hands world lighting to the float
+        /// bloom field; every other configuration keeps the legacy CPU glow
+        /// pass and localized point lights.
+        fn continuous_bloom_owns_world_lighting(&mut self) -> bool {
+            self.continuous_torch
+        }
+
         fn scene_at(&mut self, t: f32) -> (Scene, Camera) {
             self.scene_at_size(t, GRID_W, GRID_H)
         }
@@ -1468,6 +1525,66 @@ fn real_main() -> Result<(), String> {
             // and the engine tests run scene builders without the
             // presenter, so leftovers here are presentation-state only.
             self.pending_world.take()
+        }
+
+        /// Native flame/crackle primitives for the gated in-world torch
+        /// migration. The presenter only asks for this on the continuous
+        /// canvas; returning `None` (the default, gate off) keeps the legacy
+        /// torch path. Coordinates are authored frame-grid cell-corner
+        /// space, projected fractionally so pulse/crackle motion stays
+        /// sub-cell.
+        fn continuous_scene(&mut self, _t: f32) -> Option<ContinuousScene> {
+            if !self.continuous_torch {
+                return None;
+            }
+            let camera = self.last_camera?;
+            let mut scene = ContinuousScene::new();
+            for (torch_index, (tx, tz)) in torch_spots().into_iter().enumerate() {
+                let pulse = torch_pulse(_t, torch_index);
+                let anchor = Vec3::new(tx + pulse.offset.0, 1.92, tz + pulse.offset.1);
+                let Some((sx, sy)) = project_frac(anchor, &camera) else {
+                    continue;
+                };
+                let position = Point2::new(sx, sy + HUD_H as f32);
+                let flame = WORLD.fire.lerp(WORLD.ember, pulse.light_gain * 0.42);
+                scene.push(Primitive::new(
+                    PrimitiveKind::glyph('*'),
+                    Transform2::new(position, 0.0)
+                        .with_scale(Point2::new(
+                            0.72 * pulse.flame_scale,
+                            1.05 * pulse.flame_scale,
+                        ))
+                        .with_skew(Point2::new(pulse.offset.0 * 2.0, 0.0)),
+                    ContinuousMaterial::new(flame)
+                        .with_gradient(ascii_mmorpg_engine::ColorGradient::new(
+                            Rgb::new(255, 242, 150),
+                            flame,
+                            ascii_mmorpg_engine::GradientAxis::Vertical,
+                        ))
+                        .with_opacity((0.78 + pulse.light_gain * 0.18).clamp(0.0, 1.0)),
+                ));
+
+                for crackle_index in 0..TORCH_CRACKLE_COUNT {
+                    let Some((spark, color, fade)) =
+                        torch_crackle(_t, torch_index, crackle_index, (anchor.x, anchor.z))
+                    else {
+                        continue;
+                    };
+                    let Some((spark_x, spark_y)) = project_frac(spark, &camera) else {
+                        continue;
+                    };
+                    scene.push(Primitive::new(
+                        PrimitiveKind::particle('*'),
+                        Transform2::new(Point2::new(spark_x, spark_y + HUD_H as f32), 1.0)
+                            .with_scale(Point2::new(0.34 + fade * 0.38, 0.34 + fade * 0.38))
+                            .with_rotation((crackle_index as f32) * 0.7),
+                        ContinuousMaterial::new(color)
+                            .with_opacity(fade)
+                            .with_emission(Emission::new(color, 0.10 * fade, 1.5)),
+                    ));
+                }
+            }
+            Some(scene)
         }
 
         fn scene_at_size(&mut self, t: f32, width: u32, height: u32) -> (Scene, Camera) {
@@ -1496,11 +1613,19 @@ fn real_main() -> Result<(), String> {
             hud.border_rect(0, 0, w, HUD_H, PANEL_EDGE, PANEL_BG);
             let hud_text_x = 18.min((w - 2).max(1));
             let hud_text_width = (w - hud_text_x - 1).max(0);
+            // The play renderer consumes the same typed Veyrath source as the
+            // terminal World Map. These are provisional visual anchors only;
+            // they never author simulation positions or collision.
+            let veyrath = ascii_mmorpg_engine::veyrath::visual_data();
+            let region_title = veyrath
+                .region("greyfall")
+                .map(|region| region.name.to_ascii_uppercase())
+                .unwrap_or_else(|| "WHISPERING FOREST".to_string());
             hud.push_text_clipped_bold(
                 hud_text_x,
                 0,
                 hud_text_width,
-                "WHISPERING FOREST",
+                &region_title,
                 DIGIT_GOLD,
                 PANEL_BG,
             );
@@ -1613,20 +1738,36 @@ fn real_main() -> Result<(), String> {
             // while selective ground glyphs keep their dark meadow tone.
             let sun = Vec3::new(0.55, 0.85, 0.3);
             let terrain_idx = scene.layers.len();
+            // Lighting ownership: continuous bloom takes torch spill only
+            // when the gated migration is enabled; otherwise the continuous
+            // canvas keeps the legacy point lights (plus the compose glow
+            // pass) exactly like the grid fallback, avoiding double
+            // lighting in both configurations.
+            let active_lights = if self.continuous_canvas && self.continuous_torch {
+                Vec::new()
+            } else {
+                lights.clone()
+            };
             if self.gpu3d {
                 self.pending_world = Some(GpuWorld {
                     meshes,
                     camera,
                     sun,
                     opts,
-                    lights: lights.clone(),
+                    lights: active_lights,
                     z: 0,
                     layer_slot: terrain_idx,
                 });
                 scene.layers.push(Layer::new("mesh3d", 0)); // placeholder
             } else {
-                let terrain =
-                    raster::render_layer_with_lights(&meshes, &camera, sun, &opts, &lights, 0);
+                let terrain = raster::render_layer_with_lights(
+                    &meshes,
+                    &camera,
+                    sun,
+                    &opts,
+                    &active_lights,
+                    0,
+                );
                 scene.layers.push(terrain);
             }
 
@@ -1979,6 +2120,105 @@ fn real_main() -> Result<(), String> {
             return Err("check: composed torch glow warmed no world ink".into());
         }
 
+        // Continuous-canvas world-lighting contract (spec-gated torch
+        // migration): the default continuous canvas keeps the legacy
+        // point-light path, and only `--continuous-torch` swaps torch-spill
+        // ownership to the float bloom field with native primitives.
+        let mut legacy_canvas = LocalGame::with_gpu3d(true);
+        legacy_canvas.continuous_canvas = true;
+        legacy_canvas.scene_at(0.06);
+        let (legacy_mesh_count, legacy_has_lights) = legacy_canvas
+            .pending_world
+            .as_ref()
+            .map(|world| (world.meshes.len(), !world.lights.is_empty()))
+            .ok_or("check: continuous canvas world missing")?;
+        if !legacy_has_lights {
+            return Err("check: continuous canvas must keep legacy point lights by default".into());
+        }
+        if legacy_canvas.continuous_scene(0.06).is_some() {
+            return Err("check: in-world torch primitives ran without the gate flag".into());
+        }
+
+        let mut gated = LocalGame::with_gpu3d(true);
+        gated.continuous_canvas = true;
+        gated.continuous_torch = true;
+        gated.scene_at(0.06);
+        let gated_world = gated
+            .pending_world
+            .as_ref()
+            .ok_or("check: gated continuous world missing")?;
+        if !gated_world.lights.is_empty() {
+            return Err(
+                "check: gated continuous torch path must not double-light with legacy point lights"
+                    .into(),
+            );
+        }
+        if gated_world.meshes.len() >= legacy_mesh_count {
+            return Err(format!(
+                "check: native torch gate retained legacy flame geometry (legacy={}, gated={})",
+                legacy_mesh_count,
+                gated_world.meshes.len()
+            ));
+        }
+        let gated_camera = gated_world.camera;
+        let native = gated
+            .continuous_scene(0.06)
+            .ok_or("check: gated continuous scene missing")?;
+        let primitives = native.primitives();
+        if primitives.is_empty() || primitives.len() >= MAX_NATIVE_PRIMITIVES {
+            return Err(format!(
+                "check: gated continuous primitive count out of range ({})",
+                primitives.len()
+            ));
+        }
+        // Fractional sub-cell mapping: the flame primitive must be the exact
+        // fractional projection of the pulsed anchor (render and emission
+        // share the same cell-corner coordinates).
+        let (tx0, tz0) = torch_spots()[0];
+        let pulse0 = torch_pulse(0.06, 0);
+        let anchor0 = Vec3::new(tx0 + pulse0.offset.0, 1.92, tz0 + pulse0.offset.1);
+        let (flame_x, flame_y) =
+            project_frac(anchor0, &gated_camera).ok_or("check: torch anchor projects offscreen")?;
+        let flame = primitives
+            .iter()
+            .find(|primitive| primitive.transform.scale.y > 0.8)
+            .ok_or("check: gated continuous flame primitive missing")?;
+        if (flame.transform.position.x - flame_x).abs() > 1e-4
+            || (flame.transform.position.y - (flame_y + HUD_H as f32)).abs() > 1e-4
+        {
+            return Err(
+                "check: flame primitive is not a fractional projection of its pulsed anchor".into(),
+            );
+        }
+        let native_second = gated
+            .continuous_scene(0.66)
+            .ok_or("check: second gated continuous scene missing")?;
+        let flame_second = native_second
+            .primitives()
+            .iter()
+            .find(|primitive| primitive.transform.scale.y > 0.8)
+            .ok_or("check: second gated flame primitive missing")?;
+        if (flame.transform.position.x - flame_second.transform.position.x).abs() < 1e-6
+            && (flame.transform.position.y - flame_second.transform.position.y).abs() < 1e-6
+        {
+            return Err("check: gated flame anchor does not move sub-cell between samples".into());
+        }
+        // Emission coupling: crackle primitives feed the float emission seam
+        // at a deterministic time (opacity-scaled strength preserved).
+        let emission_fed = [0.06f32, 0.24, 0.41, 0.66, 0.9, 1.3, 1.7]
+            .iter()
+            .any(|&sample_t| {
+                gated
+                    .continuous_scene(sample_t)
+                    .map(|scene| {
+                        !EmissionSource::from_continuous_scene(&scene, sample_t).is_empty()
+                    })
+                    .unwrap_or(false)
+            });
+        if !emission_fed {
+            return Err("check: gated crackle primitives produced no emission sources".into());
+        }
+
         // Fixed-control path: D always sends the world-east intent regardless
         // of presentation input, and the fixed camera never exposes a pointer
         // mutation. (CPU raster, as above: headless check.)
@@ -2113,7 +2353,9 @@ fn real_main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--check") {
         run_check()?;
-        eprintln!("play check ok: 3D world, FX digits, fixed camera/controls, inventory modal");
+        eprintln!(
+            "play check ok: 3D world, FX digits, fixed camera/controls, inventory modal, continuous canvas torch gate"
+        );
         return Ok(());
     }
     let frames = args

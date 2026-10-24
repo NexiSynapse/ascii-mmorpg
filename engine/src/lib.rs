@@ -31,6 +31,7 @@ mod color;
 mod compose;
 pub mod continuous;
 pub mod demo;
+pub mod emission;
 pub mod fx;
 mod layer;
 pub mod motion;
@@ -40,17 +41,23 @@ mod partition;
 pub mod raster;
 mod scene;
 pub mod sprite;
+pub use ascii_mmorpg_shared::veyrath;
 
 pub use anim::{sample, Anim, Axis, EaseKind, Sample, Track};
 pub use cell::Cell;
 pub use color::{ColorTrack, Rgb};
-pub use compose::{compose, Frame};
+pub use compose::{compose, compose_for_continuous, Frame};
 pub use continuous::{
     Animation as ContinuousAnimation, ColorGradient, ContinuousScene, Emission, GradientAxis,
     Material as ContinuousMaterial, Point2, Primitive, PrimitiveKind, ResolvedPrimitive,
-    Transform2,
+    Transform2, MAX_NATIVE_PRIMITIVES,
 };
 pub use demo::{wave_scene, VIEW_H, VIEW_W};
+pub use emission::{
+    BloomField, EmissionPosition, EmissionSource, FloatRgb, FRAME_GLOW_RADIUS_PER_UNIT,
+    FRAME_GLOW_STRENGTH_SCALE, MAX_FIELD_DIMENSION, MAX_SOURCE_COUNT, MAX_SOURCE_RADIUS,
+    MAX_SOURCE_STRENGTH,
+};
 pub use layer::{cell_text_width, AnimCell, Layer, Shade};
 pub use partition::Partition;
 pub use scene::{Camera, Scene, Wash};

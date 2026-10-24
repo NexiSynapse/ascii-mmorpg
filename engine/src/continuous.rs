@@ -8,6 +8,14 @@
 
 use super::Rgb;
 
+/// Per-frame cap on resolved native primitives. Bounded per-frame GPU work:
+/// each resolved primitive becomes one GPU instance and one emission scan per
+/// present, so the sample output (and therefore the continuous instance
+/// buffer and upload) can never grow with scene size. Generous enough for
+/// particle-heavy showcase scenes; builders that exceed it are truncated in
+/// `ContinuousScene::sample` order.
+pub const MAX_NATIVE_PRIMITIVES: usize = 1024;
+
 /// A continuous two-dimensional point or vector in scene space.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Point2 {
@@ -358,14 +366,59 @@ impl ContinuousScene {
 
     /// Sample and depth-sort the scene. Sorting is stable, so equal-depth
     /// primitives retain authoring order and produce deterministic output.
+    ///
+    /// Bounded GPU work: the presenter materializes one GPU instance and one
+    /// emission scan per resolved primitive, and [`ContinuousScene::push`]
+    /// has no per-builder limit, so `sample` caps its own output. When the
+    /// scene exceeds [`MAX_NATIVE_PRIMITIVES`], truncation keeps the
+    /// nearest-depth tail (the primitives drawn last and therefore on top)
+    /// and drops the farthest ones first; the retained set and order stay
+    /// deterministic for any identical scene and time input.
     pub fn sample(&self, time: f32) -> Vec<ResolvedPrimitive> {
-        let mut resolved: Vec<_> = self
-            .primitives
-            .iter()
-            .map(|primitive| primitive.sample(time))
-            .collect();
-        resolved.sort_by(|a, b| a.transform.depth.total_cmp(&b.transform.depth));
-        resolved
+        // Keep only the nearest depth tail while sampling. The previous
+        // implementation materialized and sorted every authored primitive,
+        // which made a particle-heavy scene allocate and sort an unbounded
+        // list before applying the GPU cap. The retained list never exceeds
+        // the presenter budget; its final sort preserves stable depth order.
+        let mut retained: Vec<(usize, &Primitive)> = Vec::with_capacity(MAX_NATIVE_PRIMITIVES);
+        for (index, primitive) in self.primitives.iter().enumerate() {
+            if retained.len() < MAX_NATIVE_PRIMITIVES {
+                retained.push((index, primitive));
+                continue;
+            }
+
+            let farthest = (0..retained.len())
+                .min_by(|&left, &right| {
+                    retained[left]
+                        .1
+                        .transform
+                        .depth
+                        .total_cmp(&retained[right].1.transform.depth)
+                        .then_with(|| retained[left].0.cmp(&retained[right].0))
+                })
+                .expect("retained list is full");
+            let farthest_key = retained[farthest];
+            let depth_order = primitive
+                .transform
+                .depth
+                .total_cmp(&farthest_key.1.transform.depth);
+            let replaces = depth_order == std::cmp::Ordering::Greater
+                || (depth_order == std::cmp::Ordering::Equal && index > farthest_key.0);
+            if replaces {
+                retained[farthest] = (index, primitive);
+            }
+        }
+
+        retained.sort_by(|(left_index, left), (right_index, right)| {
+            left.transform
+                .depth
+                .total_cmp(&right.transform.depth)
+                .then_with(|| left_index.cmp(right_index))
+        });
+        retained
+            .into_iter()
+            .map(|(_, primitive)| primitive.sample(time))
+            .collect()
     }
 }
 
@@ -425,6 +478,33 @@ mod tests {
         assert_eq!(first[0].transform.depth, -2.0);
         assert_eq!(first[1].transform.depth, 4.0);
         assert_eq!(first[1].transform.position, Point2::new(4.25, 2.75));
+    }
+
+    #[test]
+    fn sample_output_is_capped_and_keeps_the_nearest_depth_tail() {
+        let mut scene = ContinuousScene::new();
+        for index in 0..(MAX_NATIVE_PRIMITIVES + 256) {
+            // A distinct deep->shallow depth sweep: index 0 is farthest.
+            scene.push(Primitive::new(
+                PrimitiveKind::glyph('*'),
+                Transform2::new(Point2::new(index as f32, 0.0), 100.0 + index as f32),
+                Material::new(orange()),
+            ));
+        }
+        let resolved = scene.sample(0.0);
+        assert_eq!(resolved.len(), MAX_NATIVE_PRIMITIVES);
+        // Truncation drops the farthest head: every survivor's depth exceeds
+        // the depths that were cut, and the survivor order stays sorted.
+        let survivor_depths: Vec<f32> = resolved
+            .iter()
+            .map(|primitive| primitive.transform.depth)
+            .collect();
+        assert_eq!(survivor_depths.first().copied(), Some(100.0 + 256.0));
+        assert_eq!(
+            survivor_depths.last().copied(),
+            Some(100.0 + (MAX_NATIVE_PRIMITIVES + 255) as f32)
+        );
+        assert_eq!(scene.sample(0.0), resolved);
     }
 
     #[test]

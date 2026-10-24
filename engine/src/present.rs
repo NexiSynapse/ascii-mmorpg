@@ -6,10 +6,12 @@
 //! for live scenes plus key input (see the `play` example).
 
 pub mod atlas;
+mod bloom;
 pub mod gpu3d;
 
 use super::overlay::{tessellate, text_quads, OverlayVert, Stroke, TextRun};
-use super::{compose, Camera, Frame, Scene};
+use super::{compose, Camera, ContinuousScene, Frame, Scene};
+use crate::emission::EmissionSource;
 use crate::raster::{Camera3, DepthOpts, Mesh, PointLight, Vec3};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -101,6 +103,9 @@ pub struct GpuWorld {
 }
 
 pub trait SceneSource {
+    /// Let a live source select presentation-specific lighting ownership before
+    /// it builds the scene. The default keeps existing sources unchanged.
+    fn present_mode(&mut self, _mode: PresentMode) {}
     /// Current scene and camera. Called once per presented frame.
     fn scene_at(&mut self, t: f32) -> (Scene, Camera);
     /// Variant that can adapt a scene to the live glyph grid. The default
@@ -115,6 +120,24 @@ pub trait SceneSource {
     /// placeholder layer slot (see [`GpuWorld`]).
     fn gpu_world(&mut self) -> Option<GpuWorld> {
         None
+    }
+    /// Optional native continuous primitives in the authored frame-grid space.
+    /// The presenter samples these once at the same fixed frame time, renders
+    /// their glyph geometry, and merges their float emission into the
+    /// continuous canvas. World-space sources should project through the same
+    /// camera used by `scene_at_size` before returning this scene. The composed
+    /// frame remains the compatibility source for the legacy grid path.
+    fn continuous_scene(&mut self, _t: f32) -> Option<ContinuousScene> {
+        None
+    }
+    /// Whether the float bloom field should own world lighting for this
+    /// source on the continuous canvas, instead of the legacy CPU glow pass
+    /// plus localized point lights. Default keeps every existing source on
+    /// the legacy world-lighting path; the spec-gated torch migration opts
+    /// in explicitly (the in-world migration must not run before the
+    /// standalone showcase is visually accepted).
+    fn continuous_bloom_owns_world_lighting(&mut self) -> bool {
+        false
     }
     /// Key press (`pressed`) / release. Esc/Q and close always exit in
     /// addition to this; return value is reserved (currently ignored).
@@ -389,7 +412,10 @@ struct Gpu {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
-    continuous_pipe: wgpu::RenderPipeline,
+    /// Continuous instanced pipeline + float bloom resources. Created only
+    /// for `PresentMode::Continuous`: the grid fallback must stand up
+    /// identical GPU state without float textures or a continuous pipeline.
+    continuous_pipe: Option<wgpu::RenderPipeline>,
     overlay_pipe: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniform_buf: wgpu::Buffer,
@@ -397,6 +423,7 @@ struct Gpu {
     instance_cap: usize,
     continuous_buf: wgpu::Buffer,
     continuous_cap: usize,
+    bloom: Option<bloom::GpuBloom>,
     overlay_buf: wgpu::Buffer,
     overlay_cap: usize,
     grid_w: u32,
@@ -654,6 +681,112 @@ impl App {
             bind_group_layouts: &[&bgl],
             push_constant_ranges: &[],
         });
+        // Float emission/bloom resources exist only for the continuous
+        // canvas (spec: the grid fallback must remain independent of the
+        // bloom path), so `--grid` allocates neither bloom textures nor a
+        // continuous pipeline.
+        let (bloom, continuous_pipe) = if self.opts.mode == PresentMode::Continuous {
+            let bloom = bloom::GpuBloom::new(&device);
+            let continuous_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("continuous-present-layout"),
+                    bind_group_layouts: &[&bgl, bloom.layout()],
+                    push_constant_ranges: &[],
+                });
+            let continuous_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("continuous-glyph-shader"),
+                source: wgpu::ShaderSource::Wgsl(CONTINUOUS_SHADER.into()),
+            });
+            let continuous_pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("continuous-glyph-pipeline"),
+                layout: Some(&continuous_layout),
+                vertex: wgpu::VertexState {
+                    module: &continuous_shader,
+                    entry_point: Some("cvs"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: size_of::<ContinuousGlyphInstance>() as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 8,
+                                shader_location: 1,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32,
+                                offset: 16,
+                                shader_location: 2,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 20,
+                                shader_location: 3,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32,
+                                offset: 28,
+                                shader_location: 4,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 32,
+                                shader_location: 5,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 44,
+                                shader_location: 6,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 56,
+                                shader_location: 7,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32,
+                                offset: 68,
+                                shader_location: 8,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32,
+                                offset: 72,
+                                shader_location: 9,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32,
+                                offset: 76,
+                                shader_location: 10,
+                            },
+                        ],
+                    }],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &continuous_shader,
+                    entry_point: Some("cfs"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+            (Some(bloom), Some(continuous_pipe))
+        } else {
+            (None, None)
+        };
+
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("glyph-pipeline"),
             layout: Some(&layout),
@@ -716,95 +849,6 @@ impl App {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-        let continuous_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("continuous-glyph-shader"),
-            source: wgpu::ShaderSource::Wgsl(CONTINUOUS_SHADER.into()),
-        });
-        let continuous_pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("continuous-glyph-pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &continuous_shader,
-                entry_point: Some("cvs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: size_of::<ContinuousGlyphInstance>() as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 8,
-                            shader_location: 1,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32,
-                            offset: 16,
-                            shader_location: 2,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 20,
-                            shader_location: 3,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Uint32,
-                            offset: 28,
-                            shader_location: 4,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 32,
-                            shader_location: 5,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 44,
-                            shader_location: 6,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 56,
-                            shader_location: 7,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Uint32,
-                            offset: 68,
-                            shader_location: 8,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32,
-                            offset: 72,
-                            shader_location: 9,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Uint32,
-                            offset: 76,
-                            shader_location: 10,
-                        },
-                    ],
-                }],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &continuous_shader,
-                entry_point: Some("cfs"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
@@ -923,6 +967,7 @@ impl App {
             instance_cap: (grid_w * grid_h) as usize,
             continuous_buf,
             continuous_cap: (grid_w * grid_h) as usize,
+            bloom,
             overlay_buf,
             overlay_cap,
             grid_w,
@@ -978,7 +1023,16 @@ impl App {
         };
         let t = self.started.elapsed().as_secs_f32();
         let t0 = std::time::Instant::now();
+        self.source.present_mode(self.opts.mode);
         let (mut scene, camera) = self.source.scene_at_size(t, gpu.grid_w, gpu.grid_h);
+        let continuous_primitives = if self.opts.mode == PresentMode::Continuous {
+            self.source
+                .continuous_scene(t)
+                .map(|scene| scene.sample(t))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         // GPU world raster: the source (e.g. `play`) skipped the CPU fill
         // and pushed a placeholder layer; run the triangle pass and swap
         // the resolved layer in before compose. `None` = CPU raster frame.
@@ -995,7 +1049,40 @@ impl App {
             gpu3d_ms = Some(t3d.elapsed());
         }
         let t1 = std::time::Instant::now();
-        let frame = compose(&scene, &camera, t);
+        // World-lighting ownership on the continuous canvas: a source that
+        // opts in lets the float bloom field replace the legacy CPU glow
+        // pass (and localized point lights); every other source keeps the
+        // grid composer and its 8-bit world glow for grid-identical torches.
+        let bloom_owned = self.opts.mode == PresentMode::Continuous
+            && self.source.continuous_bloom_owns_world_lighting();
+        let frame = if bloom_owned {
+            crate::compose::compose_for_continuous(&scene, &camera, t)
+        } else {
+            compose(&scene, &camera, t)
+        };
+        if self.opts.mode == PresentMode::Continuous {
+            let mut sources = if bloom_owned {
+                Vec::with_capacity(continuous_primitives.len() + frame.emission_sources().len())
+            } else {
+                Vec::new()
+            };
+            if bloom_owned {
+                for primitive in &continuous_primitives {
+                    if let Some(source) = EmissionSource::from_resolved_primitive(*primitive, true)
+                    {
+                        sources.push(source);
+                    }
+                }
+                sources.extend(EmissionSource::from_frame(&frame));
+            }
+            // Continuous shaders always bind the bloom texture. Upload an
+            // explicit empty source list when ownership changes back to the
+            // legacy path so a prior frame's field cannot remain visible.
+            gpu.bloom
+                .as_mut()
+                .expect("continuous mode creates bloom resources")
+                .prepare(&gpu.device, &gpu.queue, [gpu.grid_w, gpu.grid_h], &sources);
+        }
         let t2 = std::time::Instant::now();
 
         let (wash_rgb, wash_strength) = match scene.wash {
@@ -1043,7 +1130,13 @@ impl App {
             match self.opts.mode {
                 PresentMode::Continuous => (
                     Vec::new(),
-                    frame_continuous_instances(&frame, gpu.grid_w, gpu.grid_h, &rects),
+                    frame_continuous_instances(
+                        &frame,
+                        gpu.grid_w,
+                        gpu.grid_h,
+                        &rects,
+                        &continuous_primitives,
+                    ),
                 ),
                 PresentMode::GridFallback => (
                     frame_instances(&frame, gpu.grid_w, gpu.grid_h, &rects),
@@ -1154,6 +1247,12 @@ impl App {
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        if self.opts.mode == PresentMode::Continuous {
+            gpu.bloom
+                .as_ref()
+                .expect("continuous mode creates bloom resources")
+                .encode(&mut encoder);
+        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("glyph-pass"),
@@ -1183,8 +1282,17 @@ impl App {
             pass.draw(0..halo_count, 0..1);
             match self.opts.mode {
                 PresentMode::Continuous => {
-                    pass.set_pipeline(&gpu.continuous_pipe);
+                    let pipeline = gpu
+                        .continuous_pipe
+                        .as_ref()
+                        .expect("continuous mode creates the continuous pipeline");
+                    let bloom = gpu
+                        .bloom
+                        .as_ref()
+                        .expect("continuous mode creates bloom resources");
+                    pass.set_pipeline(pipeline);
                     pass.set_bind_group(0, &gpu.bind_group, &[]);
+                    pass.set_bind_group(1, bloom.bind_group(), &[]);
                     pass.set_vertex_buffer(0, gpu.continuous_buf.slice(..));
                     pass.draw(0..6, 0..continuous_count as u32);
                 }
@@ -1464,60 +1572,135 @@ fn frame_continuous_instances(
     grid_w: u32,
     grid_h: u32,
     world: &[(i32, i32, i32, i32)],
+    native: &[super::ResolvedPrimitive],
 ) -> Vec<ContinuousGlyphInstance> {
     let cols = grid_w.min(frame.w.max(0) as u32);
     let rows = grid_h.min(frame.h.max(0) as u32);
-    if cols == 0 || rows == 0 {
-        return Vec::new();
-    }
-    let mut out = Vec::with_capacity((cols * rows) as usize);
-    for y in 0..rows {
-        for x in 0..cols {
-            let Some(cell) = frame.get(x as i32, y as i32) else {
-                continue;
-            };
-            if cell.transparent {
-                continue;
+    let mut out = Vec::with_capacity((cols * rows) as usize + native.len());
+    if cols > 0 && rows > 0 {
+        for y in 0..rows {
+            for x in 0..cols {
+                let Some(cell) = frame.get(x as i32, y as i32) else {
+                    continue;
+                };
+                if cell.transparent {
+                    continue;
+                }
+                let xi = x as i32;
+                let yi = y as i32;
+                let in_world = frame.is_world(xi, yi)
+                    || world.iter().any(|&(px, py, pw, ph)| {
+                        xi >= px && xi < px + pw && yi >= py && yi < py + ph
+                    });
+                let bold = if cell.bold { 1.25 } else { 1.0 };
+                let f = |c: u8| ((f32::from(c) / 255.0) * bold).min(1.0);
+                out.push(ContinuousGlyphInstance {
+                    position: [
+                        x as f32 + 0.5 + cell.offset_x,
+                        y as f32 + 0.5 + cell.offset_y,
+                    ],
+                    scale: [cell.scale.clamp(0.25, 2.0), cell.scale.clamp(0.25, 2.0)],
+                    rotation: 0.0,
+                    skew: [0.0, 0.0],
+                    glyph: atlas::slot(cell.glyph),
+                    fg_start: [f(cell.fg.r), f(cell.fg.g), f(cell.fg.b)],
+                    fg_end: [f(cell.fg_end.r), f(cell.fg_end.g), f(cell.fg_end.b)],
+                    bg: if in_world {
+                        [0.0, 0.0, 0.0]
+                    } else {
+                        [
+                            f32::from(cell.bg.r) / 255.0,
+                            f32::from(cell.bg.g) / 255.0,
+                            f32::from(cell.bg.b) / 255.0,
+                        ]
+                    },
+                    fg_gradient_axis: match cell.fg_gradient {
+                        None => 0,
+                        Some(super::Axis::X) => 1,
+                        Some(super::Axis::Y) => 2,
+                    },
+                    opacity: 1.0,
+                    world: in_world as u32,
+                });
             }
-            let xi = x as i32;
-            let yi = y as i32;
-            let in_world = frame.is_world(xi, yi)
-                || world
-                    .iter()
-                    .any(|&(px, py, pw, ph)| xi >= px && xi < px + pw && yi >= py && yi < py + ph);
-            let bold = if cell.bold { 1.25 } else { 1.0 };
-            let f = |c: u8| ((f32::from(c) / 255.0) * bold).min(1.0);
-            out.push(ContinuousGlyphInstance {
-                position: [
-                    x as f32 + 0.5 + cell.offset_x,
-                    y as f32 + 0.5 + cell.offset_y,
-                ],
-                scale: [cell.scale.clamp(0.25, 2.0), cell.scale.clamp(0.25, 2.0)],
-                rotation: 0.0,
-                skew: [0.0, 0.0],
-                glyph: atlas::slot(cell.glyph),
-                fg_start: [f(cell.fg.r), f(cell.fg.g), f(cell.fg.b)],
-                fg_end: [f(cell.fg_end.r), f(cell.fg_end.g), f(cell.fg_end.b)],
-                bg: if in_world {
-                    [0.0, 0.0, 0.0]
-                } else {
-                    [
-                        f32::from(cell.bg.r) / 255.0,
-                        f32::from(cell.bg.g) / 255.0,
-                        f32::from(cell.bg.b) / 255.0,
-                    ]
-                },
-                fg_gradient_axis: match cell.fg_gradient {
-                    None => 0,
-                    Some(super::Axis::X) => 1,
-                    Some(super::Axis::Y) => 2,
-                },
-                opacity: 1.0,
-                world: in_world as u32,
-            });
         }
     }
+    // Native primitives render after (and therefore above) every composed
+    // cell: composed cells have no per-cell depth, so cross-depth
+    // interleaving between world ink and native primitives is intentionally
+    // not modelled yet — see `native_continuous_instance`.
+    out.extend(native.iter().filter_map(native_continuous_instance));
     out
+}
+
+/// Convert one resolved native primitive into a continuous instanced glyph.
+///
+/// Narrowed guarantee (reviewed 2026-10-23): native primitives carry no depth
+/// into the GPU pipeline — `ContinuousGlyphInstance` has no depth channel and
+/// this pipeline has no depth attachment — so every native primitive renders
+/// above all composed frame cells (in its own depth order only), and
+/// ribbons/streaks/rays collapse to a single glyph (`-`/`^`) because width,
+/// length, and tip geometry have no instance representation yet. Deep
+/// interleaving with world ink and true primitive geometry stay deferred
+/// until a dedicated depth/geometry milestone; emission parity is unaffected.
+fn native_continuous_instance(
+    primitive: &super::ResolvedPrimitive,
+) -> Option<ContinuousGlyphInstance> {
+    let glyph = match primitive.kind {
+        super::PrimitiveKind::Glyph { glyph } | super::PrimitiveKind::Particle { glyph } => glyph,
+        super::PrimitiveKind::Ribbon { .. } | super::PrimitiveKind::Streak { .. } => '-',
+        super::PrimitiveKind::Ray { .. } => '^',
+    };
+    let finite = |value: f32, fallback: f32| {
+        if value.is_finite() {
+            value
+        } else {
+            fallback
+        }
+    };
+    let scale_x = finite(primitive.transform.scale.x, 1.0).clamp(0.0, 8.0);
+    let scale_y = finite(primitive.transform.scale.y, 1.0).clamp(0.0, 8.0);
+    let position_x = finite(primitive.transform.position.x, 0.0) + 0.5;
+    let position_y = finite(primitive.transform.position.y, 0.0) + 0.5;
+    let (fg_start, fg_end, gradient_axis) = match primitive.material.gradient {
+        Some(gradient) => (
+            gradient.start,
+            gradient.end,
+            match gradient.axis {
+                super::GradientAxis::Horizontal => 1,
+                super::GradientAxis::Vertical => 2,
+                super::GradientAxis::Radial => 3,
+            },
+        ),
+        None => (
+            primitive.material.foreground,
+            primitive.material.foreground,
+            0,
+        ),
+    };
+    let rgb = |color: super::Rgb| {
+        [
+            f32::from(color.r) / 255.0,
+            f32::from(color.g) / 255.0,
+            f32::from(color.b) / 255.0,
+        ]
+    };
+    Some(ContinuousGlyphInstance {
+        position: [position_x, position_y],
+        scale: [scale_x, scale_y],
+        rotation: finite(primitive.transform.rotation, 0.0),
+        skew: [
+            finite(primitive.transform.skew.x, 0.0).clamp(-8.0, 8.0),
+            finite(primitive.transform.skew.y, 0.0).clamp(-8.0, 8.0),
+        ],
+        glyph: atlas::slot(glyph),
+        fg_start: rgb(fg_start),
+        fg_end: rgb(fg_end),
+        bg: rgb(primitive.material.background),
+        fg_gradient_axis: gradient_axis,
+        opacity: finite(primitive.material.opacity, 0.0).clamp(0.0, 1.0),
+        world: 1,
+    })
 }
 
 fn grid_for_surface(width: u32, height: u32, cell_w: u32, cell_h: u32) -> (u32, u32) {
@@ -1677,8 +1860,14 @@ fn vs(@builtin(vertex_index) vi: u32,
 @fragment
 fn fs(i: VOut) -> @location(0) vec4<f32> {
     let a = textureSample(atlas, samp, i.uv).r;
-    let position = select(i.glyph_uv.x, i.glyph_uv.y, i.gradient_axis == 2u);
-    let blend = select(0.0, position, i.gradient_axis != 0u);
+    var blend = 0.0;
+    if (i.gradient_axis == 1u) {
+        blend = i.glyph_uv.x;
+    } else if (i.gradient_axis == 2u) {
+        blend = i.glyph_uv.y;
+    } else if (i.gradient_axis == 3u) {
+        blend = clamp(distance(i.glyph_uv, vec2<f32>(0.5, 0.5)) * 2.0, 0.0, 1.0);
+    }
     let fg = mix(i.fg_start, i.fg_end, blend);
     let col = mix(i.bg, fg, a);
     let washed = mix(col, u.wash_rgb, u.wash_strength);
@@ -1701,6 +1890,7 @@ struct U {
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
+@group(1) @binding(0) var bloom_field: texture_2d<f32>;
 
 struct VOut {
     @builtin(position) pos: vec4<f32>,
@@ -1762,10 +1952,25 @@ fn cvs(@builtin(vertex_index) vi: u32,
 @fragment
 fn cfs(i: VOut) -> @location(0) vec4<f32> {
     let a = textureSample(atlas, samp, i.uv).r * i.opacity;
-    let position = select(i.glyph_uv.x, i.glyph_uv.y, i.gradient_axis == 2u);
-    let blend = select(0.0, position, i.gradient_axis != 0u);
+    var blend = 0.0;
+    if (i.gradient_axis == 1u) {
+        blend = i.glyph_uv.x;
+    } else if (i.gradient_axis == 2u) {
+        blend = i.glyph_uv.y;
+    } else if (i.gradient_axis == 3u) {
+        blend = clamp(distance(i.glyph_uv, vec2<f32>(0.5, 0.5)) * 2.0, 0.0, 1.0);
+    }
     let fg = mix(i.fg_start, i.fg_end, blend);
-    let col = mix(i.bg, fg, a);
+    let field_dimensions = vec2<i32>(textureDimensions(bloom_field));
+    let logical = ((i.pos.xy - u.viewport_origin) / u.viewport_size) * vec2<f32>(u.grid);
+    let field_position = clamp(
+        vec2<i32>(floor(logical / vec2<f32>(u.grid) * vec2<f32>(field_dimensions))),
+        vec2<i32>(0),
+        field_dimensions - vec2<i32>(1),
+    );
+    let bloom = textureLoad(bloom_field, field_position, 0).rgb;
+    let lit_fg = min(fg + select(vec3<f32>(0.0), bloom, i.world != 0u), vec3<f32>(1.0));
+    let col = mix(i.bg, lit_fg, a);
     let washed = mix(col, u.wash_rgb, u.wash_strength);
     let final_col = select(washed, col, i.world != 0u);
     // UI cells keep an opaque background even when the glyph mask is a space;
@@ -1991,7 +2196,7 @@ mod tests {
         glide_camera, grid_for_surface, grid_for_surface_limited, instance_capacity,
         ContinuousGlyphInstance, GlyphInstance, CONTINUOUS_SHADER, OVERLAY_SHADER, SHADER,
     };
-    use crate::{Axis, Cell, Frame, Rgb};
+    use crate::{Axis, Cell, EmissionSource, Frame, Rgb};
 
     #[test]
     fn grid_uses_surface_pixels_and_keeps_small_surfaces_visible() {
@@ -2045,12 +2250,101 @@ mod tests {
             .with_offset(0.25, -0.125)
             .with_scale(0.75);
         frame.cells[1] = Cell::new('h', Rgb::new(200, 220, 255), Rgb::new(50, 20, 10));
-        let instances = frame_continuous_instances(&frame, 2, 1, &[(0, 0, 2, 1)]);
+        let instances = frame_continuous_instances(&frame, 2, 1, &[(0, 0, 2, 1)], &[]);
         assert_eq!(instances.len(), 2);
         assert_eq!(instances[0].position, [0.75, 0.375]);
         assert_eq!(instances[0].scale, [0.75, 0.75]);
         assert_eq!(instances[0].bg, [0.0, 0.0, 0.0]);
         assert_eq!(instances[1].position, [1.5, 0.5]);
+        assert_eq!(instances[1].world, 1);
+    }
+
+    #[test]
+    fn continuous_instances_render_native_primitives_with_transforms() {
+        let frame = Frame::blank(1, 1);
+        let primitive = crate::Primitive::new(
+            crate::PrimitiveKind::ray(2.0, 0.4, 0.1),
+            crate::Transform2::new(crate::Point2::new(0.25, 0.75), 0.0)
+                .with_scale(crate::Point2::new(1.5, 0.5))
+                .with_rotation(0.4)
+                .with_skew(crate::Point2::new(0.2, -0.1)),
+            crate::ContinuousMaterial::new(Rgb::new(255, 120, 20))
+                .with_opacity(0.7)
+                .with_gradient(crate::ColorGradient::new(
+                    Rgb::new(255, 220, 80),
+                    Rgb::new(220, 40, 10),
+                    crate::GradientAxis::Horizontal,
+                )),
+        )
+        .sample(0.0);
+        let instances = frame_continuous_instances(&frame, 1, 1, &[], &[primitive]);
+
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].glyph, crate::present::atlas::slot('^'));
+        assert_eq!(instances[0].position, [0.75, 1.25]);
+        assert_eq!(instances[0].scale, [1.5, 0.5]);
+        assert_eq!(instances[0].rotation, 0.4);
+        assert_eq!(instances[0].skew, [0.2, -0.1]);
+        assert_eq!(instances[0].fg_gradient_axis, 1);
+        assert_eq!(instances[0].opacity, 0.7);
+        assert_eq!(instances[0].world, 1);
+    }
+
+    #[test]
+    fn native_emission_uses_the_same_half_cell_centre_as_the_glyph() {
+        let primitive = crate::Primitive::new(
+            crate::PrimitiveKind::glyph('*'),
+            crate::Transform2::new(crate::Point2::new(3.25, 4.75), 0.0),
+            crate::ContinuousMaterial::new(Rgb::new(255, 120, 20))
+                .with_emission(crate::Emission::new(Rgb::new(255, 80, 10), 1.0, 2.0)),
+        )
+        .sample(0.0);
+        let instance = frame_continuous_instances(&Frame::blank(0, 0), 0, 0, &[], &[primitive])
+            .pop()
+            .expect("native-only primitive should render");
+        let source = EmissionSource::from_resolved_primitive(primitive, true)
+            .expect("emissive primitive should produce a source");
+        assert_eq!(instance.position, [3.75, 5.25]);
+        assert_eq!(
+            source.position,
+            crate::EmissionPosition::Continuous(crate::Point2::new(
+                instance.position[0],
+                instance.position[1]
+            ))
+        );
+    }
+
+    #[test]
+    fn native_primitives_render_when_the_composed_frame_is_empty() {
+        let primitive = crate::Primitive::new(
+            crate::PrimitiveKind::particle('*'),
+            crate::Transform2::new(crate::Point2::new(1.25, 2.5), 0.0),
+            crate::ContinuousMaterial::new(Rgb::new(255, 255, 255)),
+        )
+        .sample(0.0);
+        let instances = frame_continuous_instances(&Frame::blank(0, 0), 0, 0, &[], &[primitive]);
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].position, [1.75, 3.0]);
+    }
+
+    #[test]
+    fn radial_gradients_keep_a_distinct_native_shader_contract() {
+        let primitive = crate::Primitive::new(
+            crate::PrimitiveKind::glyph('*'),
+            crate::Transform2::new(crate::Point2::ZERO, 0.0),
+            crate::ContinuousMaterial::new(Rgb::new(255, 255, 255)).with_gradient(
+                crate::ColorGradient::new(
+                    Rgb::new(255, 255, 255),
+                    Rgb::new(0, 0, 0),
+                    crate::GradientAxis::Radial,
+                ),
+            ),
+        )
+        .sample(0.0);
+        let instances = frame_continuous_instances(&Frame::blank(0, 0), 0, 0, &[], &[primitive]);
+        assert_eq!(instances[0].fg_gradient_axis, 3);
+        assert!(CONTINUOUS_SHADER.contains("distance(i.glyph_uv"));
+        assert!(CONTINUOUS_SHADER.contains("gradient_axis == 3u"));
     }
 
     #[test]
@@ -2206,8 +2500,11 @@ mod tests {
     fn shader_contract_interpolates_glyph_uv_and_preserves_flat_cells() {
         assert!(SHADER.contains("mix(i.fg_start, i.fg_end, blend)"));
         assert!(SHADER.contains("i.glyph_uv.y"));
-        assert!(SHADER.contains("i.gradient_axis != 0u"));
+        assert!(SHADER.contains("i.gradient_axis == 2u"));
         assert!(SHADER.contains("u.viewport_origin"));
+        assert!(CONTINUOUS_SHADER.contains("textureLoad(bloom_field"));
+        assert!(CONTINUOUS_SHADER.contains("lit_fg"));
+        assert!(CONTINUOUS_SHADER.contains("select(vec3<f32>(0.0), bloom, i.world != 0u)"));
     }
 
     #[test]

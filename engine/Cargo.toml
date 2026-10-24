@@ -13,6 +13,7 @@ default = []
 present = ["dep:winit", "dep:wgpu", "dep:fontdue", "dep:pollster", "dep:bytemuck"]
 
 [dependencies]
+ascii-mmorpg-shared = { path = "../crates/shared" }
 bytemuck = { version = "1.21", optional = true }
 fontdue = { version = "0.9", optional = true }
 pollster = { version = "0.4", optional = true }
@@ -24,4 +25,3 @@ winit = { version = "0.30", optional = true }
 # game crates (examples may use dev-dependencies).
 [dev-dependencies]
 ascii-mmorpg-server = { path = "../server" }
-ascii-mmorpg-shared = { path = "../crates/shared" }
