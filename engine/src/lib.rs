@@ -41,6 +41,7 @@ pub mod motion;
 pub mod overlay;
 pub use overlay::{Stroke, TextRun};
 mod partition;
+pub mod props;
 pub mod raster;
 mod scene;
 pub mod sprite;

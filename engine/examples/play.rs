@@ -416,6 +416,15 @@ fn real_main() -> Result<(), String> {
     /// terminal). Render and emission use the same fractional cell-corner
     /// coordinates, so the glyph and its bloom spread stay aligned.
     fn project_frac(p: Vec3, cam: &Camera3) -> Option<(f32, f32)> {
+        let (sx, sy, _) = project_frac_depth(p, cam)?;
+        Some((sx, sy))
+    }
+
+    /// Depth-returning variant of [`project_frac`] for distance-scaled
+    /// sprites: scenery shrinks with camera distance the way the reference
+    /// captures compress far rows (video-tools findings, 2026-10-25).
+    /// Returns `(screen_x, screen_y, forward_depth)`.
+    fn project_frac_depth(p: Vec3, cam: &Camera3) -> Option<(f32, f32, f32)> {
         let (s, c) = cam.yaw.sin_cos();
         let (sp, cp) = cam.pitch.sin_cos();
         let fwd = Vec3::new(s * cp, sp, c * cp);
@@ -428,7 +437,7 @@ fn real_main() -> Result<(), String> {
         }
         let sx = cam.width as f32 / 2.0 + cam.focal * rel.dot(right) / depth;
         let sy = cam.height as f32 / 2.0 - cam.focal * rel.dot(up) / depth;
-        Some((sx, sy))
+        Some((sx, sy, depth))
     }
 
     /// Convert a left-click in the world partition into the nearest ground
@@ -608,6 +617,11 @@ fn real_main() -> Result<(), String> {
         /// DEFAULT ON since the play-path integration (issue #10): the
         /// mesh grass/rain are the `--legacy-weather` fallback.
         continuous_weather: bool,
+        /// Spec gate for the letter-built tree migration (video mimicry
+        /// S2). DEFAULT ON: trees are 3–6-row letter-built canopy sprites
+        /// (`engine::props`) at sub-cell pitch, distance-scaled; the mesh
+        /// trunk+cone trees are the `--legacy-trees` fallback.
+        continuous_trees: bool,
         /// World-map modal (`M`): swaps the frame for Veyrath world
         /// visuals composed from the shared model (issue #7/#10).
         map_open: bool,
@@ -652,6 +666,9 @@ fn real_main() -> Result<(), String> {
             .with_continuous_weather(
                 !legacy_all && !std::env::args().any(|arg| arg == "--legacy-weather"),
             )
+            .with_continuous_trees(
+                !legacy_all && !std::env::args().any(|arg| arg == "--legacy-trees"),
+            )
         }
 
         /// Enable the spec-gated in-world torch migration (see the
@@ -675,6 +692,13 @@ fn real_main() -> Result<(), String> {
         /// gate-off and assert both paths directly.
         fn with_continuous_weather(mut self, enabled: bool) -> Self {
             self.continuous_weather = enabled;
+            self
+        }
+
+        /// Enable the letter-built tree migration (see the
+        /// `continuous_trees` field).
+        fn with_continuous_trees(mut self, enabled: bool) -> Self {
+            self.continuous_trees = enabled;
             self
         }
 
@@ -720,6 +744,7 @@ fn real_main() -> Result<(), String> {
                 continuous_torch: true,
                 continuous_actors: true,
                 continuous_weather: true,
+                continuous_trees: true,
                 weather_window: ascii_mmorpg_engine::weather::CoverageWindow {
                     x0: 0,
                     x1: 0,
@@ -775,6 +800,46 @@ fn real_main() -> Result<(), String> {
                             .with_emission(Emission::new(color, 0.10 * fade, 1.5)),
                     ));
                 }
+            }
+        }
+
+        /// Letter-built trees (video mimicry S2): each scenery spot
+        /// projects to the frame grid with its forward depth, and
+        /// `engine::props` composes a 3–6-row letter canopy sprite at
+        /// sub-cell pitch, distance-scaled so dollying out shrinks
+        /// scenery like the reference's perspective rows. Depth 0 keeps
+        /// trees under flames/actors; no emission (props read as lit ink
+        /// by palette — pools belong to the torch system).
+        fn push_native_trees(&mut self, scene: &mut ContinuousScene, t: f32, camera: &Camera3) {
+            let palette = ascii_mmorpg_engine::props::TreePalette {
+                bark: WORLD.bark,
+                canopy_deep: WORLD.foliage_shadow,
+                canopy: WORLD.foliage,
+                canopy_lit: WORLD.foliage_moon,
+            };
+            for (i, (tx, tz)) in tree_spots().into_iter().enumerate() {
+                // Sprites stand ~6 cells tall at max scale: cull anchors
+                // whose ground point leaves that margin around the frame.
+                let Some((sx, sy, depth)) = project_frac_depth(Vec3::new(tx, 0.0, tz), camera)
+                else {
+                    continue;
+                };
+                if sx < -3.0
+                    || sx > camera.width as f32 + 3.0
+                    || sy < -7.0
+                    || sy > camera.height as f32 + 3.0
+                {
+                    continue;
+                }
+                let scale = (15.0 / depth).clamp(0.45, 1.25);
+                ascii_mmorpg_engine::props::push_tree(
+                    scene,
+                    Point2::new(sx, sy + HUD_H as f32),
+                    scene_hash(tx as i32, tz as i32) ^ (i as u32),
+                    scale,
+                    t,
+                    &palette,
+                );
             }
         }
 
@@ -1362,8 +1427,15 @@ fn real_main() -> Result<(), String> {
                 }
             }
 
-            // Trees (trunk + canopy), off the road corridor.
+            // Trees (trunk + canopy), off the road corridor. The
+            // letter-built gate swaps the mesh trunk+cones for native
+            // canopy sprites (see `continuous_scene`); the mesh path is
+            // the `--legacy-trees` fallback.
+            let native_trees = self.continuous_canvas && self.continuous_trees;
             for (i, (tx, tz)) in tree_spots().into_iter().enumerate() {
+                if native_trees {
+                    continue;
+                }
                 let h = 2.0 + ((i * 37) % 3) as f32 * 0.6;
                 meshes.push(Mesh::boxed(
                     Vec3::new(tx, h / 2.0, tz),
@@ -1895,19 +1967,32 @@ fn real_main() -> Result<(), String> {
                     _t,
                 ));
             }
-            if !self.continuous_torch && !self.continuous_actors && !self.continuous_weather {
+            if !self.continuous_torch
+                && !self.continuous_actors
+                && !self.continuous_weather
+                && !self.continuous_trees
+            {
                 return None;
             }
             let camera = self.last_camera?;
             let mut scene = ContinuousScene::new();
+            // Push order is the truncation priority when the scene would
+            // exceed the 1024-native cap (sample keeps the first
+            // pushed): torches → trees → actors → weather, so a crowded
+            // frame trims weather density before it ever drops figures
+            // or scenery. Paint order between natives is depth-driven
+            // (trees at depth 0 sit under flames and actors).
             if self.continuous_torch {
                 self.push_native_torches(&mut scene, _t, &camera);
             }
-            if self.continuous_weather {
-                self.push_native_weather(&mut scene, _t, &camera);
+            if self.continuous_trees {
+                self.push_native_trees(&mut scene, _t, &camera);
             }
             if self.continuous_actors {
                 self.push_layered_actors(&mut scene, _t, &camera);
+            }
+            if self.continuous_weather {
+                self.push_native_weather(&mut scene, _t, &camera);
             }
             Some(scene)
         }
@@ -2581,6 +2666,7 @@ fn real_main() -> Result<(), String> {
         legacy_canvas.continuous_torch = false;
         legacy_canvas.continuous_actors = false;
         legacy_canvas.continuous_weather = false;
+        legacy_canvas.continuous_trees = false;
         legacy_canvas.scene_at(0.06);
         let (legacy_mesh_count, legacy_has_lights) = legacy_canvas
             .pending_world
@@ -2599,6 +2685,7 @@ fn real_main() -> Result<(), String> {
         gated.continuous_torch = true;
         gated.continuous_actors = false;
         gated.continuous_weather = false;
+        gated.continuous_trees = false;
         gated.scene_at(0.06);
         let gated_world = gated
             .pending_world
@@ -2829,6 +2916,7 @@ fn real_main() -> Result<(), String> {
         actor_gate.continuous_actors = true;
         actor_gate.continuous_torch = false;
         actor_gate.continuous_weather = false;
+        actor_gate.continuous_trees = false;
         let actor_scene = actor_gate.scene_at(0.06).0;
         let (actor_lights_kept, actor_mesh_count) = actor_gate
             .pending_world
@@ -2948,6 +3036,7 @@ fn real_main() -> Result<(), String> {
         weather_gate.continuous_weather = true;
         weather_gate.continuous_torch = false;
         weather_gate.continuous_actors = false;
+        weather_gate.continuous_trees = false;
         weather_gate.scene_at(0.06);
         let weather_world = weather_gate
             .pending_world
@@ -3009,6 +3098,7 @@ fn real_main() -> Result<(), String> {
         clear_gate.continuous_weather = true;
         clear_gate.continuous_torch = false;
         clear_gate.continuous_actors = false;
+        clear_gate.continuous_trees = false;
         clear_gate.scene_at(0.06);
         let clear_native = clear_gate
             .continuous_scene(0.06)
@@ -3089,6 +3179,7 @@ fn real_main() -> Result<(), String> {
         hybrid.continuous_torch = false;
         hybrid.continuous_actors = true;
         hybrid.continuous_weather = false;
+        hybrid.continuous_trees = false;
         hybrid.scene_at(0.06);
         let hybrid_lights_kept = hybrid
             .pending_world
@@ -3162,6 +3253,40 @@ fn real_main() -> Result<(), String> {
         }
         if map_game.movement_axes() == (0.0, 0.0) {
             return Err("check: movement must resume after closing the map".into());
+        }
+
+        // Letter-built trees (video mimicry S2): with the gate on the
+        // continuous scene carries multi-glyph letter canopies; turning
+        // only the tree gate off removes every canopy letter (they come
+        // from no other system).
+        let mut tree_game = LocalGame::with_gpu3d(true);
+        tree_game.continuous_canvas = true;
+        tree_game.scene_at(0.05);
+        let tree_scene = tree_game
+            .continuous_scene(0.05)
+            .ok_or("check: continuous scene missing for trees")?;
+        let canopy = |scene: &ascii_mmorpg_engine::ContinuousScene| {
+            scene
+                .primitives()
+                .iter()
+                .filter(|p| match p.kind {
+                    PrimitiveKind::Glyph { glyph } => "qQ0O@bs".contains(glyph),
+                    _ => false,
+                })
+                .count()
+        };
+        let canopy_count = canopy(&tree_scene);
+        if canopy_count < 10 {
+            return Err(format!(
+                "check: letter-built trees missing ({canopy_count} canopy glyphs)"
+            ));
+        }
+        tree_game.continuous_trees = false;
+        let no_tree_scene = tree_game
+            .continuous_scene(0.05)
+            .ok_or("check: continuous scene missing without trees")?;
+        if canopy(&no_tree_scene) != 0 {
+            return Err("check: canopy glyphs must come only from the tree gate".into());
         }
 
         // Fixed-control path: D always sends the world-east intent regardless

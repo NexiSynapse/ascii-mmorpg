@@ -2,7 +2,44 @@
 
 Updated: 2026-10-25. This is the resumable engineering record, not a full transcript.
 
-## Video-mimicry S1: per-partition cell pitch (2026-10-25, latest)
+## Video-mimicry S2: letter-built trees (2026-10-25, latest)
+
+S1 (per-partition pitch) pushed as `19ad8a0`. S2 landed next: the
+reference's trees — 3–6-row letter-built canopies, per-tree variety,
+sub-cell density — are now the default in-world scenery.
+
+1. **`engine::props`** (new module): `push_tree(scene, anchor, seed,
+   scale, t, &TreePalette)` composes bushy `qQ0Qb` / rounded `oO@` /
+   columnar `s|s` habits (seed-picked) over a two-row trunk + root tick,
+   0.55 sub-cell pitch, ≤24 prims (`TREE_BUDGET`), coherent canopy sway
+   (phase-lagged rows off one wave — trunk never moves), per-glyph tone
+   jitter (deep body → lit crown, holes deepest), no emission. 3 tests:
+   budget/growth, letter-built variety (bushy reaches 5-glyph rows,
+   habits differ across seeds), sway determinism + trunk immobility.
+2. **Play wiring**: `continuous_trees` gate default ON, `--legacy-trees`
+   (and `--legacy`) restore the mesh trunk+cone trees. New
+   `project_frac_depth` (project_frac now delegates) returns forward
+   depth so tree sprites distance-scale `(15/depth)` clamped 0.45..1.25;
+   anchors cull off-frame. Push order in `continuous_scene` became
+   torches → trees → actors → weather — the truncation priority under
+   the 1024-native cap (a crowded frame now trims weather density before
+   figures or scenery; the old order could have dropped actors).
+   `--check`: canopy letters ≥10 with the gate on, zero with it off;
+   the six system-isolation check games set the trees gate explicitly.
+3. **Perf side effect**: the mesh cones left the raster path —
+   windowed smoke tris 1951 → 1134 (the world3d resolve is the
+   fullscreen-60FPS lever, so this shrinks it directly).
+
+Verified: fmt; workspace clippy `-D warnings` (both feature sets);
+workspace tests 16 crates ok (engine lib 177); present lib 212; tools
+content 11; play/world/torch `--check`s; Vulkan smokes — native trees
+90 frames, `--legacy-trees` 60 frames, timing unchanged.
+
+Next: **S3 camera-follow easing + walk trails** (ease-in ~0.4s → cruise
+→ ease-out ~0.5s, frame-quantized scroll, motion-trail glyph streaks)
+per `docs/VIDEO_MIMICRY_PLAN.md`.
+
+## Video-mimicry S1: per-partition cell pitch (2026-10-25)
 
 Analysis slice pushed as `caa095e` (all session work: art stack, torch
 lighting model, video plan + tooling; 318 workspace tests green at push).
@@ -2072,14 +2109,28 @@ The latest read-only GPU review identified the smallest high-value slice:
 6. **Defer more grass geometry** — crossed grass blades now exist. More instances could multiply cost under 4× SSAA; profile first.
 
 ## Active TODO checklist
-- [x] NEW 2026-10-25 (video-mimicry S1 DONE): `Partition::pitch_scale` +
-  `with_pitch` (0.25..=4.0 clamp), continuous-only re-pitching around the
-  partition origin in `frame_continuous_instances` (world math identical
-  at 1.0, test-enforced), play map-modal captions at 1.3× on a coarse
-  authored rect + `--check` pitch/coverage assertions. Full battery green
-  (fmt, workspace clippy+tests, present clippy+209 lib tests, content,
-  three --checks, Vulkan smoke). Session work pushed as `caa095e`; S1
-  commit follows.
+- [x] NEW 2026-10-25 (video-mimicry S2 DONE): `engine::props` letter-built
+  tree builder (3 habits, ≤24 prims, coherent sway, sub-cell pitch) +
+  play `continuous_trees` gate default ON with `--legacy-trees`
+  fallback, distance-scaled sprites via `project_frac_depth`,
+  truncation-priority push order (torches→trees→actors→weather),
+  `--check` canopy on/off contract, raster tris 1951→1134. Full battery
+  green (fmt, both clippys, workspace 16 crates, engine lib 177, present
+  lib 212, content, three --checks, two Vulkan smokes). S1 pushed as
+  `19ad8a0`; S2 commit follows.
+- [x] NEW 2026-10-25 (video-mimicry S1 DONE, pushed as `19ad8a0`):
+  `Partition::pitch_scale` + `with_pitch` (0.25..=4.0 clamp),
+  continuous-only re-pitching around the partition origin in
+  `frame_continuous_instances` (world math identical at 1.0,
+  test-enforced), play map-modal captions at 1.3× on a coarse authored
+  rect + `--check` pitch/coverage assertions. Full battery green.
+- [ ] NEW 2026-10-25 (video mimicry plan — S3 next): S3 camera-follow
+  ease-in/cruise/ease-out + walk trail glyphs → S4 FX pack (concentric
+  rings + spiral arcs + shockwave arc + ember speckle, ~1.4s+1s profile)
+  → S5 inventory-style modal (dimmed world + ASCII rain + item sprites,
+  hard 1-frame open; reuse S1 pitch) → S6 optional perspective row
+  compression. See `docs/VIDEO_MIMICRY_PLAN.md` for measured targets and
+  acceptance.
 - [ ] NEW 2026-10-25 (video mimicry plan — S2 next): S2 letter-built
   multi-glyph trees/props at 0.55 sub-cell pitch (`veyrath_world`) →
   S3 camera-follow ease-in/cruise/ease-out + walk trail glyphs → S4 FX
