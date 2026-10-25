@@ -2,7 +2,42 @@
 
 Updated: 2026-10-25. This is the resumable engineering record, not a full transcript.
 
-## Video frame-by-frame reference analysis + mimicry plan (2026-10-25, latest)
+## Video-mimicry S1: per-partition cell pitch (2026-10-25, latest)
+
+Analysis slice pushed as `caa095e` (all session work: art stack, torch
+lighting model, video plan + tooling; 318 workspace tests green at push).
+S1 landed next, uncommitted→committed below: partitions can now render
+their composed cells at a different pitch than the world lattice.
+
+1. **`Partition::pitch_scale`** (`engine/src/partition.rs`): new field
+   (default 1.0) + `with_pitch` builder clamped 0.25..=4.0 (NaN→1.0).
+   Continuous-emission only — compose, the CPU raster, and GridFallback
+   ignore it. Camera world partitions stay at 1.0 by contract.
+2. **Presenter emission** (`frame_continuous_instances`): the parameter
+   became `&[Partition]` (was world rects); each cell finds the first
+   owning partition with pitch ≠ 1.0 and re-pitches position+scale around
+   the partition origin — `pos = origin + (local + 0.5 + offset) * pitch`,
+   scale multiplied (product clamped 0.25..=8.0). Pitch-1.0 partitions
+   (the whole world) hit the identity arm: world math bit-identical.
+   in_world is now `frame.is_world || any camera partition contains`.
+3. **Play wiring**: the M map-modal caption sheet is authored on a
+   `w/1.3 × h/1.3` coarse rect (`push_text_clipped` for the long lines)
+   with `.with_pitch(1.3)` — captions render ~30% bigger (reference
+   inventory's ~8×12px glyphs vs world ~6.5×9.5) while the native map
+   art keeps world pitch. `--check` asserts pitch > 1.0 and that the
+   coarse rect still covers the frame when scaled back up.
+
+Verified: fmt; workspace clippy `-D warnings`; workspace tests (16 crates
+ok; engine lib 173→174); present-feature clippy + lib tests (207→209:
+partition clamp test + emission pitch test); tools content (11 defs);
+play/world/torch `--check`s; PRESENT_PROFILE=1 Vulkan smoke (90 frames,
+windowed 160×56, timing unchanged).
+
+Next: **S2 letter-built multi-glyph props** (`veyrath_world` trees as 3–6
+row letter canopies, 2–3 canopy variants by hash, 0.55 sub-cell pitch,
+pure-black sparse forest floor mode) per `docs/VIDEO_MIMICRY_PLAN.md`.
+
+## Video frame-by-frame reference analysis + mimicry plan (2026-10-25)
 
 Researched the user's two assumptions against `data/videos` before planning:
 re-extracted every frame (30fps) around all detected motion bands and cuts
@@ -2037,16 +2072,22 @@ The latest read-only GPU review identified the smallest high-value slice:
 6. **Defer more grass geometry** — crossed grass blades now exist. More instances could multiply cost under 4× SSAA; profile first.
 
 ## Active TODO checklist
-- [ ] NEW 2026-10-25 (video mimicry plan — analysis DONE, slices pending):
-  S1 per-partition pitch scale (presenter `frame_continuous_instances`
-  honors a partition pitch for cell quads; modal UI ~1.25, rain backdrop
-  <1) → S2 letter-built multi-glyph trees/props at 0.55 sub-cell pitch
-  (`veyrath_world`) → S3 camera-follow ease-in/cruise/ease-out + walk
-  trail glyphs → S4 FX pack (concentric rings + spiral arcs + shockwave
-  arc + ember speckle, ~1.4s+1s profile) → S5 inventory-style modal
-  (dimmed world + ASCII rain + item sprites, hard 1-frame open) → S6
-  optional perspective row compression. Start at S1; see
-  `docs/VIDEO_MIMICRY_PLAN.md` for measured targets and acceptance.
+- [x] NEW 2026-10-25 (video-mimicry S1 DONE): `Partition::pitch_scale` +
+  `with_pitch` (0.25..=4.0 clamp), continuous-only re-pitching around the
+  partition origin in `frame_continuous_instances` (world math identical
+  at 1.0, test-enforced), play map-modal captions at 1.3× on a coarse
+  authored rect + `--check` pitch/coverage assertions. Full battery green
+  (fmt, workspace clippy+tests, present clippy+209 lib tests, content,
+  three --checks, Vulkan smoke). Session work pushed as `caa095e`; S1
+  commit follows.
+- [ ] NEW 2026-10-25 (video mimicry plan — S2 next): S2 letter-built
+  multi-glyph trees/props at 0.55 sub-cell pitch (`veyrath_world`) →
+  S3 camera-follow ease-in/cruise/ease-out + walk trail glyphs → S4 FX
+  pack (concentric rings + spiral arcs + shockwave arc + ember speckle,
+  ~1.4s+1s profile) → S5 inventory-style modal (dimmed world + ASCII
+  rain + item sprites, hard 1-frame open; reuse S1 pitch) → S6 optional
+  perspective row compression. See `docs/VIDEO_MIMICRY_PLAN.md` for
+  measured targets and acceptance.
 - [x] NEW 2026-10-25 (torch-lighting model fix per the second external
   review): tone-mapped bloom response in the continuous shader (soft
   energy curve, no additive clamp; contract-test-pinned), ONE coherent

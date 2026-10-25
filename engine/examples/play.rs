@@ -1922,6 +1922,16 @@ fn real_main() -> Result<(), String> {
                 // contract as the TUI pause); only presentation swaps.
                 self.advance(t);
                 self.last_grid = (width, height);
+                // Video mimicry S1: the modal's caption sheet runs at a
+                // coarser cell pitch than the world — the reference game's
+                // inventory uses ~8x12px glyphs against the world's
+                // ~6.5x9.5 — so captions are authored on a w/PITCH x
+                // h/PITCH rect and the partition scales them back to
+                // full-screen at emission. The native map art below stays
+                // at world pitch (fine detail).
+                const MAP_PITCH: f32 = 1.3;
+                let cw = ((w as f32) / MAP_PITCH).floor().max(8.0) as i32;
+                let ch = ((h as f32) / MAP_PITCH).floor().max(4.0) as i32;
                 let dim = Rgb::new(150, 140, 118);
                 let faint = Rgb::new(90, 84, 70);
                 let void = Rgb::new(0, 0, 0);
@@ -1930,21 +1940,29 @@ fn real_main() -> Result<(), String> {
                 let title = ascii_mmorpg_engine::veyrath::visual_data()
                     .title
                     .to_ascii_uppercase();
-                ui.push_text(2, 0, &format!("{title} — WORLD MAP"), dim, void);
-                ui.push_text(
+                ui.push_text_clipped(
+                    2,
+                    0,
+                    (cw - 4).max(0),
+                    &format!("{title} — WORLD MAP"),
+                    dim,
+                    void,
+                );
+                ui.push_text_clipped(
                     2,
                     1,
+                    (cw - 4).max(0),
                     "regions · rivers · roads · faction settlements · landmarks — starter: MILLHAVEN",
                     faint,
                     void,
                 );
                 // Esc is the presenter's global quit (it never reaches the
                 // source), so the caption must only advertise M.
-                ui.push_text(2, h - 1, "M CLOSES", faint, void);
+                ui.push_text_clipped(2, ch - 1, (cw - 4).max(0), "M CLOSES", faint, void);
                 scene.layers.push(ui);
-                scene
-                    .partitions
-                    .push(Partition::new("map-ui", 0, 0, w, h, vec![0], false));
+                scene.partitions.push(
+                    Partition::new("map-ui", 0, 0, cw, ch, vec![0], false).with_pitch(MAP_PITCH),
+                );
                 return (scene, Camera::default());
             }
             let world_h = (h - HUD_H - LOG_H).max(4);
@@ -3113,6 +3131,21 @@ fn real_main() -> Result<(), String> {
         }
         if !map_primitives.iter().any(|p| p.transform.depth == -0.5) {
             return Err("check: map must show the Millhaven starter ring".into());
+        }
+        // Video mimicry S1: the map caption sheet runs at a coarser cell
+        // pitch than the world (reference inventory ~1.25x bigger glyphs),
+        // and its authored rect must still cover the frame when scaled
+        // back up at emission.
+        let map_ui = map_frame
+            .partitions
+            .iter()
+            .find(|p| p.name == "map-ui")
+            .ok_or("check: map-ui partition missing")?;
+        if map_ui.pitch_scale <= 1.0 {
+            return Err("check: map modal must run at a coarser cell pitch (S1)".into());
+        }
+        if GRID_W as f32 / map_ui.pitch_scale - map_ui.w as f32 >= 1.0 {
+            return Err("check: coarse map rect must still cover the frame at pitch".into());
         }
         map_game.held.insert(KeyCode::KeyW);
         if map_game.movement_axes() != (0.0, 0.0) {

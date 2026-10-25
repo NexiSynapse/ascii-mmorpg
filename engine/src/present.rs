@@ -1162,29 +1162,29 @@ impl App {
             .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
         let t_inst = std::time::Instant::now();
-        let (instances, continuous_instances) = {
-            let rects: Vec<(i32, i32, i32, i32)> = scene
-                .partitions
-                .iter()
-                .filter(|p| p.camera)
-                .map(|p| (p.x, p.y, p.w, p.h))
-                .collect();
-            match self.opts.mode {
-                PresentMode::Continuous => (
-                    Vec::new(),
-                    frame_continuous_instances(
-                        &frame,
-                        gpu.grid_w,
-                        gpu.grid_h,
-                        &rects,
-                        &continuous_primitives,
-                        &stage_anchors,
-                    ),
+        let (instances, continuous_instances) = match self.opts.mode {
+            PresentMode::Continuous => (
+                Vec::new(),
+                frame_continuous_instances(
+                    &frame,
+                    gpu.grid_w,
+                    gpu.grid_h,
+                    &scene.partitions,
+                    &continuous_primitives,
+                    &stage_anchors,
                 ),
-                PresentMode::GridFallback => (
+            ),
+            PresentMode::GridFallback => {
+                let rects: Vec<(i32, i32, i32, i32)> = scene
+                    .partitions
+                    .iter()
+                    .filter(|p| p.camera)
+                    .map(|p| (p.x, p.y, p.w, p.h))
+                    .collect();
+                (
                     frame_instances(&frame, gpu.grid_w, gpu.grid_h, &rects),
                     Vec::new(),
-                ),
+                )
             }
         };
         let inst_count = instances.len();
@@ -1636,7 +1636,7 @@ fn frame_continuous_instances(
     frame: &Frame,
     grid_w: u32,
     grid_h: u32,
-    world: &[(i32, i32, i32, i32)],
+    partitions: &[crate::Partition],
     native: &[super::ResolvedPrimitive],
     stage: &[super::Point2],
 ) -> Vec<ContinuousGlyphInstance> {
@@ -1664,9 +1664,22 @@ fn frame_continuous_instances(
                 let xi = x as i32;
                 let yi = y as i32;
                 let in_world = frame.is_world(xi, yi)
-                    || world.iter().any(|&(px, py, pw, ph)| {
-                        xi >= px && xi < px + pw && yi >= py && yi < py + ph
-                    });
+                    || partitions.iter().any(|p| p.camera && p.contains(xi, yi));
+                // Per-partition pitch (video mimicry S1, 2026-10-25): the
+                // owning scaled partition re-pitches its cells around the
+                // partition origin, so a modal authored on a coarser rect
+                // still covers the same screen area with larger glyphs —
+                // the reference game's inventory runs ~1.25× the world's
+                // cell size. Partitions at the default 1.0 (every camera
+                // world partition) hit the `None` arm and keep the exact
+                // unscaled position/scale math.
+                let (pitch, ox, oy) = match partitions
+                    .iter()
+                    .find(|p| p.pitch_scale != 1.0 && p.contains(xi, yi))
+                {
+                    Some(p) => (p.pitch_scale, p.x as f32, p.y as f32),
+                    None => (1.0, 0.0, 0.0),
+                };
                 // Quiet local ground (review 2026-10-25 P0): suppress
                 // composed WORLD cells around stage anchors so figures read
                 // as strong silhouettes over a locally uniform floor — the
@@ -1694,10 +1707,13 @@ fn frame_continuous_instances(
                 let f = |c: u8| ((f32::from(c) / 255.0) * bold).min(1.0);
                 let instance = ContinuousGlyphInstance {
                     position: [
-                        x as f32 + 0.5 + cell.offset_x,
-                        y as f32 + 0.5 + cell.offset_y,
+                        ox + (x as f32 - ox + 0.5 + cell.offset_x) * pitch,
+                        oy + (y as f32 - oy + 0.5 + cell.offset_y) * pitch,
                     ],
-                    scale: [cell.scale.clamp(0.25, 2.0), cell.scale.clamp(0.25, 2.0)],
+                    scale: [
+                        (cell.scale.clamp(0.25, 2.0) * pitch).clamp(0.25, 8.0),
+                        (cell.scale.clamp(0.25, 2.0) * pitch).clamp(0.25, 8.0),
+                    ],
                     rotation: 0.0,
                     skew: [0.0, 0.0],
                     glyph: atlas::slot(cell.glyph),
@@ -2414,7 +2430,7 @@ mod tests {
         for i in 0..12 {
             frame.cells[i] = Cell::new('.', Rgb::new(90, 90, 90), Rgb::new(0, 0, 0));
         }
-        let world = &[(0, 0, 12, 1)];
+        let world = &[crate::Partition::new("world", 0, 0, 12, 1, vec![], true)];
         // No anchors: every world cell renders.
         let plain = frame_continuous_instances(&frame, 12, 1, world, &[], &[]);
         assert_eq!(plain.len(), 12);
@@ -2449,13 +2465,51 @@ mod tests {
             .with_offset(0.25, -0.125)
             .with_scale(0.75);
         frame.cells[1] = Cell::new('h', Rgb::new(200, 220, 255), Rgb::new(50, 20, 10));
-        let instances = frame_continuous_instances(&frame, 2, 1, &[(0, 0, 2, 1)], &[], &[]);
+        let instances = frame_continuous_instances(
+            &frame,
+            2,
+            1,
+            &[crate::Partition::new("world", 0, 0, 2, 1, vec![], true)],
+            &[],
+            &[],
+        );
         assert_eq!(instances.len(), 2);
         assert_eq!(instances[0].position, [0.75, 0.375]);
         assert_eq!(instances[0].scale, [0.75, 0.75]);
         assert_eq!(instances[0].bg, [0.0, 0.0, 0.0]);
         assert_eq!(instances[1].position, [1.5, 0.5]);
         assert_eq!(instances[1].world, 1);
+    }
+
+    /// Video mimicry S1: a partition with `pitch_scale` re-pitches its
+    /// composed cells around the partition origin (chunkier modal UI), while
+    /// cells in camera world partitions keep the exact unscaled math — the
+    /// world lattice must not move when a modal runs at another pitch.
+    #[test]
+    fn partition_pitch_re_scales_ui_cells_around_the_partition_origin() {
+        let mut frame = Frame::blank(4, 2);
+        // (1,1): UI cell inside a 2x-pitch partition anchored at (1,0).
+        // (3,1): world cell inside a camera partition at the default pitch.
+        frame.cells[5] = Cell::new('M', Rgb::new(240, 240, 240), Rgb::new(10, 10, 30));
+        frame.cells[7] = Cell::new('.', Rgb::new(90, 90, 90), Rgb::new(0, 0, 0));
+        let partitions = &[
+            crate::Partition::new("modal", 1, 0, 2, 2, vec![], false).with_pitch(2.0),
+            crate::Partition::new("world", 3, 0, 1, 2, vec![], true),
+        ];
+        let instances = frame_continuous_instances(&frame, 4, 2, partitions, &[], &[]);
+        let modal = instances
+            .iter()
+            .find(|i| i.glyph == crate::present::atlas::slot('M'))
+            .expect("modal cell must render");
+        // Local centre (0.5, 1.5) relative to the origin (1, 0), scaled 2x.
+        assert_eq!(modal.position, [1.0 + 0.5 * 2.0, 1.5 * 2.0]);
+        assert_eq!(modal.scale, [2.0, 2.0]);
+        let world = instances
+            .iter()
+            .find(|i| i.world == 1)
+            .expect("world cell must render");
+        assert_eq!(world.position, [3.5, 1.5]);
+        assert_eq!(world.scale, [1.0, 1.0]);
     }
 
     /// Layer contract (review 2026-10-25): the instance buffer is the paint
@@ -2474,8 +2528,14 @@ mod tests {
             crate::ContinuousMaterial::new(Rgb::new(255, 140, 40)),
         )
         .sample(0.0);
-        let instances =
-            frame_continuous_instances(&frame, 2, 2, &[(0, 0, 1, 1)], &[primitive], &[]);
+        let instances = frame_continuous_instances(
+            &frame,
+            2,
+            2,
+            &[crate::Partition::new("world", 0, 0, 1, 1, vec![], true)],
+            &[primitive],
+            &[],
+        );
         assert_eq!(instances.len(), 3);
         let world_index = instances
             .iter()
