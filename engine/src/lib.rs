@@ -27,12 +27,15 @@
 mod anim;
 pub mod bridge;
 mod cell;
+pub mod character;
 mod color;
 mod compose;
 pub mod continuous;
 pub mod demo;
 pub mod emission;
+pub mod flame;
 pub mod fx;
+pub mod fx_timeline;
 mod layer;
 pub mod motion;
 pub mod overlay;
@@ -41,6 +44,8 @@ mod partition;
 pub mod raster;
 mod scene;
 pub mod sprite;
+pub mod veyrath_world;
+pub mod weather;
 pub use ascii_mmorpg_shared::veyrath;
 
 pub use anim::{sample, Anim, Axis, EaseKind, Sample, Track};

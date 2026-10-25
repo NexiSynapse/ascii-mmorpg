@@ -364,6 +364,16 @@ impl ContinuousScene {
         &self.primitives
     }
 
+    /// Retain only the first `cap` authored primitives (no-op when the
+    /// scene is already within the cap). Builders that author in priority
+    /// order use this to bound their own generation contract — unlike
+    /// [`ContinuousScene::sample`]'s cap, which keeps the nearest-depth
+    /// tail and can drop semantically important primitives behind quiet
+    /// background ink.
+    pub fn truncate(&mut self, cap: usize) {
+        self.primitives.truncate(cap);
+    }
+
     /// Sample and depth-sort the scene. Sorting is stable, so equal-depth
     /// primitives retain authoring order and produce deterministic output.
     ///

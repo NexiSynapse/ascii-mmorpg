@@ -164,49 +164,11 @@ impl VeyrathVisualData {
             .find(|settlement| settlement.id == id)
     }
 
-    pub fn faction_for_atlas_glyph(&self, glyph: char) -> Option<&Faction> {
-        self.factions
-            .iter()
-            .find(|faction| faction.atlas_glyph == glyph)
-    }
-
-    pub fn glyph_color(&self, glyph: char) -> Color {
-        if let Some(faction) = self.faction_for_atlas_glyph(glyph) {
-            return faction.color;
-        }
-        match glyph {
-            'A' | 'D' | 'G' | 'M' | 'B' | '@' => self.palette.labels,
-            '*' => self.palette.highlight,
-            '~' => self.palette.water,
-            '^' => self.palette.mountain,
-            ':' => self.palette.river_highlight,
-            '=' => self.palette.road,
-            '.' => self.palette.ruins_and_borders,
-            '+' | '-' | '|' => self.palette.forest,
-            _ => self.palette.labels,
-        }
-    }
-
-    pub fn atlas_lines(&self, max_width: usize, max_height: usize) -> Vec<String> {
-        self.atlas
-            .lines()
-            .take(max_height)
-            .map(|line| line.chars().take(max_width).collect())
-            .collect()
-    }
-
-    pub fn atlas_note(&self) -> String {
-        let settlement = self
-            .settlement(&self.starter_settlement)
-            .map(|settlement| settlement.name.as_str())
-            .unwrap_or("Starter settlement");
-        let region = self
-            .settlement(&self.starter_settlement)
-            .and_then(|settlement| self.region(&settlement.region))
-            .map(|region| region.name.as_str())
-            .unwrap_or("provisional region");
-        format!("{settlement} (*): starter settlement in {region}")
-    }
+    // Presentation helpers for the derived printable atlas (glyph-colour
+    // mapping, line clipping, terminal notes) intentionally live in the
+    // CLIENT (client/src/veyrath.rs): the shared crate describes Veyrath
+    // semantically; it does not decide how the terminal renders it
+    // (review 2026-10-25, ownership split per docs/SOT.md).
 }
 
 pub fn visual_data() -> &'static VeyrathVisualData {
@@ -525,17 +487,5 @@ mod tests {
         assert_eq!(data.social_hub, "veyrath");
         assert!(data.atlas.is_ascii());
         assert!(!POLITICAL_CHECKPOINT_JSON.is_empty());
-    }
-
-    #[test]
-    fn atlas_palette_and_faction_lookup_are_derived_from_the_shared_source() {
-        let data = visual_data();
-        assert_eq!(data.faction_for_atlas_glyph('v').unwrap().id, "greyfall");
-        assert_eq!(data.glyph_color('v'), [138, 123, 96]);
-        assert_eq!(data.glyph_color('='), [182, 157, 121]);
-        assert_eq!(
-            data.atlas_note(),
-            "Millhaven (*): starter settlement in Greyfall Vale"
-        );
     }
 }

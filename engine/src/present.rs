@@ -22,7 +22,10 @@ use std::time::Instant;
 pub enum PresentMode {
     /// Render logical cells as continuously positioned glyph quads on a
     /// letterboxed black canvas. The authored grid remains the coordinate
-    /// system, but glyphs are no longer stretched to fill the surface.
+    /// system, but glyphs are no longer stretched to fill the surface:
+    /// enlarging viewports snap to integer texel factors (2x, 3x, ...) so
+    /// the atlas is never fractionally resampled — the leftover pixels
+    /// become centered dark margins.
     #[default]
     Continuous,
     /// Keep the original surface-filling grid path for compatibility and
@@ -142,6 +145,16 @@ pub trait SceneSource {
     /// Key press (`pressed`) / release. Esc/Q and close always exit in
     /// addition to this; return value is reserved (currently ignored).
     fn key(&mut self, _code: winit::keyboard::KeyCode, _pressed: bool) {}
+    /// Stage anchors for local ground clearance: continuous-grid foot
+    /// positions of actors/figures that must read as strong silhouettes.
+    /// The presenter suppresses composed WORLD cells inside a small radius
+    /// of each anchor (dithered edge) so terrain punctuation does not
+    /// compete with the figure — the reference's quiet-local-ground rule
+    /// (review 2026-10-25, P0). UI cells and native primitives are never
+    /// suppressed. Default: none.
+    fn stage_anchors(&mut self, _t: f32) -> Vec<super::Point2> {
+        Vec::new()
+    }
     /// Pointer feedback: absolute surface-pixel position, surface size, button edges,
     /// cursor deltas, and wheel ticks in one event (OSRS-style camera orbit
     /// wants the latter three; point-and-click can use the first two).
@@ -449,6 +462,9 @@ struct App {
     /// Smoothed frames-per-second shown in the corner readout.
     fps_ema: f32,
     prev_frame: Option<Instant>,
+    /// Whether the emissive-natives-without-ownership note has been logged
+    /// (once per run; see the spec-gap guard in `render`).
+    warned_bloom_gap: bool,
 }
 
 impl App {
@@ -466,6 +482,7 @@ impl App {
             pointer: PointerTrack::default(),
             fps_ema: 60.0,
             prev_frame: None,
+            warned_bloom_gap: false,
         })
     }
 
@@ -1025,11 +1042,20 @@ impl App {
         let t0 = std::time::Instant::now();
         self.source.present_mode(self.opts.mode);
         let (mut scene, camera) = self.source.scene_at_size(t, gpu.grid_w, gpu.grid_h);
-        let continuous_primitives = if self.opts.mode == PresentMode::Continuous {
+        let continuous_mode = self.opts.mode == PresentMode::Continuous;
+        let continuous_primitives = if continuous_mode {
             self.source
                 .continuous_scene(t)
                 .map(|scene| scene.sample(t))
                 .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        // Stage anchors (quiet local ground around figures) — sampled once
+        // per frame in continuous mode; UI cells and natives are never
+        // suppressed, so labels/modals keep painting over the cleared floor.
+        let stage_anchors = if continuous_mode {
+            self.source.stage_anchors(t)
         } else {
             Vec::new()
         };
@@ -1055,6 +1081,22 @@ impl App {
         // grid composer and its 8-bit world glow for grid-identical torches.
         let bloom_owned = self.opts.mode == PresentMode::Continuous
             && self.source.continuous_bloom_owns_world_lighting();
+        // Spec-gap guard (review 2026-10-25): an emissive continuous scene
+        // without ownership silently produces no bloom. Ownership stays an
+        // explicit opt-in contract, but the gap is at least loud now.
+        if !bloom_owned
+            && !self.warned_bloom_gap
+            && continuous_primitives
+                .iter()
+                .any(|p| p.material.emission.is_some())
+        {
+            self.warned_bloom_gap = true;
+            eprintln!(
+                "[present] note: continuous primitives carry emission but the source does not \
+                 claim bloom ownership (continuous_bloom_owns_world_lighting); their light is \
+                 not rendered"
+            );
+        }
         let frame = if bloom_owned {
             crate::compose::compose_for_continuous(&scene, &camera, t)
         } else {
@@ -1136,6 +1178,7 @@ impl App {
                         gpu.grid_h,
                         &rects,
                         &continuous_primitives,
+                        &stage_anchors,
                     ),
                 ),
                 PresentMode::GridFallback => (
@@ -1557,6 +1600,19 @@ fn fitted_viewport(
         };
     }
     let scale = (sw / authored_width).min(sh / authored_height);
+    // Glyph coverage rasterizes once into the atlas; any fractional upscale
+    // resamples it and reads soft/low-res on large windows and fullscreen
+    // (the authored grid stays capped there, so the viewport stretches).
+    // Snap enlarging scales down to integer factors so glyph texels map
+    // 1:1 (2x, 3x, ...); the leftover pixels become centered dark margins
+    // instead of resampling artifacts. Shrinking scales (windows smaller
+    // than the authored grid) still shrink-to-fit to keep filling the
+    // surface.
+    let scale = if scale >= 1.0 {
+        scale.floor().max(1.0)
+    } else {
+        scale
+    };
     let width = authored_width * scale;
     let height = authored_height * scale;
     ViewportRect {
@@ -1567,16 +1623,35 @@ fn fitted_viewport(
     }
 }
 
+/// Cell-stable unit hash for dither decisions (same construction family
+/// as the game-side `hash2` lattices).
+fn hash2(x: i32, y: i32) -> f32 {
+    let mut h = (x as u32).wrapping_mul(0x27d4_eb2d);
+    h ^= (y as u32).wrapping_mul(0x1656_67b1);
+    h ^= h.rotate_left(13);
+    (h >> 8) as f32 / (1u32 << 24) as f32
+}
+
 fn frame_continuous_instances(
     frame: &Frame,
     grid_w: u32,
     grid_h: u32,
     world: &[(i32, i32, i32, i32)],
     native: &[super::ResolvedPrimitive],
+    stage: &[super::Point2],
 ) -> Vec<ContinuousGlyphInstance> {
     let cols = grid_w.min(frame.w.max(0) as u32);
     let rows = grid_h.min(frame.h.max(0) as u32);
     let mut out = Vec::with_capacity((cols * rows) as usize + native.len());
+    // Composed UI cells (HUD, labels, inventory/modal, map captions) are
+    // collected separately and appended AFTER the native primitives: the
+    // instance buffer is the paint order, so the layer contract becomes
+    // world ink → native world content → UI/modal (review 2026-10-25:
+    // natives appending last let actors/weather/torches draw over the HUD
+    // and modals). Composed cells still carry no per-cell depth, so
+    // cross-depth interleaving between world ink and natives stays
+    // intentionally unmodelled — see `native_continuous_instance`.
+    let mut ui_cells = Vec::new();
     if cols > 0 && rows > 0 {
         for y in 0..rows {
             for x in 0..cols {
@@ -1592,9 +1667,32 @@ fn frame_continuous_instances(
                     || world.iter().any(|&(px, py, pw, ph)| {
                         xi >= px && xi < px + pw && yi >= py && yi < py + ph
                     });
+                // Quiet local ground (review 2026-10-25 P0): suppress
+                // composed WORLD cells around stage anchors so figures read
+                // as strong silhouettes over a locally uniform floor — the
+                // inner radius clears outright, the outer band dithers by
+                // a cell-stable hash for a ragged arena edge. UI cells and
+                // native primitives are never suppressed.
+                if in_world && !stage.is_empty() {
+                    let cx = x as f32 + 0.5 + cell.offset_x;
+                    let cy = y as f32 + 0.5 + cell.offset_y;
+                    let nearest = stage
+                        .iter()
+                        .map(|a| (a.x - cx).hypot(a.y - cy))
+                        .fold(f32::INFINITY, f32::min);
+                    if nearest < 2.2 {
+                        continue;
+                    }
+                    if nearest < 3.2 {
+                        let dither = hash2(xi, yi);
+                        if dither < (3.2 - nearest) / 1.0 {
+                            continue;
+                        }
+                    }
+                }
                 let bold = if cell.bold { 1.25 } else { 1.0 };
                 let f = |c: u8| ((f32::from(c) / 255.0) * bold).min(1.0);
-                out.push(ContinuousGlyphInstance {
+                let instance = ContinuousGlyphInstance {
                     position: [
                         x as f32 + 0.5 + cell.offset_x,
                         y as f32 + 0.5 + cell.offset_y,
@@ -1621,28 +1719,35 @@ fn frame_continuous_instances(
                     },
                     opacity: 1.0,
                     world: in_world as u32,
-                });
+                };
+                if in_world {
+                    out.push(instance);
+                } else {
+                    ui_cells.push(instance);
+                }
             }
         }
     }
-    // Native primitives render after (and therefore above) every composed
-    // cell: composed cells have no per-cell depth, so cross-depth
-    // interleaving between world ink and native primitives is intentionally
-    // not modelled yet — see `native_continuous_instance`.
+    // Native primitives render above composed world ink (their own depth
+    // order only) but below every UI/modal cell.
     out.extend(native.iter().filter_map(native_continuous_instance));
+    out.extend(ui_cells);
     out
 }
 
 /// Convert one resolved native primitive into a continuous instanced glyph.
 ///
-/// Narrowed guarantee (reviewed 2026-10-23): native primitives carry no depth
-/// into the GPU pipeline — `ContinuousGlyphInstance` has no depth channel and
-/// this pipeline has no depth attachment — so every native primitive renders
-/// above all composed frame cells (in its own depth order only), and
-/// ribbons/streaks/rays collapse to a single glyph (`-`/`^`) because width,
-/// length, and tip geometry have no instance representation yet. Deep
-/// interleaving with world ink and true primitive geometry stay deferred
-/// until a dedicated depth/geometry milestone; emission parity is unaffected.
+/// Narrowed guarantee (reviewed 2026-10-23, ordering revised 2026-10-25):
+/// native primitives carry no depth into the GPU pipeline —
+/// `ContinuousGlyphInstance` has no depth channel and this pipeline has no
+/// depth attachment — so every native primitive renders above all composed
+/// WORLD cells (in its own depth order only) but below every composed UI
+/// cell (HUD/labels/modals paint last; see `frame_continuous_instances`),
+/// and ribbons/streaks/rays collapse to a single glyph (`-`/`^`) because
+/// width, length, and tip geometry have no instance representation yet.
+/// Deep interleaving with world ink and true primitive geometry stay
+/// deferred until a dedicated depth/geometry milestone; emission parity is
+/// unaffected.
 fn native_continuous_instance(
     primitive: &super::ResolvedPrimitive,
 ) -> Option<ContinuousGlyphInstance> {
@@ -1969,15 +2074,31 @@ fn cfs(i: VOut) -> @location(0) vec4<f32> {
         field_dimensions - vec2<i32>(1),
     );
     let bloom = textureLoad(bloom_field, field_position, 0).rgb;
-    let lit_fg = min(fg + select(vec3<f32>(0.0), bloom, i.world != 0u), vec3<f32>(1.0));
+    // Tone-mapped light response (review 2026-10-25): a soft energy curve
+    // replaces the raw additive clamp — flame cores saturate smoothly,
+    // warm hue ratios survive, and the pool falls off gently instead of
+    // every lit cell clipping to the same orange/white.
+    let raw = select(vec3<f32>(0.0), bloom, i.world != 0u);
+    let peak = max(raw.r, max(raw.g, raw.b));
+    let energy = 1.0 - exp(-peak * 1.7);
+    let light = raw / max(peak, 0.0001) * energy;
+    let lit_fg = min(fg + light, vec3<f32>(1.0));
     let col = mix(i.bg, lit_fg, a);
     let washed = mix(col, u.wash_rgb, u.wash_strength);
-    let final_col = select(washed, col, i.world != 0u);
-    // UI cells keep an opaque background even when the glyph mask is a space;
-    // world cells retain mask alpha so sparse glyphs continue to reveal the
-    // black canvas around their ink.
-    let alpha = select(1.0, a, i.world != 0u);
-    return vec4<f32>(final_col, alpha);
+    // World cells: light-receiver response (review 2026-10-25) — inside a
+    // strong field the glyph gaps gain a faint warm fill, so sparse ground
+    // reads as an illuminated surface while true void (no field) stays
+    // pure black. Ink compositing is unchanged (same premasked colour and
+    // alpha as before); UI cells keep their opaque washed background.
+    if (i.world != 0u) {
+        let recv = energy * 0.38;
+        let ink = lit_fg * a * a;
+        let fill = light * recv * (1.0 - a);
+        let out_a = max(a, recv);
+        let out_c = (ink + fill) / max(out_a, 0.0001);
+        return vec4<f32>(out_c, out_a);
+    }
+    return vec4<f32>(washed, 1.0);
 }
 "#;
 
@@ -2000,6 +2121,26 @@ impl winit::application::ApplicationHandler for App {
         };
         match event_loop.create_window(attrs) {
             Ok(window) => {
+                // DPI-aware glyph atlas: the window above is sized in
+                // LOGICAL pixels, but the atlas rasterizes at PHYSICAL
+                // pixels per cell, so any display scale factor > 1 stretches
+                // every glyph (the "low-res window" symptom). Rebuild both
+                // atlases at the window's scale factor before GPU init —
+                // cells then cover scale × more physical pixels and the
+                // grid/viewport math (which reads `atlas.cell_w/h` in
+                // physical units) keeps a 1:1 texel mapping.
+                let scale = window.scale_factor();
+                if scale > 1.0 {
+                    let base = self.opts.cell_px * scale as f32;
+                    match atlas::build(base) {
+                        Ok(hi) => self.atlas = hi,
+                        Err(err) => eprintln!("presenter hi-dpi atlas failed: {err}"),
+                    }
+                    match atlas::build(base * 2.0) {
+                        Ok(hi) => self.atlas2x = hi,
+                        Err(err) => eprintln!("presenter hi-dpi overlay atlas failed: {err}"),
+                    }
+                }
                 if let Err(err) = self.init_gpu(Arc::new(window)) {
                     eprintln!("presenter GPU init failed: {err}");
                     event_loop.exit();
@@ -2221,18 +2362,38 @@ mod tests {
     }
 
     #[test]
-    fn fitted_viewport_preserves_authored_aspect_with_centered_bars() {
+    fn fitted_viewport_snaps_enlarging_scales_to_integer_texel_factors() {
+        // Authored grid 160x56 at 10x16 cells = 1600x896. A 1920x1080
+        // surface fits at 1.2x; the snap renders 1x glyph texels with
+        // centered dark margins instead of resampling the atlas.
         let viewport = fitted_viewport(1920, 1080, 160, 56, 10, 16);
-        assert!((viewport.width - 1920.0).abs() < 0.001);
-        assert!((viewport.height - 1075.2).abs() < 0.001);
-        assert!(viewport.x.abs() < 0.001);
-        assert!((viewport.y - 2.4).abs() < 0.001);
+        assert_eq!(viewport.width, 1600.0);
+        assert_eq!(viewport.height, 896.0);
+        assert_eq!(viewport.x, 160.0);
+        assert_eq!(viewport.y, 92.0);
 
+        // Wider surface cannot buy more than the integer factor allows.
         let wide = fitted_viewport(2560, 1080, 160, 56, 10, 16);
-        assert_eq!(wide.height, 1080.0);
-        assert!((wide.width - 1928.5714).abs() < 0.001);
-        assert!((wide.x - 315.7143).abs() < 0.001);
-        assert_eq!(wide.y, 0.0);
+        assert_eq!(wide.width, 1600.0);
+        assert_eq!(wide.height, 896.0);
+        assert_eq!(wide.x, 480.0);
+        assert_eq!(wide.y, 92.0);
+
+        // A 4K surface fits 2x, so glyphs render at exactly two texels per
+        // axis — still a 1:1 mapping, just doubled.
+        let uhd = fitted_viewport(3840, 2160, 160, 56, 10, 16);
+        assert_eq!(uhd.width, 3200.0);
+        assert_eq!(uhd.height, 1792.0);
+        assert_eq!(uhd.x, 320.0);
+        assert_eq!(uhd.y, 184.0);
+
+        // Surfaces smaller than the authored grid still shrink-to-fit; small
+        // windows must keep filling the surface.
+        let small = fitted_viewport(800, 448, 160, 56, 10, 16);
+        assert_eq!(small.width, 800.0);
+        assert_eq!(small.height, 448.0);
+        assert_eq!(small.x, 0.0);
+        assert_eq!(small.y, 0.0);
     }
 
     #[test]
@@ -2243,6 +2404,44 @@ mod tests {
         assert!(continuous_capacity(0, 0) >= std::mem::size_of::<ContinuousGlyphInstance>() as u64);
     }
 
+    /// Quiet local ground (review 2026-10-25 P0): world cells inside a
+    /// stage anchor's inner radius are suppressed (with a dithered outer
+    /// band), while UI cells at the same positions are never suppressed —
+    /// and with no anchors nothing changes.
+    #[test]
+    fn stage_anchors_clear_world_cells_but_never_ui_cells() {
+        let mut frame = Frame::blank(12, 1);
+        for i in 0..12 {
+            frame.cells[i] = Cell::new('.', Rgb::new(90, 90, 90), Rgb::new(0, 0, 0));
+        }
+        let world = &[(0, 0, 12, 1)];
+        // No anchors: every world cell renders.
+        let plain = frame_continuous_instances(&frame, 12, 1, world, &[], &[]);
+        assert_eq!(plain.len(), 12);
+        // Anchor at (5.5, 0.5): the inner radius clears the cells around
+        // it; the far edges (well outside the dither band) survive.
+        let stage = [crate::Point2::new(5.5, 0.5)];
+        let cleared = frame_continuous_instances(&frame, 12, 1, world, &[], &stage);
+        assert!(
+            cleared.len() < plain.len(),
+            "stage anchors must suppress world cells"
+        );
+        let x_positions: Vec<f32> = cleared.iter().map(|i| i.position[0]).collect();
+        for x in [0.5, 11.5] {
+            assert!(
+                x_positions.contains(&x),
+                "far cells at x={x} must survive the stage clearance"
+            );
+        }
+        // UI cells (no world partition) are never suppressed by anchors.
+        let ui = frame_continuous_instances(&frame, 12, 1, &[], &[], &stage);
+        assert_eq!(
+            ui.len(),
+            12,
+            "UI cells must ignore stage clearance entirely"
+        );
+    }
+
     #[test]
     fn continuous_instances_use_fractional_positions_and_black_world_backgrounds() {
         let mut frame = Frame::blank(2, 1);
@@ -2250,13 +2449,54 @@ mod tests {
             .with_offset(0.25, -0.125)
             .with_scale(0.75);
         frame.cells[1] = Cell::new('h', Rgb::new(200, 220, 255), Rgb::new(50, 20, 10));
-        let instances = frame_continuous_instances(&frame, 2, 1, &[(0, 0, 2, 1)], &[]);
+        let instances = frame_continuous_instances(&frame, 2, 1, &[(0, 0, 2, 1)], &[], &[]);
         assert_eq!(instances.len(), 2);
         assert_eq!(instances[0].position, [0.75, 0.375]);
         assert_eq!(instances[0].scale, [0.75, 0.75]);
         assert_eq!(instances[0].bg, [0.0, 0.0, 0.0]);
         assert_eq!(instances[1].position, [1.5, 0.5]);
         assert_eq!(instances[1].world, 1);
+    }
+
+    /// Layer contract (review 2026-10-25): the instance buffer is the paint
+    /// order, so a UI cell sharing its cell with a native world primitive
+    /// must be emitted AFTER the native — HUD/labels/modals can never be
+    /// occluded by native actors, weather, torches, or map primitives.
+    #[test]
+    fn ui_cells_paint_after_native_primitives_at_overlapping_positions() {
+        let mut frame = Frame::blank(2, 2);
+        // (0,0) world partition cell; (1,1) UI cell outside every partition.
+        frame.cells[0] = Cell::new('.', Rgb::new(90, 90, 90), Rgb::new(0, 0, 0));
+        frame.cells[3] = Cell::new('H', Rgb::new(240, 240, 240), Rgb::new(20, 20, 20));
+        let primitive = crate::Primitive::new(
+            crate::PrimitiveKind::particle('*'),
+            crate::Transform2::new(crate::Point2::new(1.2, 1.3), 0.0),
+            crate::ContinuousMaterial::new(Rgb::new(255, 140, 40)),
+        )
+        .sample(0.0);
+        let instances =
+            frame_continuous_instances(&frame, 2, 2, &[(0, 0, 1, 1)], &[primitive], &[]);
+        assert_eq!(instances.len(), 3);
+        let world_index = instances
+            .iter()
+            .position(|i| i.world == 1 && i.position[0] < 1.0)
+            .expect("world cell instance");
+        let native_index = instances
+            .iter()
+            .position(|i| i.world == 1 && i.position[0] > 1.0 && i.position[0] < 2.0)
+            .expect("native instance");
+        let ui_index = instances
+            .iter()
+            .position(|i| i.world == 0)
+            .expect("ui cell instance");
+        assert!(
+            world_index < native_index,
+            "native must paint above composed world ink"
+        );
+        assert!(
+            native_index < ui_index,
+            "UI cell must paint above an overlapping native primitive"
+        );
     }
 
     #[test]
@@ -2277,7 +2517,7 @@ mod tests {
                 )),
         )
         .sample(0.0);
-        let instances = frame_continuous_instances(&frame, 1, 1, &[], &[primitive]);
+        let instances = frame_continuous_instances(&frame, 1, 1, &[], &[primitive], &[]);
 
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].glyph, crate::present::atlas::slot('^'));
@@ -2299,9 +2539,10 @@ mod tests {
                 .with_emission(crate::Emission::new(Rgb::new(255, 80, 10), 1.0, 2.0)),
         )
         .sample(0.0);
-        let instance = frame_continuous_instances(&Frame::blank(0, 0), 0, 0, &[], &[primitive])
-            .pop()
-            .expect("native-only primitive should render");
+        let instance =
+            frame_continuous_instances(&Frame::blank(0, 0), 0, 0, &[], &[primitive], &[])
+                .pop()
+                .expect("native-only primitive should render");
         let source = EmissionSource::from_resolved_primitive(primitive, true)
             .expect("emissive primitive should produce a source");
         assert_eq!(instance.position, [3.75, 5.25]);
@@ -2322,7 +2563,8 @@ mod tests {
             crate::ContinuousMaterial::new(Rgb::new(255, 255, 255)),
         )
         .sample(0.0);
-        let instances = frame_continuous_instances(&Frame::blank(0, 0), 0, 0, &[], &[primitive]);
+        let instances =
+            frame_continuous_instances(&Frame::blank(0, 0), 0, 0, &[], &[primitive], &[]);
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].position, [1.75, 3.0]);
     }
@@ -2341,7 +2583,8 @@ mod tests {
             ),
         )
         .sample(0.0);
-        let instances = frame_continuous_instances(&Frame::blank(0, 0), 0, 0, &[], &[primitive]);
+        let instances =
+            frame_continuous_instances(&Frame::blank(0, 0), 0, 0, &[], &[primitive], &[]);
         assert_eq!(instances[0].fg_gradient_axis, 3);
         assert!(CONTINUOUS_SHADER.contains("distance(i.glyph_uv"));
         assert!(CONTINUOUS_SHADER.contains("gradient_axis == 3u"));
@@ -2512,7 +2755,12 @@ mod tests {
         assert!(CONTINUOUS_SHADER.contains("cos(rotation)"));
         assert!(CONTINUOUS_SHADER.contains("skew.x * local.y"));
         assert!(CONTINUOUS_SHADER.contains("u.viewport_size"));
-        assert!(CONTINUOUS_SHADER.contains("select(1.0, a, i.world != 0u)"));
+        // Tone-mapped light + receiver contract (review 2026-10-25): the
+        // raw additive clamp is gone; world cells respond through the
+        // energy curve and gain a faint fill inside strong fields.
+        assert!(CONTINUOUS_SHADER.contains("1.0 - exp(-peak * 1.7)"));
+        assert!(CONTINUOUS_SHADER.contains("let recv = energy * 0.38;"));
+        assert!(!CONTINUOUS_SHADER.contains("min(fg + select(vec3<f32>(0.0), bloom"));
     }
 
     #[test]

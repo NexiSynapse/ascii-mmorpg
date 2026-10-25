@@ -7,11 +7,17 @@
 //! Pass `--grid` to compare the legacy grid presenter with the default
 //! continuous, aspect-preserving canvas.
 //!
-//! Pass `--continuous-torch` to enable the spec-gated in-world torch
-//! migration (native flame/crackle primitives + continuous float bloom
-//! owning torch spill on the continuous canvas). Default continuous mode
-//! keeps the legacy point-light/8-bit-glow torch path until the standalone
-//! torch/sun showcase is visually accepted (`docs/RENDERER_REBUILD_SPEC.md`).
+//! Play-path integration (issue #10): the rebuilt continuous renderer is
+//! the DEFAULT — native torch flame/crackles with float bloom owning
+//! world lighting, layered `engine::character` actors, and
+//! `engine::weather` grass/rain/motes all run together on the continuous
+//! canvas. `M` opens the Veyrath world map (`engine::veyrath_world`,
+//! provisional presentation-only coordinates). The legacy mesh paths
+//! remain selectable for acceptance comparison: `--legacy` restores all
+//! of them (or `--legacy-torch` / `--legacy-actors` / `--legacy-weather`
+//! per system), and `--grid` selects the legacy surface-filling grid
+//! presenter. The old world rendering is retired only after explicit
+//! visual acceptance — the mesh paths stay compiled until then.
 //!
 //! Every frame builds a mesh list (zoned ground, ocean sheet, trees, item
 //! drops, humanoid actors, combat FX as world-space decals and boxes), one
@@ -22,7 +28,10 @@
 //!
 //! Run: `cargo run -p ascii-mmorpg-engine --features present --example play`
 //! Flags: `--frames N` exits after N presented frames (automated proof);
-//! `--check` runs a headless movement + combat + modal self-test (no window).
+//! `--window` opens the authored 160x56 comparison window instead of the
+//! default borderless fullscreen (whose grid derives from the surface at
+//! native glyph density); `--check` runs a headless movement + combat +
+//! modal self-test (no window).
 //!
 //! Still loopback this slice: one local player, no TCP yet. The terminal
 //! client is untouched.
@@ -53,7 +62,7 @@ fn real_main() -> Result<(), String> {
     use ascii_mmorpg_engine::{
         bridge, cell_text_width, compose, AnimCell, Camera, Cell, ContinuousMaterial,
         ContinuousScene, Emission, EmissionSource, Layer, Partition, Point2, Primitive,
-        PrimitiveKind, Rgb, Scene, Transform2, MAX_NATIVE_PRIMITIVES,
+        PrimitiveKind, Rgb, Scene, Transform2, Wash, MAX_NATIVE_PRIMITIVES,
     };
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::time::Duration;
@@ -585,22 +594,64 @@ fn real_main() -> Result<(), String> {
         /// Continuous bloom owns torch spill in the continuous presenter; the
         /// grid fallback keeps the legacy point-light path.
         continuous_canvas: bool,
-        /// Spec gate for the in-world torch migration (`--continuous-torch`).
-        /// The first vertical slice is the standalone torch/sun showcase; it
-        /// must be visually accepted before replacing the in-world torch
-        /// path, so the default continuous canvas keeps legacy point lights
-        /// and 8-bit world glow. Enabling the gate hands torch spill to
-        /// continuous float bloom and renders native flame/crackle primitives.
+        /// In-world torch migration gate. DEFAULT ON since the play-path
+        /// integration (issue #10, after the standalone showcase was
+        /// accepted): torches emit native flame/crackle primitives with
+        /// continuous float bloom owning torch spill. The legacy mesh
+        /// flame + point-light path is the `--legacy-torch` fallback.
         continuous_torch: bool,
+        /// Spec gate for the layered continuous-character migration
+        /// (issue #8). DEFAULT ON since the play-path integration (issue
+        /// #10): the mesh humanoids are the `--legacy-actors` fallback.
+        continuous_actors: bool,
+        /// Spec gate for the continuous weather migration (issue #9).
+        /// DEFAULT ON since the play-path integration (issue #10): the
+        /// mesh grass/rain are the `--legacy-weather` fallback.
+        continuous_weather: bool,
+        /// World-map modal (`M`): swaps the frame for Veyrath world
+        /// visuals composed from the shared model (issue #7/#10).
+        map_open: bool,
+        /// Coverage window captured by `world_meshes` for the gated weather
+        /// path, consumed by `continuous_scene` the same frame.
+        weather_window: ascii_mmorpg_engine::weather::CoverageWindow,
+        /// Smoothed foot anchors + roles captured by `world_meshes` on the
+        /// gated path, consumed by `continuous_scene` the same frame.
+        native_actor_anchors: Vec<NativeActorAnchor>,
+    }
+
+    /// One gated-path actor record: where the layered glyph character is
+    /// composed from (presentation-only; authoritative positions stay in the
+    /// simulation).
+    #[derive(Clone)]
+    struct NativeActorAnchor {
+        pos: (f32, f32),
+        kind: EntityKind,
+        skeleton: bool,
+        is_player: bool,
+        phase: f32,
     }
 
     impl LocalGame {
         fn new() -> Self {
+            // Play-path integration defaults (issue #10): all continuous
+            // migrations ON; `--legacy` (or per-system `--legacy-torch` /
+            // `--legacy-actors` / `--legacy-weather`) restores the old mesh
+            // paths for visual comparison during acceptance. `--grid`
+            // selects the legacy grid presenter entirely.
+            let legacy_all = std::env::args().any(|arg| arg == "--legacy");
             Self::with_gpu3d_and_weather(
                 !std::env::args().any(|arg| arg == "--cpu"),
                 weather_from_args(),
             )
-            .with_continuous_torch(std::env::args().any(|arg| arg == "--continuous-torch"))
+            .with_continuous_torch(
+                !legacy_all && !std::env::args().any(|arg| arg == "--legacy-torch"),
+            )
+            .with_continuous_actors(
+                !legacy_all && !std::env::args().any(|arg| arg == "--legacy-actors"),
+            )
+            .with_continuous_weather(
+                !legacy_all && !std::env::args().any(|arg| arg == "--legacy-weather"),
+            )
         }
 
         /// Enable the spec-gated in-world torch migration (see the
@@ -608,6 +659,22 @@ fn real_main() -> Result<(), String> {
         /// gate-off and simulate both sides directly.
         fn with_continuous_torch(mut self, enabled: bool) -> Self {
             self.continuous_torch = enabled;
+            self
+        }
+
+        /// Enable the spec-gated layered-character migration (see the
+        /// `continuous_actors` field). Headless `--check` games default to
+        /// gate-off and assert both paths directly.
+        fn with_continuous_actors(mut self, enabled: bool) -> Self {
+            self.continuous_actors = enabled;
+            self
+        }
+
+        /// Enable the spec-gated weather migration (see the
+        /// `continuous_weather` field). Headless `--check` games default to
+        /// gate-off and assert both paths directly.
+        fn with_continuous_weather(mut self, enabled: bool) -> Self {
+            self.continuous_weather = enabled;
             self
         }
 
@@ -633,6 +700,7 @@ fn real_main() -> Result<(), String> {
                 combat_fx: Vec::new(),
                 seen_combat_events: Vec::new(),
                 inv_open: false,
+                map_open: false,
                 facing: std::f32::consts::PI,
                 facing_target: std::f32::consts::PI,
                 gait_phase: 0.0,
@@ -644,7 +712,197 @@ fn real_main() -> Result<(), String> {
                 last_camera: None,
                 last_grid: (GRID_W, GRID_H),
                 continuous_canvas: false,
-                continuous_torch: false,
+                // Play-path integration (issue #10): the continuous
+                // migrations are the DEFAULT presentation; the CLI
+                // `--legacy*` flags in `new()` opt back into the mesh
+                // paths. `--check` constructs games explicitly and
+                // overrides these per contract block.
+                continuous_torch: true,
+                continuous_actors: true,
+                continuous_weather: true,
+                weather_window: ascii_mmorpg_engine::weather::CoverageWindow {
+                    x0: 0,
+                    x1: 0,
+                    z0: 0,
+                    z1: 0,
+                },
+                native_actor_anchors: Vec::new(),
+            }
+        }
+        /// Native flame/crackle primitives for the gated in-world torch
+        /// migration (see `continuous_scene`).
+        fn push_native_torches(&mut self, scene: &mut ContinuousScene, t: f32, camera: &Camera3) {
+            for (torch_index, (tx, tz)) in torch_spots().into_iter().enumerate() {
+                let pulse = torch_pulse(t, torch_index);
+                let anchor = Vec3::new(tx + pulse.offset.0, 1.92, tz + pulse.offset.1);
+                let Some((sx, sy)) = project_frac(anchor, camera) else {
+                    continue;
+                };
+                let flame_y = sy + HUD_H as f32;
+
+                // Shared ASCII flame builder (review 2026-10-25 P1): one
+                // function for the in-world torch and the standalone
+                // showcase so the accepted read cannot drift.
+                ascii_mmorpg_engine::flame::push_ascii_flame(
+                    scene,
+                    Point2::new(sx, flame_y),
+                    ascii_mmorpg_engine::flame::FlamePulse {
+                        light_gain: pulse.light_gain,
+                        flame_scale: pulse.flame_scale,
+                        radius_scale: pulse.radius_scale,
+                        sway: pulse.offset.0,
+                    },
+                    torch_index as f32,
+                    t,
+                );
+
+                for crackle_index in 0..TORCH_CRACKLE_COUNT {
+                    let Some((spark, color, fade)) =
+                        torch_crackle(t, torch_index, crackle_index, (anchor.x, anchor.z))
+                    else {
+                        continue;
+                    };
+                    let Some((spark_x, spark_y)) = project_frac(spark, camera) else {
+                        continue;
+                    };
+                    scene.push(Primitive::new(
+                        PrimitiveKind::particle('*'),
+                        Transform2::new(Point2::new(spark_x, spark_y + HUD_H as f32), 1.0)
+                            .with_scale(Point2::new(0.34 + fade * 0.38, 0.34 + fade * 0.38))
+                            .with_rotation((crackle_index as f32) * 0.7),
+                        ContinuousMaterial::new(color)
+                            .with_opacity(fade)
+                            .with_emission(Emission::new(color, 0.10 * fade, 1.5)),
+                    ));
+                }
+            }
+        }
+
+        /// Weather glyphs for the gated weather migration (issue #9):
+        /// compose `weather::` world-anchored grass/rain/mote records over
+        /// the captured coverage window and project each anchor through
+        /// the same camera the raster pass used. Depth keeps weather under
+        /// torch/actor primitives; rain has no emission (the bloom field
+        /// is reserved for actual light sources).
+        fn push_native_weather(&mut self, scene: &mut ContinuousScene, t: f32, camera: &Camera3) {
+            use ascii_mmorpg_engine::weather::{weather_fx, FxKind, WeatherMode, WeatherParams};
+            let mode = match self.weather {
+                Weather::Clear => WeatherMode::Clear,
+                Weather::Rain => WeatherMode::Rain,
+                Weather::Storm => WeatherMode::Storm,
+            };
+            let params = WeatherParams::new(mode).with_road_half_width(4.4);
+            for fx in weather_fx(&params, self.weather_window, t) {
+                let Some((sx, sy)) = project_frac(fx.anchor, camera) else {
+                    continue;
+                };
+                let (kind, depth) = match fx.kind {
+                    FxKind::GrassBase => (PrimitiveKind::glyph(fx.glyph), -3.0),
+                    FxKind::GrassTip => (PrimitiveKind::glyph(fx.glyph), -2.95),
+                    FxKind::Rain => (PrimitiveKind::streak(fx.scale.y, fx.scale.x * 0.2), -2.5),
+                    FxKind::Mote => (PrimitiveKind::particle(fx.glyph), -2.8),
+                    // Fog canopy: atmosphere above world ink and rain, far
+                    // below labels/UI (which paint last).
+                    FxKind::FogBand => (PrimitiveKind::glyph(fx.glyph), -2.2),
+                };
+                scene.push(Primitive::new(
+                    kind,
+                    Transform2::new(Point2::new(sx, sy + HUD_H as f32), depth)
+                        .with_scale(fx.scale)
+                        .with_rotation(fx.rotation)
+                        .with_skew(fx.skew),
+                    ContinuousMaterial::new(fx.color).with_opacity(fx.opacity),
+                ));
+            }
+        }
+
+        /// Layered glyph characters for the gated actor migration (issue #8):
+        /// compose `character::` layers at each smoothed, projected foot
+        /// anchor captured by `world_meshes` this frame. Palettes mirror the
+        /// mesh dispatch (player / skeleton / mossling / herbalist); the
+        /// player alone carries an aura. Positions are presentation-only —
+        /// the simulation's authoritative entities are untouched.
+        fn push_layered_actors(&mut self, scene: &mut ContinuousScene, t: f32, camera: &Camera3) {
+            use ascii_mmorpg_engine::character::{
+                push_character, CharacterMotion, CharacterPalette, CharacterSpec,
+            };
+            let attack_phase = self.attack_phase(t);
+            let anchors: Vec<NativeActorAnchor> = self.native_actor_anchors.clone();
+            for actor in &anchors {
+                let Some((sx, sy)) = project_frac(Vec3::new(actor.pos.0, 0.0, actor.pos.1), camera)
+                else {
+                    continue;
+                };
+                let anchor = Point2::new(sx, sy + HUD_H as f32);
+                let (palette, scale, aura) = match (&actor.kind, actor.skeleton) {
+                    (EntityKind::Player, _) => (
+                        CharacterPalette {
+                            head: Rgb::new(215, 255, 175),
+                            torso: Rgb::new(130, 225, 95),
+                            limb: Rgb::new(95, 195, 75),
+                            gear: Rgb::new(240, 220, 150),
+                            aura: Rgb::new(255, 225, 130),
+                        },
+                        // User verdict 2026-10-25: the layered player reads
+                        // too small against the world — doubled from 1.25.
+                        2.5,
+                        Some(Rgb::new(255, 225, 130)),
+                    ),
+                    (EntityKind::Monster, true) => (
+                        CharacterPalette {
+                            head: Rgb::new(238, 235, 220),
+                            torso: Rgb::new(225, 220, 200),
+                            limb: Rgb::new(205, 200, 185),
+                            gear: Rgb::new(150, 145, 135),
+                            aura: Rgb::new(0, 0, 0),
+                        },
+                        1.15,
+                        None,
+                    ),
+                    (EntityKind::Monster, false) => (
+                        CharacterPalette {
+                            head: Rgb::new(150, 215, 120),
+                            torso: Rgb::new(95, 175, 80),
+                            limb: Rgb::new(75, 150, 65),
+                            gear: Rgb::new(120, 160, 90),
+                            aura: Rgb::new(0, 0, 0),
+                        },
+                        1.18,
+                        None,
+                    ),
+                    _ => (
+                        CharacterPalette {
+                            head: Rgb::new(200, 245, 235),
+                            torso: Rgb::new(120, 210, 200),
+                            limb: Rgb::new(95, 180, 175),
+                            gear: Rgb::new(230, 200, 140),
+                            aura: Rgb::new(0, 0, 0),
+                        },
+                        1.10,
+                        None,
+                    ),
+                };
+                let motion = CharacterMotion {
+                    gait: if actor.is_player {
+                        self.gait_phase
+                    } else {
+                        0.0
+                    },
+                    action: attack_phase,
+                    idle: actor.phase,
+                    facing: self.facing,
+                    t,
+                };
+                push_character(
+                    scene,
+                    &CharacterSpec {
+                        palette,
+                        scale,
+                        aura,
+                    },
+                    motion,
+                    anchor,
+                );
             }
         }
 
@@ -676,6 +934,12 @@ fn real_main() -> Result<(), String> {
         /// D/East. The motion model snaps the result to the eight protocol
         /// directions before sending an intent to the server.
         fn movement_axes(&self) -> (f32, f32) {
+            // The world map is a modal: gameplay input is frozen while it
+            // is open (server ticks continue, exactly like the TUI pause
+            // contract).
+            if self.map_open {
+                return (0.0, 0.0);
+            }
             let north = self.held.contains(&KeyCode::KeyW) || self.held.contains(&KeyCode::ArrowUp);
             let south =
                 self.held.contains(&KeyCode::KeyS) || self.held.contains(&KeyCode::ArrowDown);
@@ -836,8 +1100,16 @@ fn real_main() -> Result<(), String> {
             if self.combat_fx.len() > 16 {
                 self.combat_fx.drain(..self.combat_fx.len() - 16);
             }
+            // Retention follows the shared phase model (review
+            // 2026-10-25 P1): one definition of when an effect ends.
             self.combat_fx.retain(|fx| {
-                t - fx.born_s < fx.telegraph_s + bridge::FX_BURST_S + bridge::FX_CORE_S
+                ascii_mmorpg_engine::fx_timeline::EffectTimeline::new(
+                    fx.born_s,
+                    fx.telegraph_s,
+                    bridge::FX_BURST_S,
+                    bridge::FX_CORE_S,
+                )
+                .is_live(t)
             });
         }
 
@@ -874,6 +1146,16 @@ fn real_main() -> Result<(), String> {
             const COVERAGE_DZ: i32 = 46;
             const COVERAGE_DX: i32 = 34;
             let weather = weather_profile(self.weather, t);
+            // The gated weather path re-anchors `weather::` primitives to
+            // this same coverage window each frame, so the mesh lattice and
+            // the continuous lattice always agree on "here".
+            self.weather_window = ascii_mmorpg_engine::weather::CoverageWindow {
+                x0: zone_x0 - COVERAGE_DX,
+                x1: zone_x0 + COVERAGE_DX,
+                z0: zone_z0 - COVERAGE_DZ,
+                z1: zone_z0 + COVERAGE_DZ,
+            };
+            let native_weather = self.continuous_canvas && self.continuous_weather;
 
             // The world has no coloured floor, skybox, fog card, or terrain
             // fill. Selective decals and small solids describe the path,
@@ -975,61 +1257,65 @@ fn real_main() -> Result<(), String> {
             // coordinates), so positions stay stable while the player
             // moves and the black surround stays quiet. Unlike the older
             // ground-only decals, each tuft has a grounded blade whose tip
-            // leans with the current weather gust.
-            for gz in (zone_z0 - COVERAGE_DZ..=(zone_z0 + COVERAGE_DZ)).step_by(4) {
-                for gx in (zone_x0 - COVERAGE_DX..=(zone_x0 + COVERAGE_DX)).step_by(4) {
-                    if scene_hash(gx, gz + 91) % 2 != 0 {
-                        continue;
-                    }
-                    let x = gx as f32 + (scene_hash(gx, gz) % 3) as f32 * 0.33;
-                    let z = gz as f32 + (scene_hash(gx, gz + 3) % 3) as f32 * 0.9;
-                    if x.abs() < 4.4 {
-                        continue;
-                    }
-                    let phase = hash01(scene_hash(gx + 17, gz - 23)) * std::f32::consts::TAU
-                        + x * 0.37
-                        + z * 0.19;
-                    let sway = (t * weather.grass_speed + phase).sin();
-                    let cross = (t * weather.grass_speed * 0.71 + phase * 1.7).cos();
-                    let tip_offset = Vec3::new(
-                        sway * weather.grass_amplitude,
-                        0.0,
-                        cross * weather.grass_amplitude * 0.38,
-                    );
-                    let height =
-                        0.26 + (scene_hash(gx, gz + 401) % 5) as f32 * 0.045 + sway.abs() * 0.035;
-                    let yaw = if scene_hash(gx, gz + 211) & 1 == 0 {
-                        0.18
-                    } else {
-                        -0.18
-                    };
-                    meshes.push(Mesh::blade_y(
-                        Vec3::new(x, 0.022, z),
-                        height,
-                        0.055,
-                        tip_offset,
-                        yaw,
-                        WORLD.grass,
-                    ));
-                    meshes.push(Mesh::decal_y(
-                        Vec3::new(x, 0.022, z),
-                        yaw,
-                        0.24,
-                        0.045,
-                        WORLD.grass,
-                    ));
-                    if scene_hash(gx, gz + 313) & 1 == 0 {
-                        meshes.push(Mesh::decal_y(
-                            Vec3::new(x + 0.08, 0.024, z + 0.05),
-                            if scene_hash(gx, gz + 317) & 1 == 0 {
-                                0.72
-                            } else {
-                                -0.72
-                            },
-                            0.18,
-                            0.035,
-                            WORLD.foliage_moon,
+            // leans with the current weather gust. The gated path composes
+            // the same idea as continuous `weather::` primitives instead.
+            if !native_weather {
+                for gz in (zone_z0 - COVERAGE_DZ..=(zone_z0 + COVERAGE_DZ)).step_by(4) {
+                    for gx in (zone_x0 - COVERAGE_DX..=(zone_x0 + COVERAGE_DX)).step_by(4) {
+                        if scene_hash(gx, gz + 91) % 2 != 0 {
+                            continue;
+                        }
+                        let x = gx as f32 + (scene_hash(gx, gz) % 3) as f32 * 0.33;
+                        let z = gz as f32 + (scene_hash(gx, gz + 3) % 3) as f32 * 0.9;
+                        if x.abs() < 4.4 {
+                            continue;
+                        }
+                        let phase = hash01(scene_hash(gx + 17, gz - 23)) * std::f32::consts::TAU
+                            + x * 0.37
+                            + z * 0.19;
+                        let sway = (t * weather.grass_speed + phase).sin();
+                        let cross = (t * weather.grass_speed * 0.71 + phase * 1.7).cos();
+                        let tip_offset = Vec3::new(
+                            sway * weather.grass_amplitude,
+                            0.0,
+                            cross * weather.grass_amplitude * 0.38,
+                        );
+                        let height = 0.26
+                            + (scene_hash(gx, gz + 401) % 5) as f32 * 0.045
+                            + sway.abs() * 0.035;
+                        let yaw = if scene_hash(gx, gz + 211) & 1 == 0 {
+                            0.18
+                        } else {
+                            -0.18
+                        };
+                        meshes.push(Mesh::blade_y(
+                            Vec3::new(x, 0.022, z),
+                            height,
+                            0.055,
+                            tip_offset,
+                            yaw,
+                            WORLD.grass,
                         ));
+                        meshes.push(Mesh::decal_y(
+                            Vec3::new(x, 0.022, z),
+                            yaw,
+                            0.24,
+                            0.045,
+                            WORLD.grass,
+                        ));
+                        if scene_hash(gx, gz + 313) & 1 == 0 {
+                            meshes.push(Mesh::decal_y(
+                                Vec3::new(x + 0.08, 0.024, z + 0.05),
+                                if scene_hash(gx, gz + 317) & 1 == 0 {
+                                    0.72
+                                } else {
+                                    -0.72
+                                },
+                                0.18,
+                                0.035,
+                                WORLD.foliage_moon,
+                            ));
+                        }
                     }
                 }
             }
@@ -1038,8 +1324,9 @@ fn real_main() -> Result<(), String> {
             // seeds keep drops stable as the camera follows, while the
             // fractional fall phase and wind drift move each streak smoothly
             // through depth instead of replacing one terminal slash with
-            // another. Storms increase density, fall speed, and lean.
-            if weather.rain_density > 0 {
+            // another. Storms increase density, fall speed, and lean. The
+            // gated path composes `weather::` streak primitives instead.
+            if weather.rain_density > 0 && !native_weather {
                 for rz in (zone_z0 - COVERAGE_DZ..=(zone_z0 + COVERAGE_DZ)).step_by(4) {
                     for rx in (zone_x0 - COVERAGE_DX..=(zone_x0 + COVERAGE_DX)).step_by(4) {
                         if scene_hash(rx, rz + 701) % 100 >= weather.rain_density {
@@ -1281,6 +1568,10 @@ fn real_main() -> Result<(), String> {
             }
 
             // Actors: humanoid meshes from the foot anchor, yawed to face.
+            // The layered-character gate keeps the anchors and labels but
+            // swaps the mesh silhouettes + shadow decals for native
+            // continuous glyph layers (see `continuous_scene`).
+            let native_actors = self.continuous_canvas && self.continuous_actors;
             let facing = self.facing;
             let attack_phase = self.attack_phase(t);
             let place = |mesh: Mesh, x: f32, z: f32, yaw: f32, scale: f32| {
@@ -1295,20 +1586,31 @@ fn real_main() -> Result<(), String> {
                 )
             };
             let player_scale = 1.15;
-            meshes.push(Mesh::decal_y(
-                Vec3::new(player.0, 0.018, player.1),
-                facing,
-                0.82,
-                0.30,
-                WORLD.shadow,
-            ));
-            meshes.push(place(
-                Mesh::humanoid_pose(HumanoidPose::new(self.gait_phase, attack_phase, t * 1.7)),
-                player.0,
-                player.1,
-                facing,
-                player_scale,
-            ));
+            self.native_actor_anchors.clear();
+            if !native_actors {
+                meshes.push(Mesh::decal_y(
+                    Vec3::new(player.0, 0.018, player.1),
+                    facing,
+                    0.82,
+                    0.30,
+                    WORLD.shadow,
+                ));
+                meshes.push(place(
+                    Mesh::humanoid_pose(HumanoidPose::new(self.gait_phase, attack_phase, t * 1.7)),
+                    player.0,
+                    player.1,
+                    facing,
+                    player_scale,
+                ));
+            } else {
+                self.native_actor_anchors.push(NativeActorAnchor {
+                    pos: player,
+                    kind: EntityKind::Player,
+                    skeleton: false,
+                    is_player: true,
+                    phase: self.gait_phase,
+                });
+            }
             for entity in &snapshot.entities {
                 if entity.kind == EntityKind::Item {
                     continue;
@@ -1319,6 +1621,16 @@ fn real_main() -> Result<(), String> {
                     dt,
                 );
                 let idle_phase = t * 1.35 + entity.id as f32 * 0.37;
+                if native_actors {
+                    self.native_actor_anchors.push(NativeActorAnchor {
+                        pos: (gx, gy),
+                        kind: entity.kind.clone(),
+                        skeleton: entity.name.to_ascii_lowercase().contains("skeleton"),
+                        is_player: false,
+                        phase: idle_phase,
+                    });
+                    continue;
+                }
                 let label = entity.name.to_ascii_lowercase();
                 let actor = match entity.kind {
                     EntityKind::Npc => Mesh::herbalist_pose(idle_phase),
@@ -1425,73 +1737,91 @@ fn real_main() -> Result<(), String> {
             }
 
             // Combat FX: telegraph decal ring → core/ring burst → embers,
-            // the mesh re-expression of the TUI's FX packs.
+            // the mesh re-expression of the TUI's FX packs. All effects
+            // share the `fx_timeline` phase model (review 2026-10-25 P1):
+            // one place decides telegraph/impact/decay boundaries and
+            // retention; the renderer below only draws phases.
             for fx in &self.combat_fx {
-                let age = t - fx.born_s;
+                use ascii_mmorpg_engine::fx_timeline::{EffectPhase, EffectTimeline};
+                let timeline = EffectTimeline::new(
+                    fx.born_s,
+                    fx.telegraph_s,
+                    bridge::FX_BURST_S,
+                    bridge::FX_CORE_S,
+                );
                 let origin = Vec3::new(fx.origin.0, 0.0, fx.origin.1);
                 let radius = fx.radius.max(0.5);
-                if age < fx.telegraph_s {
-                    let p = if fx.telegraph_s > 0.0 {
-                        age / fx.telegraph_s
-                    } else {
-                        1.0
-                    };
-                    let r = radius * (0.35 + 0.65 * (1.0 - p));
-                    for i in 0..12 {
-                        let a = i as f32 * std::f32::consts::TAU / 12.0
-                            + 0.4 * (fx.born_s.fract() * 6.0);
-                        let dash = Vec3::new(origin.x + r * a.sin(), 0.04, origin.z + r * a.cos());
-                        meshes.push(Mesh::decal_y(
-                            dash,
-                            a + std::f32::consts::FRAC_PI_2,
-                            0.22,
-                            0.1,
-                            fx.color,
-                        ));
+                match timeline.phase(t) {
+                    EffectPhase::Telegraph { progress } => {
+                        let p = progress;
+                        let r = radius * (0.35 + 0.65 * (1.0 - p));
+                        for i in 0..12 {
+                            let a = i as f32 * std::f32::consts::TAU / 12.0
+                                + 0.4 * (fx.born_s.fract() * 6.0);
+                            let dash =
+                                Vec3::new(origin.x + r * a.sin(), 0.04, origin.z + r * a.cos());
+                            meshes.push(Mesh::decal_y(
+                                dash,
+                                a + std::f32::consts::FRAC_PI_2,
+                                0.22,
+                                0.1,
+                                fx.color,
+                            ));
+                        }
                     }
-                } else {
-                    let burst_age = (age - fx.telegraph_s).max(0.0);
-                    let p = (burst_age / bridge::FX_BURST_S).clamp(0.0, 1.0);
-                    // White-hot core: mixes toward white and shrinks out.
-                    let hot = mix(fx.color, Rgb::new(255, 255, 245), 0.65);
-                    let core = Mesh::boxed(
-                        Vec3::new(origin.x, 0.5 * (1.0 - p), origin.z),
-                        Vec3::new(
-                            0.7 * (1.0 - p) + 0.2,
-                            1.0 * (1.0 - p) + 0.2,
-                            0.7 * (1.0 - p) + 0.2,
-                        ),
-                        hot,
-                    );
-                    meshes.push(core);
-                    // Expanding ground ring.
-                    let r = radius * (0.25 + 0.75 * p);
-                    for i in 0..10 {
-                        let a = i as f32 * std::f32::consts::TAU / 10.0;
-                        let dash = Vec3::new(origin.x + r * a.sin(), 0.05, origin.z + r * a.cos());
-                        meshes.push(Mesh::decal_y(
-                            dash,
-                            a + std::f32::consts::FRAC_PI_2,
-                            0.3,
-                            0.12,
-                            fx.color,
-                        ));
-                    }
-                    // Six rising embers (TUI parity #2).
-                    for i in 0..6 {
-                        let a = i as f32 * std::f32::consts::TAU / 6.0;
-                        let e_r = 0.3 + p * 1.4;
-                        let ember = Vec3::new(
-                            origin.x + a.sin() * e_r,
-                            0.4 + p * p * 2.2,
-                            origin.z + a.cos() * e_r,
+                    // Impact renders the burst; the clamped tail of Decay
+                    // keeps the eased end-state until retention drops it
+                    // (same visuals the raw age math produced).
+                    EffectPhase::Impact { .. } | EffectPhase::Decay { .. } => {
+                        let p = match timeline.phase(t) {
+                            EffectPhase::Impact { progress } => progress,
+                            EffectPhase::Decay { .. } => 1.0,
+                            _ => 1.0,
+                        };
+                        // White-hot core: mixes toward white and shrinks out.
+                        let hot = mix(fx.color, Rgb::new(255, 255, 245), 0.65);
+                        let core = Mesh::boxed(
+                            Vec3::new(origin.x, 0.5 * (1.0 - p), origin.z),
+                            Vec3::new(
+                                0.7 * (1.0 - p) + 0.2,
+                                1.0 * (1.0 - p) + 0.2,
+                                0.7 * (1.0 - p) + 0.2,
+                            ),
+                            hot,
                         );
-                        meshes.push(Mesh::boxed(
-                            ember,
-                            Vec3::new(0.16, 0.16, 0.16),
-                            mix(fx.color, Rgb::new(255, 190, 80), 0.4),
-                        ));
+                        meshes.push(core);
+                        // Expanding ground ring.
+                        let r = radius * (0.25 + 0.75 * p);
+                        for i in 0..10 {
+                            let a = i as f32 * std::f32::consts::TAU / 10.0;
+                            let dash =
+                                Vec3::new(origin.x + r * a.sin(), 0.05, origin.z + r * a.cos());
+                            meshes.push(Mesh::decal_y(
+                                dash,
+                                a + std::f32::consts::FRAC_PI_2,
+                                0.3,
+                                0.12,
+                                fx.color,
+                            ));
+                        }
+                        // Six rising embers (TUI parity #2) rise on the
+                        // shared ease-in curve.
+                        for i in 0..6 {
+                            let a = i as f32 * std::f32::consts::TAU / 6.0;
+                            let e_r = 0.3 + p * 1.4;
+                            let ember = Vec3::new(
+                                origin.x + a.sin() * e_r,
+                                0.4 + ascii_mmorpg_engine::fx_timeline::ease_in(p) * 2.2,
+                                origin.z + a.cos() * e_r,
+                            );
+                            meshes.push(Mesh::boxed(
+                                ember,
+                                Vec3::new(0.16, 0.16, 0.16),
+                                mix(fx.color, Rgb::new(255, 190, 80), 0.4),
+                            ));
+                        }
                     }
+                    EffectPhase::Done => {}
                 }
             }
 
@@ -1509,11 +1839,33 @@ fn real_main() -> Result<(), String> {
             self.continuous_canvas = mode == PresentMode::Continuous;
         }
 
-        /// Only the spec-gated migration hands world lighting to the float
-        /// bloom field; every other configuration keeps the legacy CPU glow
-        /// pass and localized point lights.
+        /// Either spec-gated migration (torch or layered actors) hands world
+        /// lighting to the float bloom field; every other configuration keeps
+        /// the legacy CPU glow pass and localized point lights.
         fn continuous_bloom_owns_world_lighting(&mut self) -> bool {
-            self.continuous_torch
+            self.continuous_torch || self.continuous_actors
+        }
+
+        /// Quiet local ground around the native figures (review 2026-10-25
+        /// P0): the presenter clears composed world ink near these
+        /// projected foot anchors so silhouettes stand on a locally uniform
+        /// floor. Only the native-actor path claims a stage; the legacy
+        /// mesh path keeps its original look.
+        fn stage_anchors(&mut self, _t: f32) -> Vec<Point2> {
+            if !(self.continuous_canvas && self.continuous_actors) {
+                return Vec::new();
+            }
+            let Some(camera) = self.last_camera else {
+                return Vec::new();
+            };
+            let anchors = self.native_actor_anchors.clone();
+            anchors
+                .iter()
+                .filter_map(|actor| {
+                    project_frac(Vec3::new(actor.pos.0, 0.0, actor.pos.1), &camera)
+                        .map(|(sx, sy)| Point2::new(sx, sy + HUD_H as f32))
+                })
+                .collect()
         }
 
         fn scene_at(&mut self, t: f32) -> (Scene, Camera) {
@@ -1527,68 +1879,74 @@ fn real_main() -> Result<(), String> {
             self.pending_world.take()
         }
 
-        /// Native flame/crackle primitives for the gated in-world torch
-        /// migration. The presenter only asks for this on the continuous
-        /// canvas; returning `None` (the default, gate off) keeps the legacy
-        /// torch path. Coordinates are authored frame-grid cell-corner
-        /// space, projected fractionally so pulse/crackle motion stays
-        /// sub-cell.
+        /// Native primitives for the in-play continuous layer: the world
+        /// map modal (`M`, composed from the shared Veyrath model) takes
+        /// over the whole continuous scene while open; otherwise the
+        /// gated migrations contribute torch flame/crackles, weather
+        /// glyphs, and layered characters (all default-on since issue
+        /// #10; `--legacy*` flags restore the mesh paths). Coordinates
+        /// are authored frame-grid cell-corner space, projected
+        /// fractionally so motion stays sub-cell.
         fn continuous_scene(&mut self, _t: f32) -> Option<ContinuousScene> {
-            if !self.continuous_torch {
+            if self.map_open {
+                let (w, h) = self.last_grid;
+                return Some(ascii_mmorpg_engine::veyrath_world::world_scene(
+                    ascii_mmorpg_engine::veyrath_world::WorldView::new(w, h),
+                    _t,
+                ));
+            }
+            if !self.continuous_torch && !self.continuous_actors && !self.continuous_weather {
                 return None;
             }
             let camera = self.last_camera?;
             let mut scene = ContinuousScene::new();
-            for (torch_index, (tx, tz)) in torch_spots().into_iter().enumerate() {
-                let pulse = torch_pulse(_t, torch_index);
-                let anchor = Vec3::new(tx + pulse.offset.0, 1.92, tz + pulse.offset.1);
-                let Some((sx, sy)) = project_frac(anchor, &camera) else {
-                    continue;
-                };
-                let position = Point2::new(sx, sy + HUD_H as f32);
-                let flame = WORLD.fire.lerp(WORLD.ember, pulse.light_gain * 0.42);
-                scene.push(Primitive::new(
-                    PrimitiveKind::glyph('*'),
-                    Transform2::new(position, 0.0)
-                        .with_scale(Point2::new(
-                            0.72 * pulse.flame_scale,
-                            1.05 * pulse.flame_scale,
-                        ))
-                        .with_skew(Point2::new(pulse.offset.0 * 2.0, 0.0)),
-                    ContinuousMaterial::new(flame)
-                        .with_gradient(ascii_mmorpg_engine::ColorGradient::new(
-                            Rgb::new(255, 242, 150),
-                            flame,
-                            ascii_mmorpg_engine::GradientAxis::Vertical,
-                        ))
-                        .with_opacity((0.78 + pulse.light_gain * 0.18).clamp(0.0, 1.0)),
-                ));
-
-                for crackle_index in 0..TORCH_CRACKLE_COUNT {
-                    let Some((spark, color, fade)) =
-                        torch_crackle(_t, torch_index, crackle_index, (anchor.x, anchor.z))
-                    else {
-                        continue;
-                    };
-                    let Some((spark_x, spark_y)) = project_frac(spark, &camera) else {
-                        continue;
-                    };
-                    scene.push(Primitive::new(
-                        PrimitiveKind::particle('*'),
-                        Transform2::new(Point2::new(spark_x, spark_y + HUD_H as f32), 1.0)
-                            .with_scale(Point2::new(0.34 + fade * 0.38, 0.34 + fade * 0.38))
-                            .with_rotation((crackle_index as f32) * 0.7),
-                        ContinuousMaterial::new(color)
-                            .with_opacity(fade)
-                            .with_emission(Emission::new(color, 0.10 * fade, 1.5)),
-                    ));
-                }
+            if self.continuous_torch {
+                self.push_native_torches(&mut scene, _t, &camera);
+            }
+            if self.continuous_weather {
+                self.push_native_weather(&mut scene, _t, &camera);
+            }
+            if self.continuous_actors {
+                self.push_layered_actors(&mut scene, _t, &camera);
             }
             Some(scene)
         }
 
         fn scene_at_size(&mut self, t: f32, width: u32, height: u32) -> (Scene, Camera) {
             let (w, h) = (width as i32, height as i32);
+            // World-map modal: the frame swaps to a caption sheet (the map
+            // itself is native continuous primitives sized to the live
+            // grid); no world meshes are built while it is open.
+            if self.map_open {
+                // The server keeps ticking while the modal is open (same
+                // contract as the TUI pause); only presentation swaps.
+                self.advance(t);
+                self.last_grid = (width, height);
+                let dim = Rgb::new(150, 140, 118);
+                let faint = Rgb::new(90, 84, 70);
+                let void = Rgb::new(0, 0, 0);
+                let mut scene = Scene::default();
+                let mut ui = Layer::new("map-ui", 0);
+                let title = ascii_mmorpg_engine::veyrath::visual_data()
+                    .title
+                    .to_ascii_uppercase();
+                ui.push_text(2, 0, &format!("{title} — WORLD MAP"), dim, void);
+                ui.push_text(
+                    2,
+                    1,
+                    "regions · rivers · roads · faction settlements · landmarks — starter: MILLHAVEN",
+                    faint,
+                    void,
+                );
+                // Esc is the presenter's global quit (it never reaches the
+                // source), so the caption must only advertise M.
+                ui.push_text(2, h - 1, "M CLOSES", faint, void);
+                scene.layers.push(ui);
+                scene
+                    .partitions
+                    .push(Partition::new("map-ui", 0, 0, w, h, vec![0], false));
+                return (scene, Camera::default());
+            }
             let world_h = (h - HUD_H - LOG_H).max(4);
             let (dt, snapshot) = self.advance(t);
             // Resolve the player's presentation anchor before building the
@@ -1641,7 +1999,7 @@ fn real_main() -> Result<(), String> {
                 2,
                 3,
                 (w - 4).max(0),
-                "WASD / Left-click Move   F Attack   1-3 Cast   I Inventory   R Rest   F11 Fullscreen   Q Quit",
+                "WASD / Left-click Move   F Attack   1-3 Cast   I Inventory   M Map   R Rest   F11 Fullscreen   Q Quit",
                 HUD_DIM,
                 PANEL_BG,
             );
@@ -1667,24 +2025,35 @@ fn real_main() -> Result<(), String> {
             // cell never occludes terrain; `compose::apply_glow` washes the
             // torch colour over existing world glyphs for the soft reference
             // halo instead of painting a flat screen-space circle.
-            let mut torch_glow = Layer::new("torch-glow", -1);
-            for (i, (tx, tz)) in torch_spots().into_iter().enumerate() {
-                let pulse = torch_pulse(t, i);
-                if let Some((sx, sy)) = project(
-                    Vec3::new(tx + pulse.offset.0, 1.92, tz + pulse.offset.1),
-                    &camera,
-                ) {
-                    let glow_color = WORLD.fire.lerp(WORLD.ember, 0.30);
-                    torch_glow.push(AnimCell::still(
-                        sx,
-                        sy,
-                        Cell::new(' ', glow_color, Rgb::new(0, 0, 0))
-                            .with_glow(0.82 * pulse.light_gain),
-                    ));
-                }
-            }
+            // Per-system lighting (review 2026-10-25): when the torch system
+            // runs LEGACY (mesh flame + point lights) while bloom ownership
+            // is claimed by another migration, this glow layer is skipped —
+            // otherwise the torch would double-light (raster point light +
+            // bloom from these cells). When the torch migration is native,
+            // the cells bridge into the bloom field as before.
+            let torch_native = self.continuous_canvas && self.continuous_torch;
+            let bloom_owned =
+                self.continuous_canvas && (self.continuous_torch || self.continuous_actors);
             let torch_glow_idx = scene.layers.len();
-            scene.layers.push(torch_glow);
+            if !(bloom_owned && !torch_native) {
+                let mut torch_glow = Layer::new("torch-glow", -1);
+                for (i, (tx, tz)) in torch_spots().into_iter().enumerate() {
+                    let pulse = torch_pulse(t, i);
+                    if let Some((sx, sy)) = project(
+                        Vec3::new(tx + pulse.offset.0, 1.92, tz + pulse.offset.1),
+                        &camera,
+                    ) {
+                        let glow_color = WORLD.fire.lerp(WORLD.ember, 0.30);
+                        torch_glow.push(AnimCell::still(
+                            sx,
+                            sy,
+                            Cell::new(' ', glow_color, Rgb::new(0, 0, 0))
+                                .with_glow(0.82 * pulse.light_gain),
+                        ));
+                    }
+                }
+                scene.layers.push(torch_glow);
+            }
 
             // ---- World partition: one raster pass + screen labels ----
             //
@@ -1738,12 +2107,14 @@ fn real_main() -> Result<(), String> {
             // while selective ground glyphs keep their dark meadow tone.
             let sun = Vec3::new(0.55, 0.85, 0.3);
             let terrain_idx = scene.layers.len();
-            // Lighting ownership: continuous bloom takes torch spill only
-            // when the gated migration is enabled; otherwise the continuous
-            // canvas keeps the legacy point lights (plus the compose glow
-            // pass) exactly like the grid fallback, avoiding double
-            // lighting in both configurations.
-            let active_lights = if self.continuous_canvas && self.continuous_torch {
+            // Lighting ownership is per-system (review 2026-10-25): legacy
+            // torch point lights stay active whenever the TORCH system runs
+            // its mesh path — even if actors/weather run native and claim
+            // bloom ownership — so `--legacy-torch` (or full `--legacy`)
+            // remains visually equivalent. Only the torch migration itself
+            // drops the raster lights (its light comes from native flame
+            // emission + the glow bridge).
+            let active_lights = if torch_native {
                 Vec::new()
             } else {
                 lights.clone()
@@ -1876,8 +2247,21 @@ fn real_main() -> Result<(), String> {
                 HUD_H,
                 w,
                 world_h,
-                vec![torch_glow_idx, terrain_idx, labels_idx],
+                vec![torch_glow_idx, terrain_idx],
                 true,
+            ));
+            // Labels are UI ink (review 2026-10-25 P1): their own
+            // non-camera partition classifies them as UI cells, so the
+            // presenter paints them AFTER native actors/weather —
+            // nameplates and HP bars can never be occluded by figures.
+            scene.partitions.push(Partition::new(
+                "labels",
+                0,
+                HUD_H,
+                w,
+                world_h,
+                vec![labels_idx],
+                false,
             ));
             scene.partitions.push(Partition::new(
                 "log",
@@ -1956,10 +2340,35 @@ fn real_main() -> Result<(), String> {
             // world partition uses the camera flag only to mark its cells as
             // foreground-only world ink. HUD/log/modal partitions stay pinned
             // and retain their intentional interface styling.
+            // Storm lightning (review 2026-10-25 P1): a deterministic
+            // bolt schedule briefly lifts the whole frame with a cool
+            // wash — atmosphere, not a strobe; labels keep their backing.
+            if matches!(self.weather, Weather::Storm) {
+                let flash = ascii_mmorpg_engine::weather::lightning_flash(t, 0x5702);
+                if flash > 0.01 {
+                    scene.wash = Some(Wash {
+                        tint: Rgb::new(190, 200, 235),
+                        strength: 0.35 * flash,
+                    });
+                }
+            }
             (scene, Camera::default())
         }
 
         fn key(&mut self, code: KeyCode, pressed: bool) {
+            // World-map modal: `M` toggles; every other press is frozen
+            // (releases still clear held keys so nothing latches when the
+            // map closes).
+            if self.map_open {
+                if pressed {
+                    if code == KeyCode::KeyM {
+                        self.map_open = false;
+                    }
+                    return;
+                }
+                self.held.remove(&code);
+                return;
+            }
             if pressed {
                 match code {
                     KeyCode::Digit1 | KeyCode::Numpad1 => self.pending.push(Command::Cast {
@@ -1975,6 +2384,7 @@ fn real_main() -> Result<(), String> {
                         target: 2,
                     }),
                     KeyCode::KeyI => self.inv_open = !self.inv_open,
+                    KeyCode::KeyM => self.map_open = true,
                     _ => {}
                 }
             }
@@ -2067,11 +2477,34 @@ fn real_main() -> Result<(), String> {
         if !labels.cells.iter().any(|c| c.cell.glyph.is_ascii_digit()) {
             return Err("check: damage digits missing from the label overlay".into());
         }
-        if scene.partitions.len() != 3 {
+        if scene.partitions.len() != 4 {
             return Err(format!(
-                "check: expected 3 partitions with modal closed, got {}",
+                "check: expected 4 partitions with modal closed (hud/world/labels/log), got {}",
                 scene.partitions.len()
             ));
+        }
+        // Labels are UI ink now (own non-camera partition): they must NOT
+        // be part of the camera-marked world partition, so the presenter
+        // paints them after native actors/weather (review 2026-10-25 P1).
+        let labels_idx = scene
+            .layers
+            .iter()
+            .position(|layer| layer.name == "labels")
+            .ok_or("check: labels layer index missing")?;
+        if let Some(world) = scene.partitions.iter().find(|p| p.name == "world") {
+            if !world.camera || world.layers.contains(&labels_idx) {
+                return Err("check: labels must live in their own non-camera partition".into());
+            }
+        } else {
+            return Err("check: world partition missing".into());
+        }
+        let labels_partition = scene
+            .partitions
+            .iter()
+            .find(|p| p.layers.contains(&labels_idx))
+            .ok_or("check: labels partition missing")?;
+        if labels_partition.camera {
+            return Err("check: labels partition must not be camera-marked".into());
         }
         let hud = scene
             .layer("hud")
@@ -2120,12 +2553,16 @@ fn real_main() -> Result<(), String> {
             return Err("check: composed torch glow warmed no world ink".into());
         }
 
-        // Continuous-canvas world-lighting contract (spec-gated torch
-        // migration): the default continuous canvas keeps the legacy
-        // point-light path, and only `--continuous-torch` swaps torch-spill
-        // ownership to the float bloom field with native primitives.
+        // Continuous-canvas world-lighting contract: since the play-path
+        // integration (issue #10) the continuous migrations are DEFAULT
+        // ON. The fully-legacy fallback is selected explicitly here
+        // (`--legacy` at the CLI): it keeps the mesh grass/rain/actors
+        // plus legacy point lights, and produces no native primitives.
         let mut legacy_canvas = LocalGame::with_gpu3d(true);
         legacy_canvas.continuous_canvas = true;
+        legacy_canvas.continuous_torch = false;
+        legacy_canvas.continuous_actors = false;
+        legacy_canvas.continuous_weather = false;
         legacy_canvas.scene_at(0.06);
         let (legacy_mesh_count, legacy_has_lights) = legacy_canvas
             .pending_world
@@ -2142,6 +2579,8 @@ fn real_main() -> Result<(), String> {
         let mut gated = LocalGame::with_gpu3d(true);
         gated.continuous_canvas = true;
         gated.continuous_torch = true;
+        gated.continuous_actors = false;
+        gated.continuous_weather = false;
         gated.scene_at(0.06);
         let gated_world = gated
             .pending_world
@@ -2171,7 +2610,7 @@ fn real_main() -> Result<(), String> {
                 primitives.len()
             ));
         }
-        // Fractional sub-cell mapping: the flame primitive must be the exact
+        // Fractional sub-cell mapping: the flame rows must sit on the
         // fractional projection of the pulsed anchor (render and emission
         // share the same cell-corner coordinates).
         let (tx0, tz0) = torch_spots()[0];
@@ -2179,29 +2618,171 @@ fn real_main() -> Result<(), String> {
         let anchor0 = Vec3::new(tx0 + pulse0.offset.0, 1.92, tz0 + pulse0.offset.1);
         let (flame_x, flame_y) =
             project_frac(anchor0, &gated_camera).ok_or("check: torch anchor projects offscreen")?;
-        let flame = primitives
-            .iter()
-            .find(|primitive| primitive.transform.scale.y > 0.8)
-            .ok_or("check: gated continuous flame primitive missing")?;
-        if (flame.transform.position.x - flame_x).abs() > 1e-4
-            || (flame.transform.position.y - (flame_y + HUD_H as f32)).abs() > 1e-4
-        {
-            return Err(
-                "check: flame primitive is not a fractional projection of its pulsed anchor".into(),
-            );
+        let flame_anchor = Point2::new(flame_x, flame_y + HUD_H as f32);
+        // Flame rows: ASCII glyphs within the row stack above the anchor.
+        let is_flame_row = |p: &&Primitive| -> bool {
+            let glyph = match p.kind {
+                PrimitiveKind::Glyph { glyph } => glyph,
+                _ => return false,
+            };
+            let d = (p.transform.position.x - flame_anchor.x)
+                .hypot(p.transform.position.y - flame_anchor.y);
+            glyph.is_ascii_punctuation() && d <= 3.4
+        };
+        let flame_rows: Vec<_> = primitives.iter().filter(is_flame_row).collect();
+        if flame_rows.is_empty() {
+            return Err("check: gated continuous flame rows missing".into());
         }
+        // ASCII contract (user verdict 2026-10-25: the flame must be plain
+        // punctuation, not unicode shapes).
+        if flame_rows
+            .iter()
+            .any(|p| !matches!(p.kind, PrimitiveKind::Glyph { glyph } if glyph.is_ascii()))
+        {
+            return Err("check: flame body contains non-ASCII glyphs".into());
+        }
+        // Row ramp contract: rows must span several cell heights above the
+        // anchor (a real stack, not one row) with colours that differ from
+        // base to top (the smooth ramp) and CHANGE over time (dynamic).
+        let topmost = flame_rows
+            .iter()
+            .map(|p| flame_anchor.y - p.transform.position.y)
+            .fold(0.0_f32, f32::max);
+        if topmost < 2.0 {
+            return Err(format!(
+                "check: flame stack is only {topmost:.2} rows tall (need a real taper)"
+            ));
+        }
+        let ramp_spread = {
+            let colors: Vec<_> = flame_rows.iter().map(|p| p.material.foreground).collect();
+            colors
+                .iter()
+                .flat_map(|a| {
+                    colors.iter().map(move |b| {
+                        (i16::from(a.r) - i16::from(b.r)).abs().max(
+                            (i16::from(a.g) - i16::from(b.g))
+                                .abs()
+                                .max((i16::from(a.b) - i16::from(b.b)).abs()),
+                        )
+                    })
+                })
+                .fold(0_i16, i16::max)
+        };
+        if ramp_spread < 80 {
+            return Err(format!(
+                "check: flame rows show no vivid colour ramp (spread {ramp_spread})"
+            ));
+        }
+        // Brightness + body contract (user verdicts 2026-10-25): the lower
+        // rows must be emissive at showcase calibration combined strength —
+        // not a single weak dot leaning on crackle/frame-glow sources.
+        let emissive_layers: Vec<_> = flame_rows
+            .iter()
+            .filter(|p| p.material.emission.is_some())
+            .collect();
+        if emissive_layers.len() < 3 {
+            return Err(format!(
+                "check: flame body has only {} emissive rows (need the hot base rows)",
+                emissive_layers.len()
+            ));
+        }
+        let total_strength: f32 = emissive_layers
+            .iter()
+            .filter_map(|p| p.material.emission.map(|e| e.strength))
+            .sum();
+        let max_radius = emissive_layers
+            .iter()
+            .filter_map(|p| p.material.emission.map(|e| e.radius))
+            .fold(0.0_f32, f32::max);
+        if total_strength < 0.9 || max_radius < 4.5 {
+            return Err(format!(
+                "check: flame emission below showcase calibration (strength total {total_strength:.2}, max radius {max_radius:.2})"
+            ));
+        }
+        // Integrated acceptance (review 2026-10-25): the flame must not
+        // wash the whole scene orange. The one-torch-light layout sums to
+        // ~1.8 (single coherent source + four local glows); the bound sits
+        // above that so only gross regressions (e.g. per-glyph lamps
+        // returning) fail.
+        if total_strength > 3.0 {
+            return Err(format!(
+                "check: flame emission floods the scene (strength total {total_strength:.2} > 3.0)"
+            ));
+        }
+        // Light-field profile contract (review 2026-10-25): the checks
+        // above prove emission EXISTS; this one proves the field is SHAPED
+        // like a torch — hot coherent core, warm mid pool, subdued outer,
+        // near-black far field, warm hue order — using the CPU reference
+        // field (test-pinned parity with the GPU blur pass; the GPU's two
+        // blur passes spread energy but preserve this profile's shape).
+        {
+            use ascii_mmorpg_engine::flame::{push_ascii_flame, FlamePulse};
+            use ascii_mmorpg_engine::BloomField;
+            let mut flame_scene = ContinuousScene::new();
+            push_ascii_flame(
+                &mut flame_scene,
+                Point2::new(30.0, 30.0),
+                FlamePulse {
+                    light_gain: 0.9,
+                    flame_scale: 1.0,
+                    radius_scale: 1.0,
+                    sway: 0.0,
+                },
+                0.0,
+                0.06,
+            );
+            let field = BloomField::from_sources(
+                64,
+                64,
+                EmissionSource::from_continuous_scene(&flame_scene, 0.06),
+            );
+            let core = field.sample(30, 30);
+            let pool = field.sample(32, 30);
+            let outer = field.sample(34, 30);
+            let far = field.sample(39, 30);
+            if core.r < 0.5 {
+                return Err(format!("check: torch core too dim ({core:?})"));
+            }
+            if !(core.r > pool.r && pool.r > outer.r) {
+                return Err(format!(
+                    "check: torch field not monotonic (core {:.3} > pool {:.3} > outer {:.3})",
+                    core.r, pool.r, outer.r
+                ));
+            }
+            if core.r < pool.r * 1.2 {
+                return Err("check: torch core must dominate its pool".into());
+            }
+            if outer.r > pool.r * 0.6 {
+                return Err(format!(
+                    "check: outer pool too hot (outer {:.3} vs pool {:.3})",
+                    outer.r, pool.r
+                ));
+            }
+            if far.r > 0.02 {
+                return Err(format!("check: far field not near-black ({far:?})"));
+            }
+            let warm = |v: ascii_mmorpg_engine::FloatRgb| v.r >= v.g && v.g >= v.b;
+            if !warm(core) || !warm(pool) {
+                return Err("check: torch pool lost its warm hue order".into());
+            }
+        }
+
+        // Dynamic ramp: the row colours must shift between samples (the
+        // wobble breathes the hot zone; positions sway sub-cell too).
         let native_second = gated
             .continuous_scene(0.66)
             .ok_or("check: second gated continuous scene missing")?;
-        let flame_second = native_second
+        let flame_second: Vec<_> = native_second
             .primitives()
             .iter()
-            .find(|primitive| primitive.transform.scale.y > 0.8)
-            .ok_or("check: second gated flame primitive missing")?;
-        if (flame.transform.position.x - flame_second.transform.position.x).abs() < 1e-6
-            && (flame.transform.position.y - flame_second.transform.position.y).abs() < 1e-6
-        {
-            return Err("check: gated flame anchor does not move sub-cell between samples".into());
+            .filter(is_flame_row)
+            .collect();
+        let colors_move = flame_rows.iter().zip(flame_second.iter()).any(|(a, b)| {
+            a.material.foreground != b.material.foreground
+                || (a.transform.position.x - b.transform.position.x).abs() > 1e-4
+        });
+        if !colors_move {
+            return Err("check: flame ramp/positions do not animate between samples".into());
         }
         // Emission coupling: crackle primitives feed the float emission seam
         // at a deterministic time (opacity-scaled strength preserved).
@@ -2217,6 +2798,337 @@ fn real_main() -> Result<(), String> {
             });
         if !emission_fed {
             return Err("check: gated crackle primitives produced no emission sources".into());
+        }
+
+        // Layered-character migration contract (issue #8,
+        // `--continuous-actors`): the gate drops mesh silhouettes, composes
+        // native glyph character layers (torso/weapon/shadow/motes + player
+        // aura), hands lighting ownership to bloom, keeps the nameplate
+        // label layer composed, and never touches the authoritative
+        // simulation.
+        let mut actor_gate = LocalGame::with_gpu3d(true);
+        actor_gate.continuous_canvas = true;
+        actor_gate.continuous_actors = true;
+        actor_gate.continuous_torch = false;
+        actor_gate.continuous_weather = false;
+        let actor_scene = actor_gate.scene_at(0.06).0;
+        let (actor_lights_kept, actor_mesh_count) = actor_gate
+            .pending_world
+            .as_ref()
+            .map(|world| (!world.lights.is_empty(), world.meshes.len()))
+            .ok_or("check: layered-actor world missing")?;
+        // Per-system lighting (review 2026-10-25): this configuration runs
+        // the torch system legacy beside native actors, so the torch point
+        // lights legitimately survive (bloom ownership is still claimed
+        // for the actors — asserted in the hybrid block below).
+        if !actor_lights_kept {
+            return Err("check: hybrid config lost the legacy torch point lights".into());
+        }
+        if actor_mesh_count >= legacy_mesh_count {
+            return Err(format!(
+                "check: layered-actor gate retained mesh silhouettes (legacy={}, gated={})",
+                legacy_mesh_count, actor_mesh_count
+            ));
+        }
+        if !actor_gate.continuous_bloom_owns_world_lighting() {
+            return Err("check: layered-actor gate must claim bloom ownership".into());
+        }
+        let actor_native = actor_gate
+            .continuous_scene(0.06)
+            .ok_or("check: layered-actor continuous scene missing")?;
+        let actor_primitives = actor_native.primitives();
+        if actor_primitives.is_empty() || actor_primitives.len() >= MAX_NATIVE_PRIMITIVES {
+            return Err(format!(
+                "check: layered-actor primitive count out of range ({})",
+                actor_primitives.len()
+            ));
+        }
+        let has_glyph = |want: char| {
+            actor_primitives.iter().any(|p| match p.kind {
+                PrimitiveKind::Glyph { glyph } | PrimitiveKind::Particle { glyph } => glyph == want,
+                _ => false,
+            })
+        };
+        for (want, what) in [
+            ('┼', "torso"),
+            ('|', "weapon"),
+            ('▀', "shadow"),
+            ('·', "motes"),
+        ] {
+            if !has_glyph(want) {
+                return Err(format!("check: layered-actor {what} layer missing"));
+            }
+        }
+        if !actor_primitives.iter().any(|p| {
+            p.material
+                .gradient
+                .is_some_and(|g| g.axis == ascii_mmorpg_engine::GradientAxis::Radial)
+        }) {
+            return Err("check: layered-actor player aura missing".into());
+        }
+        // Nameplates remain composed in both paths (readability contract).
+        let labels_composed = actor_scene
+            .layers
+            .iter()
+            .any(|layer| layer.name == "labels");
+        if !labels_composed {
+            return Err("check: layered-actor path lost the nameplate label layer".into());
+        }
+        // Authority untouched: the same tick sequence drives both paths to
+        // identical player positions.
+        actor_gate.scene_at(0.12);
+        legacy_canvas.scene_at(0.12);
+        let gated_player = actor_gate.sim.snapshot_for(PLAYER_ID).player.position;
+        let legacy_player = legacy_canvas.sim.snapshot_for(PLAYER_ID).player.position;
+        if gated_player != legacy_player {
+            return Err(format!(
+                "check: layered-actor gate mutated authoritative positions ({gated_player:?} vs {legacy_player:?})"
+            ));
+        }
+
+        // Fullscreen-native density contract: the presenter now defaults to
+        // a surface-derived grid (one atlas texel per pixel), so fullscreen
+        // runs at ~320x108 instead of the capped 160x56. The camera scales
+        // its focal with the grid and the coverage lattices slide with the
+        // focus, so world ink per cell must hold — this guards the old
+        // fullscreen sparse-band regression headlessly (CPU raster, one
+        // frame per size).
+        let world_ink = |w: u32, h: u32| -> Result<usize, String> {
+            let mut game = LocalGame::with_gpu3d(false);
+            let (scene, camera) = game.scene_at_size(0.06, w, h);
+            let frame = compose(&scene, &camera, 0.06);
+            let rows = (HUD_H as u32..(h - LOG_H as u32)).map(|y| {
+                (0..w)
+                    .filter(|&x| {
+                        frame
+                            .get(x as i32, y as i32)
+                            .is_some_and(|cell| cell.glyph != ' ')
+                    })
+                    .count()
+            });
+            Ok(rows.sum())
+        };
+        let authored_ink = world_ink(GRID_W, GRID_H)?;
+        let fullscreen_ink = world_ink(320, 108)?;
+        if authored_ink == 0 {
+            return Err("check: authored world composed no ink".into());
+        }
+        let ratio = fullscreen_ink as f64 / authored_ink as f64;
+        if ratio < 1.6 {
+            return Err(format!(
+                "check: fullscreen 320x108 ink ratio {ratio:.2} below 1.6 — sparse-band regression (authored={authored_ink}, fullscreen={fullscreen_ink})"
+            ));
+        }
+
+        // Weather migration contract (issue #9, `--continuous-weather`):
+        // the gate drops mesh grass/rain, composes world-anchored weather
+        // primitives (grounded grass bases + waving tips, seeded streaks in
+        // Rain mode, motes only in Clear mode), and never touches the
+        // authoritative simulation.
+        let mut weather_gate = LocalGame::with_gpu3d(true);
+        weather_gate.continuous_canvas = true;
+        weather_gate.continuous_weather = true;
+        weather_gate.continuous_torch = false;
+        weather_gate.continuous_actors = false;
+        weather_gate.scene_at(0.06);
+        let weather_world = weather_gate
+            .pending_world
+            .as_ref()
+            .ok_or("check: weather-gate world missing")?;
+        if weather_world.meshes.len() >= legacy_mesh_count {
+            return Err(format!(
+                "check: weather gate retained mesh grass/rain (legacy={}, gated={})",
+                legacy_mesh_count,
+                weather_world.meshes.len()
+            ));
+        }
+        let weather_native = weather_gate
+            .continuous_scene(0.06)
+            .ok_or("check: weather-gate continuous scene missing")?;
+        let weather_primitives = weather_native.primitives();
+        let has_glyph = |want: char| {
+            weather_primitives.iter().any(|p| match p.kind {
+                PrimitiveKind::Glyph { glyph } | PrimitiveKind::Particle { glyph } => glyph == want,
+                _ => false,
+            })
+        };
+        // Default check weather is Rain: grounded bases, waving tips, and
+        // streaks present; no clear-air motes.
+        if !has_glyph('"') || !has_glyph('\'') {
+            return Err("check: weather gate lost the grass tuft layers".into());
+        }
+        if !weather_primitives
+            .iter()
+            .any(|p| matches!(p.kind, PrimitiveKind::Streak { .. }))
+        {
+            return Err("check: weather gate produced no rain streaks in Rain mode".into());
+        }
+        if has_glyph('\u{b7}') {
+            return Err("check: Rain mode must not field clear-air motes".into());
+        }
+        // Tips wave: the same seed's tip skew changes between samples.
+        let late_weather = weather_gate
+            .continuous_scene(1.1)
+            .ok_or("check: weather-gate second sample missing")?;
+        let tip_skew = |scene: &ContinuousScene| {
+            scene
+                .primitives()
+                .iter()
+                .filter_map(|p| match p.kind {
+                    PrimitiveKind::Glyph { glyph: '\'' } => Some(p.transform.skew.x),
+                    _ => None,
+                })
+                .collect::<Vec<f32>>()
+        };
+        let early_skew = tip_skew(&weather_native);
+        let late_skew = tip_skew(&late_weather);
+        if early_skew == late_skew {
+            return Err("check: grass tips do not wave between samples".into());
+        }
+        // Clear mode swaps rain for motes without touching the simulation.
+        let mut clear_gate = LocalGame::with_gpu3d_and_weather(true, Weather::Clear);
+        clear_gate.continuous_canvas = true;
+        clear_gate.continuous_weather = true;
+        clear_gate.continuous_torch = false;
+        clear_gate.continuous_actors = false;
+        clear_gate.scene_at(0.06);
+        let clear_native = clear_gate
+            .continuous_scene(0.06)
+            .ok_or("check: clear-weather continuous scene missing")?;
+        let clear_primitives = clear_native.primitives();
+        if !clear_primitives
+            .iter()
+            .any(|p| matches!(p.kind, PrimitiveKind::Particle { glyph: '\u{b7}' }))
+        {
+            return Err("check: Clear mode produced no dust motes".into());
+        }
+        if clear_primitives
+            .iter()
+            .any(|p| matches!(p.kind, PrimitiveKind::Streak { .. }))
+        {
+            return Err("check: Clear mode must not field rain streaks".into());
+        }
+        let weather_player = weather_gate.sim.snapshot_for(PLAYER_ID).player.position;
+        if weather_player != legacy_player {
+            return Err(format!(
+                "check: weather gate mutated authoritative positions ({weather_player:?} vs {legacy_player:?})"
+            ));
+        }
+
+        // Play-path integration default (issue #10): a fresh game on the
+        // continuous canvas runs ALL migrations at once — bloom owns
+        // world lighting, the mesh list sheds every migrated family, and
+        // the native scene carries torch, character, and weather glyphs.
+        let mut default_mode = LocalGame::with_gpu3d(true);
+        default_mode.continuous_canvas = true;
+        default_mode.scene_at(0.06);
+        let (default_lights_empty, default_mesh_count) = default_mode
+            .pending_world
+            .as_ref()
+            .map(|world| (world.lights.is_empty(), world.meshes.len()))
+            .ok_or("check: default-mode world missing")?;
+        if !default_lights_empty {
+            return Err("check: default mode must hand world lighting to bloom".into());
+        }
+        if !default_mode.continuous_bloom_owns_world_lighting() {
+            return Err("check: default mode must claim bloom ownership".into());
+        }
+        if default_mesh_count >= legacy_mesh_count {
+            return Err(format!(
+                "check: default mode retained legacy mesh families (legacy={}, default={})",
+                legacy_mesh_count, default_mesh_count
+            ));
+        }
+        let default_native = default_mode
+            .continuous_scene(0.06)
+            .ok_or("check: default-mode continuous scene missing")?;
+        let default_primitives = default_native.primitives();
+        let has_glyph = |want: char| {
+            default_primitives.iter().any(|p| match p.kind {
+                PrimitiveKind::Glyph { glyph } | PrimitiveKind::Particle { glyph } => glyph == want,
+                _ => false,
+            })
+        };
+        if !has_glyph('*') || !has_glyph('\u{253c}') || !has_glyph('"') {
+            return Err(
+                "check: default mode must field torch flame, character torso, and grass glyphs"
+                    .into(),
+            );
+        }
+        if !default_primitives
+            .iter()
+            .any(|p| matches!(p.kind, PrimitiveKind::Streak { .. }))
+        {
+            return Err("check: default mode must field rain streaks (default weather)".into());
+        }
+
+        // Per-system fallback lighting (review 2026-10-25): with the torch
+        // system legacy while actors run native, the torch point lights
+        // must survive (the fallback stays visually equivalent) while the
+        // actors keep bloom ownership — and no configuration double-lights.
+        let mut hybrid = LocalGame::with_gpu3d(true);
+        hybrid.continuous_canvas = true;
+        hybrid.continuous_torch = false;
+        hybrid.continuous_actors = true;
+        hybrid.continuous_weather = false;
+        hybrid.scene_at(0.06);
+        let hybrid_lights_kept = hybrid
+            .pending_world
+            .as_ref()
+            .is_some_and(|world| !world.lights.is_empty());
+        if !hybrid_lights_kept {
+            return Err("check: legacy torch must keep its point lights in a hybrid config".into());
+        }
+        if !hybrid.continuous_bloom_owns_world_lighting() {
+            return Err("check: native actors must still claim bloom ownership".into());
+        }
+
+        // World-map modal (issues #7/#10): `M` swaps the frame to captions,
+        // the continuous scene becomes the Veyrath world (faction
+        // settlements + starter ring), world meshes stop building, and
+        // gameplay input freezes while the server keeps ticking.
+        let mut map_game = LocalGame::with_gpu3d(true);
+        map_game.continuous_canvas = true;
+        map_game.map_open = true;
+        let map_frame = map_game.scene_at(0.06).0;
+        if map_frame
+            .layers
+            .iter()
+            .any(|layer| layer.name == "labels" || layer.name == "mesh3d")
+        {
+            return Err("check: map frame must not compose world layers".into());
+        }
+        if map_game.pending_world.is_some() {
+            return Err("check: map frame must not build world meshes".into());
+        }
+        let map_native = map_game
+            .continuous_scene(0.06)
+            .ok_or("check: map continuous scene missing")?;
+        let map_primitives = map_native.primitives();
+        if !map_primitives.iter().any(|p| match p.kind {
+            PrimitiveKind::Glyph { glyph } => glyph == '@',
+            _ => false,
+        }) {
+            return Err("check: map must show faction settlements (capital mark)".into());
+        }
+        if !map_primitives.iter().any(|p| p.transform.depth == -0.5) {
+            return Err("check: map must show the Millhaven starter ring".into());
+        }
+        map_game.held.insert(KeyCode::KeyW);
+        if map_game.movement_axes() != (0.0, 0.0) {
+            return Err("check: movement must freeze while the map is open".into());
+        }
+        let pending_before = map_game.pending.len();
+        map_game.key(KeyCode::KeyF, true);
+        if map_game.pending.len() != pending_before {
+            return Err("check: attack must freeze while the map is open".into());
+        }
+        map_game.key(KeyCode::KeyM, true);
+        if map_game.map_open {
+            return Err("check: M must close the map".into());
+        }
+        if map_game.movement_axes() == (0.0, 0.0) {
+            return Err("check: movement must resume after closing the map".into());
         }
 
         // Fixed-control path: D always sends the world-east intent regardless
@@ -2325,10 +3237,12 @@ fn real_main() -> Result<(), String> {
             return Err(format!("check: held D did not move the player (x={x})"));
         }
 
-        // Inventory modal toggles a fourth partition on and back off.
+        // Inventory modal toggles a fifth partition on and back off (the
+        // labels partition split from world made four the closed-modal
+        // baseline).
         game.key(KeyCode::KeyI, true);
         let (scene, _) = game.scene_at(2.05);
-        if scene.partitions.len() != 4 {
+        if scene.partitions.len() != 5 {
             return Err(format!(
                 "check: inventory modal missing ({} partitions)",
                 scene.partitions.len()
@@ -2344,7 +3258,7 @@ fn real_main() -> Result<(), String> {
         // Press again closes (toggle on key-down, like the terminal client).
         game.key(KeyCode::KeyI, true);
         let (scene, _) = game.scene_at(2.1);
-        if scene.partitions.len() != 3 {
+        if scene.partitions.len() != 4 {
             return Err("check: inventory modal did not close".into());
         }
         Ok(())
@@ -2354,7 +3268,7 @@ fn real_main() -> Result<(), String> {
     if args.iter().any(|arg| arg == "--check") {
         run_check()?;
         eprintln!(
-            "play check ok: 3D world, FX digits, fixed camera/controls, inventory modal, continuous canvas torch gate"
+            "play check ok: 3D world, FX digits, fixed camera/controls, inventory modal, play-path integration: default continuous renderer + legacy fallbacks + world map"
         );
         return Ok(());
     }
@@ -2368,6 +3282,16 @@ fn real_main() -> Result<(), String> {
     } else {
         PresentMode::Continuous
     };
+    // Fullscreen-native by default: zero explicit cells open a borderless
+    // fullscreen window whose logical grid derives from the surface at
+    // exactly one atlas texel per pixel — edge-to-edge fill with zero glyph
+    // resampling (the authored-grid cap stretches viewport instead, which
+    // reads soft; see `fitted_viewport`). `--window` keeps the authored
+    // 160x56 comparison window with its capped grid. The camera scales its
+    // focal with the grid (clamped), so world ink density per cell — and
+    // the sliding coverage margins — hold at fullscreen sizes; the
+    // `--check` density contract guards that.
+    let windowed = args.iter().any(|arg| arg == "--window");
 
     match ascii_mmorpg_engine::present::run_dynamic(
         LocalGame::new(),
@@ -2375,8 +3299,8 @@ fn real_main() -> Result<(), String> {
             // GPU raster is the default; `--cpu` forces the CPU fill.
             title: "ASCII MMORPG — fixed oblique 2.5D camera".into(),
             cell_px: 10.0,
-            width_cells: GRID_W,
-            height_cells: GRID_H,
+            width_cells: if windowed { GRID_W } else { 0 },
+            height_cells: if windowed { GRID_H } else { 0 },
             max_frames: frames,
             mode,
             ..Default::default()

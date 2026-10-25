@@ -18,16 +18,53 @@ pub fn region_legend() -> impl Iterator<Item = (&'static str, char, Color)> {
         .map(|faction| (faction.name.as_str(), faction.atlas_glyph, faction.color))
 }
 
+/// Presentation helpers for the derived printable atlas. These live in
+/// the client by ownership (review 2026-10-25): the shared crate keeps
+/// the semantic model; terminal presentation decisions stay here.
 pub fn atlas_note() -> String {
-    veyrath::visual_data().atlas_note()
+    let data = veyrath::visual_data();
+    let settlement = data
+        .settlement(&data.starter_settlement)
+        .map(|settlement| settlement.name.as_str())
+        .unwrap_or("Starter settlement");
+    let region = data
+        .settlement(&data.starter_settlement)
+        .and_then(|settlement| data.region(&settlement.region))
+        .map(|region| region.name.as_str())
+        .unwrap_or("provisional region");
+    format!("{settlement} (*): starter settlement in {region}")
 }
 
 pub fn atlas_lines(max_width: usize, max_height: usize) -> Vec<String> {
-    veyrath::visual_data().atlas_lines(max_width, max_height)
+    veyrath::visual_data()
+        .atlas
+        .lines()
+        .take(max_height)
+        .map(|line| line.chars().take(max_width).collect())
+        .collect()
 }
 
 pub fn glyph_color(glyph: char) -> Color {
-    veyrath::visual_data().glyph_color(glyph)
+    let data = veyrath::visual_data();
+    if let Some(faction) = data
+        .factions
+        .iter()
+        .find(|faction| faction.atlas_glyph == glyph)
+    {
+        return faction.color;
+    }
+    let palette = &data.palette;
+    match glyph {
+        'A' | 'D' | 'G' | 'M' | 'B' | '@' => palette.labels,
+        '*' => palette.highlight,
+        '~' => palette.water,
+        '^' => palette.mountain,
+        ':' => palette.river_highlight,
+        '=' => palette.road,
+        '.' => palette.ruins_and_borders,
+        '+' | '-' | '|' => palette.forest,
+        _ => palette.labels,
+    }
 }
 
 #[cfg(test)]
@@ -65,5 +102,24 @@ mod tests {
             ascii_mmorpg_shared::veyrath::CoordinateStatus::Provisional
         );
         assert!(atlas_note().contains("Millhaven"));
+    }
+
+    #[test]
+    fn atlas_palette_and_faction_lookup_are_derived_from_the_shared_source() {
+        let data = veyrath::visual_data();
+        assert_eq!(
+            data.factions
+                .iter()
+                .find(|faction| faction.atlas_glyph == 'v')
+                .unwrap()
+                .id,
+            "greyfall"
+        );
+        assert_eq!(glyph_color('v'), [138, 123, 96]);
+        assert_eq!(glyph_color('='), [182, 157, 121]);
+        assert_eq!(
+            atlas_note(),
+            "Millhaven (*): starter settlement in Greyfall Vale"
+        );
     }
 }

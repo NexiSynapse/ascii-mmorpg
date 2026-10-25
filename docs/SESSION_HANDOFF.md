@@ -2,6 +2,854 @@
 
 Updated: 2026-10-25. This is the resumable engineering record, not a full transcript.
 
+## Video frame-by-frame reference analysis + mimicry plan (2026-10-25, latest)
+
+Researched the user's two assumptions against `data/videos` before planning:
+re-extracted every frame (30fps) around all detected motion bands and cuts
+(`video_analysis.py zoom` into `video-tools/out/{v31_move2,v31_cut1,v47_fx,
+v47_cut,v90_burst,v90_death}`), quantified motion with validated FFT phase
+correlation (`video-tools/motion_fft.py`) and glyph pitch via NN-centroid
+gap statistics, and vision-analyzed 10 representative frames. Full findings
+and the six-slice plan live in **`docs/VIDEO_MIMICRY_PLAN.md`**. Headlines:
+
+- World lattice is **uniform ≈ 6.5×9.5px (~110×134)**; "more dots" REFUTED
+  within world views — density comes from multi-glyph letter-built sprites
+  (trees 20–40 glyphs, bosses 20+, player 5–12) over a 2–9%-ink floor, plus
+  V90418's perspective row compression (rows 16px near → 9px far, same
+  lattice). CONFIRMED across screens: world 6.5×9.5 vs inventory UI 8×12 vs
+  smaller ASCII-rain backdrop — per-context pitch changes are real.
+- No spacing restriction exists in the continuous path (natives overlap
+  freely, flame already uses 0.55 sub-cell pitch); the grid-locked path is
+  cell layers only. De-restriction = per-partition pitch + perspective row
+  scaling + sub-cell sprite authoring, not removing a limit.
+- Movement: ease-in ~0.4s → cruise ~8px/frame diagonal → ease-out ~0.5s,
+  frame-quantized, no blur; walking figures trail motion-streak glyphs.
+- FX: telegraph ring → concentric golden particle rings + spiral arcs
+  (peak ~35–40% screen) with terrain tint falloff, shockwave arc, ember
+  speckle, ~1.4s heavy + ~1s ease-out decay.
+- Transitions: **1-frame hard swaps only** (single ~56%-absdiff frame at
+  both cuts; no fades/wipes) — world → inventory modal (world dimmed
+  behind, ASCII-rain backdrop, item ASCII-art sprites, bag grid).
+
+Plan slices (each bounded, CI-verified): S1 per-partition pitch scale →
+S2 letter-built props → S3 camera easing + walk trails → S4 FX vocabulary
+→ S5 inventory modal → S6 optional perspective rows. New tooling committed
+to `video-tools/` (`motion_fft.py`, `pitch_bands.py`, `glyph_pitch.py`);
+no engine code changed in this slice. #10 still awaits the user's live
+verdicts; fullscreen-60FPS + client terminal map unchanged.
+
+## Torch-lighting model fix: tone-map + one light + receivers (2026-10-25)
+
+A second external review diagnosed the unsatisfying torch lighting as a
+renderer bug, not art: the bloom field was added raw and hard-clamped
+(`min(fg + bloom, 1.0)`), the flame was ten same-strength per-glyph lamps
+(~5.1 summed) instead of one coherent light, empty ground stayed black
+(no light receiver), and native torch mode had no fallback when bloom
+read wrong. GPU probe evidence: near-flame field ≈ 2.9 before the
+additive clamp; several cells out ≈ 0.42. All five ranked hypotheses
+were confirmed structurally present; the response SHAPE was the problem.
+
+Implemented (review's priority order, all uncommitted):
+
+1. **Tone-mapped bloom response** (continuous shader): the raw additive
+   clamp is replaced by a soft energy curve — `peak = max(bloom.rgb)`,
+   `energy = 1 - exp(-peak * 1.7)`, `light = tint * energy` — so cores
+   saturate smoothly, warm hue ratios survive, and the pool falls off
+   gently instead of every lit cell clipping to the same orange/white.
+   Shader contract test updated (pins the curve; asserts the old clamp
+   is gone).
+2. **One torch light + local glows** (`engine::flame`): the base row's
+   centre glyph carries ONE dedicated torch light (strength ~1.05+0.25·
+   flicker, radius ~5.2·radius_scale, warm colour); the other hot glyphs
+   carry small local glows (0.10, radius 1.4). Per-torch total drops
+   ~5.1 → ~1.8. Structure test: exactly one radius ≥ 4 emission at
+   strength ≥ 1.0, locals ≤ 0.2.
+3. **Light receivers** (continuous shader): world cells inside a strong
+   field gain a faint warm fill in their glyph gaps
+   (`fill = light · energy·0.38 · (1-a)`), so sparse ground reads as an
+   illuminated surface; true void (no field) stays pure black; ink
+   compositing is bit-identical to before (premasked colour + alpha
+   preserved exactly).
+4. **Field-profile acceptance contract** (`play --check`): builds the
+   flame's sources into the CPU reference `BloomField` (test-pinned
+   parity with the GPU pass) and asserts the SHAPE — core ≥ 0.5 and
+   ≥ 1.2× the pool, monotonic core > pool > outer, outer ≤ 0.6× pool,
+   far field (beyond radius) < 0.02, warm hue order r ≥ g ≥ b at core
+   and pool. The old flood bound recalibrated to the new layout
+   (≤ 3.0).
+5. Retuning (item 5 of the review): deliberately NOT done beyond the
+   above — exposure 1.7 / receiver 0.38 / torch 1.05·5.2 are the first
+   calibration; the user's live verdict tunes them.
+
+The legacy point-light comparison path already exists (`--legacy-torch`)
+— the review's item 4 needs no new work.
+
+### Verification (2026-10-25)
+
+- `play --check` (incl. the new field-profile contract), `world
+  --check`, `torch --check` (26 bloom sources, down from 31): passed.
+- fmt; workspace tests 318; present-feature engine tests 207; both
+  clippy orders `-D warnings`; tools content: passed.
+- Vulkan smokes: play default 70 frames; torch showcase 70 frames —
+  clean. `git diff --check` clean (standing LF/CRLF warnings only).
+- `latest.patch` remains pre-existing, untracked, and untouched.
+
+### Ticket status and next action
+
+Ticket #10 remains OPEN pending the user's live verdict on the new
+lighting model — run `cargo run --locked -p ascii-mmorpg-engine
+--features present --release --example play` and judge the torch pool:
+smooth unlit → warm lift → readable pool → hot core gradient, sparse
+ground faintly lit inside the pool, no orange wash, `--legacy-torch`
+still available for A/B. If the pool needs tuning, the knobs are the
+shader exposure constant (1.7), receiver fill (0.38), and the torch
+light strength/radius in `engine::flame`. Remaining open slices
+unchanged: fullscreen-60FPS world3d WGSL resolve; client terminal map
+typed re-render.
+
+## Review follow-up block 2: remaining P0/P1 items completed (2026-10-25)
+
+User: "IF any fixes or improvements are left complete them now." All
+remaining review items that fit a code slice are done (all uncommitted);
+only the two large standalone slices remain open (recorded below).
+
+### P0 — quiet local ground around figures (stage clearance)
+
+- New `SceneSource::stage_anchors(t) -> Vec<Point2>`: figure foot
+  positions in grid space. The presenter suppresses composed WORLD cells
+  inside 2.2 cells of an anchor with a hash-dithered ragged edge out to
+  3.2 (UI cells and native primitives never suppressed). Presenter test
+  `stage_anchors_clear_world_cells_but_never_ui_cells`; play implements
+  it from the projected native-actor anchors (legacy mesh path keeps its
+  original look).
+
+### P1 — fog canopy + storm lightning
+
+- `weather::FxKind::FogBand`: 3 (rain) / 5 (storm) wide translucent
+  cool-grey bands drifting on slow sine paths, emitted FIRST so the
+  budget can never starve atmosphere; never in Clear mode. Tests: quiet
+  atmosphere (opacity ≤ 0.15) + clear-mode absence.
+- `weather::lightning_flash(t, seed)`: deterministic bolt schedule
+  (instant attack, ~e^-6.5t decay, zero most of the time). Play drives a
+  cool whole-frame `Wash` (≤ 0.35 strength) in Storm mode. Tests:
+  deterministic, brief, rare, bounded.
+
+### P1 — ONE shared flame builder
+
+- New `engine::flame` module: `flame_row_color` (vivid animated ramp) +
+  `push_ascii_flame` (the 4-row ASCII stack with per-row emissions), with
+  module tests (ASCII-only, tapered, centered, vivid ≥80 spread, dynamic,
+  ≥3 emissive base rows). play's `push_native_torches` and the torch
+  showcase both call it — the accepted flame read cannot drift between
+  them. Showcase --check updated (flame = ASCII rows, not gradient
+  glyphs); play --check gained the flood bound (combined per-glyph
+  emission strength ≤ 6.5; the accepted composition sums ~5.1).
+
+### P1 — shared combat-effect timeline
+
+- New `engine::fx_timeline`: `EffectTimeline`/`EffectPhase`
+  (telegraph→impact→decay with clamped raw progress, `is_live`
+  retention, `ease_in`/`ease_out`), 4 tests incl. malformed-segment
+  collapse. play's combat FX meshes and its FX retention both derive
+  from it now (visuals unchanged: raw progress, eased embers preserved).
+
+### P1 — labels are UI ink
+
+- play's nameplate/HP label layer moved into its own NON-camera
+  partition (was inside the world partition → actors drew over
+  nameplates). Labels now paint after all native world content.
+  --check asserts the partition split (world stays camera-marked without
+  labels; labels partition non-camera; closed-modal baseline is 4
+  partitions, 5 with inventory).
+
+### Spec gap + Low
+
+- Presenter warns once (per run) when continuous primitives carry
+  emission but the source does not claim bloom ownership — the gap is
+  loud instead of silent.
+- Atlas presentation helpers (`glyph_color`, `atlas_lines`, `atlas_note`,
+  faction-glyph lookup) moved from `crates/shared` to
+  `client/src/veyrath.rs` (shared keeps the semantic model + raw embedded
+  atlas; terminal presentation decisions live in the client per the
+  SOT ownership split). Tests moved accordingly.
+
+### Verification (2026-10-25)
+
+- `play --check` (all contracts incl. labels/stage/flame-flood),
+  `world --check`, `torch --check`: passed.
+- fmt; workspace tests 317 (0 failures); present-feature engine tests
+  206; both clippy orders `-D warnings`; tools content: passed.
+- Vulkan smokes: default 70 frames, storm 70 frames (fog+lightning path),
+  `--legacy` 30 frames — all presented cleanly. `git diff --check` clean
+  (standing LF/CRLF warnings only). `latest.patch` untouched.
+
+### Still open (the only remaining review items — both large standalone slices)
+
+- **Fullscreen 60 FPS**: the world3d 4×-SSAA resolve/decode (~9ms CPU at
+  240×83) must move into WGSL (or an adaptive quality ladder). This is
+  the documented next performance lever; #10's 60 FPS AC stays partially
+  open on the fullscreen path (windowed already holds vsync-60).
+- **Client terminal World Map typed re-render**: the terminal modal still
+  renders the embedded printable atlas (a terminal cannot render
+  continuous primitives); engine-side map is typed. A typed terminal
+  re-render is a redesign; the shared-semantic source of truth means the
+  atlas cannot silently diverge semantically, only stylistically.
+- Ticket #10 itself stays open pending the user's live verdicts (flame,
+  integrated default, stage-clearance look, fog/lightning in storm).
+
+## External review fixes: layer order + per-system lighting + bounds (2026-10-25)
+
+An external review of the #10 worktree found High/Medium defects plus a
+P0–P2 improvement plan. This slice fixes its top block (all uncommitted):
+
+### High 1 — native primitives drew over HUD/modal UI (P0)
+
+- `frame_continuous_instances` now emits composed WORLD cells → native
+  primitives → composed UI/modal cells (the instance buffer is the paint
+  order). Natives can no longer occlude HUD, labels, inventory, or map
+  captions. Regression test
+  `ui_cells_paint_after_native_primitives_at_overlapping_positions`
+  (UI cell at an overlapping position must paint after the native).
+  Cross-depth interleaving between natives and world ink stays deferred
+  (documented in `native_continuous_instance`).
+
+### High 2 — per-system legacy fallbacks did not preserve lighting
+
+- Ownership is now per-system: legacy torch point lights (and crackle/FX
+  lights) stay active whenever the TORCH system runs its mesh path —
+  including hybrid configs (e.g. `--legacy-torch` with native actors) —
+  so the fallback is visually equivalent. Only the torch migration drops
+  raster lights. The torch glow layer is skipped exactly when another
+  migration claims bloom ownership while torch stays legacy (no
+  double-light); on the grid/CPU path it always pushes (canvas-gated).
+- `--check` updated: actor-gate/hybrid blocks assert lights KEPT under
+  torch-legacy hybrids plus bloom ownership still claimed; default-mode
+  (torch native) still asserts lights dropped.
+
+### Medium fixes
+
+- `▀` (U+2580, layered-character ground shadow) added to the presenter
+  atlas `EXTRA_GLYPHS` (was falling back to `?`).
+- Map caption no longer claims ESC closes the map (ESC is the
+  presenter-global quit and never reaches the source); it says
+  "M CLOSES" now.
+- `weather_fx` stops generation at `WEATHER_PRIMITIVE_BUDGET` inside the
+  lattice scans (identical retained set to the old trailing truncate, but
+  bounded generation work for large coverage windows).
+- `ContinuousScene::truncate(cap)` added; `veyrath_world::world_scene`
+  now authors in visual priority order (settlements → landmarks → rivers
+  → roads → region carpet) and truncates to `VEYRATH_WORLD_BUDGET`, so
+  oversized views consume carpet ink first and never silently drop a
+  settlement/landmark behind background punctuation.
+
+### Recorded as follow-up slices (from the review's plan, NOT this slice)
+
+- P0 quiet-radius ground suppression around actors; P1 world-projected
+  labels/HP/target rings on the continuous path; P1 unified combat-FX
+  timelines; P1 fog canopy + lightning flash; P1 integrated torch
+  acceptance contract; P2 Veyrath visual identity; P2 fullscreen 60 FPS
+  (world3d WGSL resolve; currently ~51 FPS at 240×83 — the #10 AC stays
+  partially open); Low shared-crate atlas-helper move; spec gap on
+  generic-source bloom default; World Map modal atlas-vs-typed rendering.
+
+### Verification (2026-10-25)
+
+- `play --check` (layer/lighting/hybrid contracts), `world --check`,
+  `torch --check`: passed.
+- fmt; workspace tests 309; present-feature engine tests 197 (new layer
+  test); both clippy orders `-D warnings`; tools content: passed.
+- 70-frame fullscreen Vulkan smoke (default) + 30-frame `--legacy` smoke:
+  passed. `git diff --check` clean (standing LF/CRLF warnings only).
+- `latest.patch` remains pre-existing, untracked, and untouched.
+
+### Ticket status and next action
+
+Ticket #10 remains OPEN: awaiting the user's live verdict on the flame
+(iterations 1–4) and the integrated default, PLUS the review's remaining
+P0/P1 items above (recommended next bounded slice: quiet-radius ground
+suppression + world-projected labels, per the review's implementation
+order). Fullscreen-60FPS remains the explicitly-open performance item.
+
+## #10 follow-up 4: vivid flame ramp (2026-10-25)
+
+User live verdict round 4: "now it's not colourful" — the ASCII rows washed
+into one dull orange. Two causes found in the round-3 composition: the
+side-glyph dim mixed 30% toward brown on mostly-side rows, and every
+emissive row used one fixed warm emission colour, so the bloom flattened
+all rows toward the same orange.
+
+Fix: `flame_row_color` ramp punched to vivid fire colours — near-white
+(255,250,228) → yellow (255,212,84) → orange (255,148,36) → burnt tip
+(208,96,28), wobble amplitude 0.14 → 0.18; side-glyph dim cut to 15%
+toward (172,112,42); per-row emission colour = the row's own ramp colour
+(slightly whitened), so the bloom REINFORCES the ramp (white-yellow glow
+at the base, orange glow higher) instead of collapsing it.
+`play --check` vividness contract raised: row colour spread ≥ 80 channels.
+
+Verification: `play --check`, fmt, present-feature clippy, 309 workspace
+tests, and a 70-frame fullscreen Vulkan smoke — all passing. Ticket #10
+remains OPEN pending the user's re-verdict on the flame colours, plus the
+overall integrated-default acceptance.
+
+## #10 follow-up 3: ASCII flame rows with animated ramp (2026-10-25)
+
+User live verdict round 3: "the torch flames are not in ASCII and their
+colour is not dynamic/smoothly changing as you move further up the flame —
+look at the video analysis and torch look objectives." Reference-frame
+analysis (video-tools village captures) confirms: plain ASCII punctuation
+rows (NOT unicode shapes), 3–4 rows tall tapering from a 3–5 glyph base to
+a single tip, white-hot base → yellow → dim-olive tip, flickering frame to
+frame, flame base centered directly on the stick column.
+
+Fix (`push_native_torches`): the ▲/■/stretched-glyph composition is
+replaced by a 4-row ASCII stack — `.:*:.`, `:*:`, `^:`, `'` — each row at
+cell scale (0.95·flame_scale), sway growing with height, sitting directly
+on the projected stick-top anchor. Colour comes from a new
+`flame_row_color(u, wobble, flicker)` smooth ramp (near-white → yellow →
+amber → dim olive up the rows) whose hot zone BREATHES with a per-row/
+per-torch time wobble, so the ramp shifts continuously; flicker brightness
+rides on top. Side glyphs dim 30% against the hot `*`/`:` centers. The
+three lower rows carry the emission split (0.50/0.32/0.24 +flicker,
+radii 5.6/4.4/3.4·radius_scale — combined strength keeps the accepted
+brightness); the tip row is ink-only.
+
+`play --check` flame contracts rewritten to pin the reference read:
+ASCII-only rows (no unicode), a real taper (topmost row ≥2 cells above the
+anchor), a visible colour ramp across rows (channel spread ≥40), dynamic
+ramp/positions between samples, and ≥3 emissive base rows with combined
+strength ≥0.9 / max radius ≥4.5.
+
+Verification: `play --check`, fmt, both clippy orders, 309 workspace
+tests, and a 70-frame fullscreen Vulkan smoke — all passing. Temporary
+reference-frame copies (torch_ref_*.png) removed. `git diff --check`
+clean. Ticket #10 remains OPEN pending the user's re-verdict on the ASCII
+flame read, plus the overall integrated-default acceptance.
+
+## #10 follow-up 2: layered in-world flame body (2026-10-25)
+
+User live verdict round 2: "the torch flame is also not large enough and
+it's hard to distinguish between the stick and the flame — sure there are
+particles but not the flame." Root cause: the in-world torch projected a
+~7-row wooden post but the flame was a single sub-cell `*` (scale
+0.72×1.05) — an ant on a pole; only the crackle particles read.
+
+Fix (`push_native_torches`): the flame is now the accepted showcase's
+layered composition, sized against the post — an iron bowl `■` cap at
+the post top (dark, non-emissive) so the flame base reads as a separate
+hot mass; an amber→deep-red vertical `▲` teardrop (scale ≈1.45×2.55·pulse,
+skew with the sway) as the outer body; an amber `*` tongue; and a
+white-hot radial `o` core. Emission is split across the layers
+(outer 0.45+0.15·pulse r5.6, tongue 0.30+ r4.4, core 0.35+ r3.4, all
+×radius_scale) so the core is hottest while total spill keeps the
+previously accepted brightness (~1.1–1.5 vs the single 0.82–1.02).
+Per-torch primitives: bowl + 3 flame layers + 6 crackles = 10 (30 total;
+emission sources 27 + actors + frame ≈ 60 ≤ 128 ✓).
+
+`play --check` torch contracts updated: the flame body is found by
+scale.y > 2.0, anchored within 0.6 cells of the pulsed projection; the
+brightness contract now asserts ≥3 emissive layers within 1.6 cells of
+the anchor with combined strength ≥ 0.9 and max radius ≥ 4.5 (pins the
+layered body + calibration together).
+
+Verification: `play --check`, fmt, both clippy orders, 309 workspace
+tests, and a 70-frame fullscreen Vulkan smoke — all passing (one smoke
+retry after a lingering play.exe process locked the linker output —
+killed and rerun). `git diff --check` clean. Ticket #10 remains OPEN
+pending the user's re-verdict on the flame body (size/stick separation),
+plus the overall integrated-default acceptance (characters/weather/map,
+HUD/inventory/movement feel, fullscreen ~51 FPS note).
+
+## #10 follow-up: in-world flame brightness (2026-10-25)
+
+User live verdict on the integrated default: "the flame is not bright
+enough" — the in-world torch flames read as dim points that barely light
+their surroundings. Root cause: `push_native_torches`' flame glyph
+carried NO emission; the bloom field only saw the weak crackles
+(strength 0.10) and the frame-glow cells (~0.29 effective after the 0.35
+bridge scale), while the accepted torch/sun showcase calibrated its flame
+layers at 0.72–1.02 strength / radii 3.6–5.6.
+
+Fix: the in-world native flame now carries showcase-calibrated emission —
+`Emission::new((255,150,50), 0.82 + 0.20·pulse, 5.4·radius_scale)` — so
+the flame glyph itself feeds the bloom field at accepted-showcase
+strength. `play --check` pins it (torch-gate block now asserts the flame
+primitive's emission strength ≥ 0.6 and radius ≥ 3.0).
+
+Verification: `play --check` (incl. the new brightness contract), fmt,
+present-feature example clippy, and a 70-frame fullscreen Vulkan smoke —
+all passing; `git diff --check` clean. Ticket #10 remains OPEN pending
+the user's re-verdict on flame brightness (plus the still-pending
+integrated-default acceptance: characters/weather/map together, HUD/
+inventory/movement feel, and the fullscreen ~51 FPS note from the
+previous section).
+
+## #7 closed; ticket #10 play-path integration (2026-10-25)
+
+### Ticket lifecycle
+
+- #7 (Veyrath-backed continuous world) closed on the user's acceptance —
+  that unblocked #10, the final ticket of the renderer rebuild.
+- #10 is implemented this session (below). After the user's live
+  acceptance of the integrated default, the actual DELETION of the legacy
+  mesh paths (the "retirement" half) can follow as its own slice — the
+  fallbacks stay selectable by design until then (AC #6).
+
+### Ticket #10 implementation (uncommitted, `engine/examples/play.rs`)
+
+- **Defaults flipped**: the continuous migrations are now the DEFAULT
+  presentation — native torch flame/crackles with float bloom owning
+  world lighting, layered `character::` actors, and `weather::`
+  grass/rain/motes all run together on the continuous canvas
+  (`with_gpu3d_and_weather` constructs gates ON). CLI fallbacks for
+  acceptance comparison: `--legacy` (all mesh paths), or per-system
+  `--legacy-torch` / `--legacy-actors` / `--legacy-weather`; `--grid`
+  still selects the legacy surface-filling grid presenter. Nothing is
+  deleted — the mesh paths stay compiled until explicit retirement.
+- **Veyrath world map in play (`M`)**: new `map_open` modal. While open,
+  `scene_at_size` swaps to a caption sheet (title/legend/close hints, no
+  world meshes built — `pending_world` stays `None`), and
+  `continuous_scene` returns `veyrath_world::world_scene` sized to the
+  live grid (faction settlements + Millhaven starter ring visible).
+  Gameplay input freezes (movement axes zero, attack/cast/rest/I presses
+  ignored; releases still clear held keys) while `advance` keeps ticking
+  the server — same contract as the TUI pause. HUD help line now lists
+  `M Map`.
+- **`--check` updates**: every isolation block now disables the other
+  gates explicitly (defaults flipped); two new contract blocks: (a)
+  default-mode — a fresh continuous-canvas game claims bloom ownership,
+  drops legacy point lights, sheds every migrated mesh family vs the
+  legacy count, and fields torch flame + character torso + grass + rain
+  streak glyphs at once; (b) map modal — no world layers/meshes, capital
+  '@' + starter ring present, movement frozen with `W` held, `F`
+  ignored, `M` closes and movement resumes.
+
+### Verification (2026-10-25, Windows)
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo test --locked --workspace`: passed — 309 tests, 0 failures
+  (196 present-feature engine lib tests).
+- `cargo run --locked -p ascii-mmorpg-tools -- content`: passed.
+- Both clippy orders `-D warnings`: passed.
+- `play --check` (all gate contracts + default-mode + map modal):
+  passed. `world --check`, `torch --check`: passed.
+- 60 FPS smoke (AC): authored 160×56 window (`--window`) — 600 frames in
+  7.7s wall ≈ 12ms/frame, vsync-60 with headroom ✓. Fullscreen-native
+  240×83 (this machine's default) — 600 frames in 12.25s ≈ 51 FPS: the
+  GPU raster pass (`world3d` ~9ms, scaling with the fixed 4x SSAA grid)
+  pushes the pipeline just over the 16.7ms budget; moving resolve/decode
+  into WGSL remains the documented next lever (AGENTS.md Performance).
+  Legacy-fallback smoke (`--legacy`, 70 frames) passed.
+- `git diff --check`: passed (standing LF/CRLF warnings only).
+- `latest.patch` remains pre-existing, untracked, and untouched.
+
+### Ticket status and next action
+
+Ticket #10 is implemented; the issue stays OPEN pending the user's live
+visual acceptance of the integrated default — just run `cargo run
+--locked -p ascii-mmorpg-engine --features present --release --example
+play` (no flags): native torches + layered characters + weather together,
+`M` for the world map, `--legacy` / `--grid` to compare fallbacks. Judge
+HUD/inventory/movement/click-to-move still working (the check asserts
+them, but live feel matters). After acceptance: close #10, commit when
+asked, and schedule the retirement slice (delete the legacy mesh paths +
+gates) plus — if fullscreen 60 FPS matters — the world3d WGSL-resolve
+optimization slice.
+
+## #9 closed; ticket #7 Veyrath-backed continuous world (2026-10-25)
+
+### Ticket lifecycle
+
+- #9 (weather and environmental effects) closed on the user's "continue
+  with the next ticket" acceptance pattern. #7 (Veyrath-backed continuous
+  world) implemented this session, below. When #7 is accepted, all four
+  children (#5/#7/#8/#9) are done and #10 (play-path integration and
+  fallback retirement) unblocks.
+
+### Ticket #7 implementation (uncommitted)
+
+- New public `engine/src/veyrath_world.rs`: renders the shared
+  `veyrath::visual_data()` model as continuous primitives over an
+  intentional black negative space. `map_point` maps the manifest's
+  PROVISIONAL percent coordinates (origin NW, y south) directly onto the
+  target grid — presentation-only, never collision/server state
+  (test-enforced: coordinate_status stays Provisional, model never
+  mutated). Composition: terrain-keyed region carpets (extent-hint
+  lattices, quiet palette ink — mountain '^' / forest '&' / fen '~' /
+  lowland '.', mostly void, density-capped); river polylines walked at a
+  fixed 2.2-cell arc step with travelling shimmer (principal rivers
+  wider than tributaries); dashed road runs between resolved waypoint
+  nodes (settlement ids → landmark ids; `pass:*` nodes without modelled
+  positions are skipped — node chains are connectivity intent, not
+  straight-line geometry) with per-kind glyph/opacity (royal ':' >
+  regional '.' > trail ',' > maritime '='); settlement marks in FACTION
+  colours sized by kind (capital '@' … hamlet '·'); landmark glyphs
+  (fortification '▲' / ruin 'x' / special '*', principal bright vs
+  secondary whisper); the Millhaven starter highlight + pulsing ring.
+  `VEYRATH_WORLD_BUDGET = 900`; deterministic in view + time.
+- Nine lib tests: determinism, budget + quiet-carpet density (<8% of
+  cells), exact projection of every settlement + sampled landmarks,
+  faction-colour ownership of the political layer (every settlement
+  wears its faction colour; ≥3 factions visible), region terrain-palette
+  separation (ashen-crown mountain ink vs gallowmere forest ink), river
+  waypoint coverage, Crown Road royal dashes between Crownspire and
+  Veyrath, starter identity (highlight colour + pulsing ring), and the
+  provisional-coordinates guard.
+- New `engine/examples/world.rs` showcase (torch.rs pattern): authored
+  180×74 window (cell_px 10), caption scene with title/legend/starter
+  note, `continuous_scene` returns the composed world, NO bloom ownership
+  (the map emits nothing — void stays dark). `--check`: determinism,
+  budget/density, starter + ≥3 factions in the model, zero caption glow.
+- No play.rs changes this slice: #10 (play-path integration) is the
+  ticket that wires the Veyrath world into the game path.
+
+### Exact changed paths (this session, all uncommitted)
+
+- `engine/src/veyrath_world.rs` (new), `engine/examples/world.rs` (new)
+- `engine/src/lib.rs` (pub mod weather + veyrath_world)
+- (earlier this session) `engine/src/weather.rs`, `engine/src/character.rs`,
+  `engine/examples/torch.rs`, `engine/examples/play.rs`,
+  `engine/src/present.rs`
+- `AGENTS.md`, `docs/SESSION_HANDOFF.md`
+
+### Verification (2026-10-25, Windows)
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo test --locked --workspace`: passed — 309 tests total, 0 failures
+  (9 new veyrath_world tests; 196 present-feature engine lib tests).
+- `cargo run --locked -p ascii-mmorpg-tools -- content`: passed — 11
+  definitions.
+- Both clippy orders `-D warnings`: passed.
+- `world --check`: passed — 422 primitives, density 0.032, starter ring +
+  6 factions present.
+- `play --check` (all three gates + density contract): passed.
+- 70-frame Vulkan smoke on the NVIDIA GeForce GTX 1650: passed — grid
+  180×71, 524 continuous instances, per-frame build 149µs / compose
+  109µs / inst 152µs.
+- `git diff --check`: passed (standing LF/CRLF warnings only).
+- `latest.patch` remains pre-existing, untracked, and untouched.
+
+### Ticket status and next action
+
+Ticket #7 is implemented and verified; the issue stays OPEN pending the
+user's live visual acceptance — run `cargo run --locked -p
+ascii-mmorpg-engine --features present --release --example world`.
+Judge: region carpets read as distinct quiet tints, rivers shimmer along
+their authored paths, royal roads dash between cities, settlements wear
+faction colours with kind-sized marks, landmarks whisper, the Millhaven
+starter ring pulses, and the void stays black. Then close #7 and commit
+when asked. After #7 closes, #10 (play-path integration and fallback
+retirement) is the last open ticket — its scope: make the continuous
+paths the defaults (retire the `--continuous-*` gates and the grid
+fallback), wire the Veyrath world into the actual play path, and keep
+the mesh path only as needed.
+
+## #8 closed; ticket #9 weather and environmental effects (2026-10-25)
+
+### Ticket lifecycle
+
+- #8 (animated layered characters) closed on the user's "continue with the
+  next ticket" after three verdict rounds (particles/silhouette accepted,
+  lowres fixed via integer texel snapping + DPI-aware atlas, fullscreen
+  restored via the fullscreen-native default, player doubled to 2.5).
+- #9 (weather and environmental effects) implemented this session, below.
+  #7 (Veyrath-backed continuous world) is now the last open child before
+  #10 (play-path integration) unblocks.
+
+### Ticket #9 implementation (uncommitted)
+
+- New public `engine/src/weather.rs`: world-anchored weather glyph records
+  (`WeatherFx` + `FxKind` GrassBase/GrassTip/Rain/Mote) composed over a
+  caller coverage window. Grass: world-locked step-5 lattice, half
+  populated × density; bases are immovable (zero skew/rotation, fixed
+  anchor) while tips ride `grass_sway` — ONE coherent travelling-wave
+  gust field (pure x/z spatial terms; the first draft's per-cell hash
+  phase made neighbours jitter and was removed after the smoothness test
+  caught it). Rain: seeded lattice drops with fractional fall phase,
+  depth-driven length/opacity/height variety, wind drift PLUS a seeded
+  sine-curl (non-linear lateral path), streak lean from the wind. Clear
+  mode fields slow drifting sun-dust motes instead of rain. Profiles
+  mirror the old mesh `WeatherProfile` numbers (rain 24% / storm 42%
+  density, storm stronger gust/lean/curl). `density` scalar 0..1 scales
+  counts while survivors keep identical placements; ≤512 glyphs
+  (`WEATHER_PRIMITIVE_BUDGET`); presentation-only, no sim access.
+- Six lib tests: budget (all modes/phases), determinism, distinct mode
+  density/motion (storm rain count > rain; storm sway dominates clear;
+  storm streaks lean), grounded bases + coherent waving tips (tips' skew
+  must equal the shared gust sample at their BASE anchor — the test also
+  caught the tip-offset sampling bug — plus a Lipschitz smoothness bound
+  on the field), rain fractional/directional/non-linear paths (probes a
+  drop across three times, monotonic fall, lateral-to-vertical ratio must
+  differ between segments), and density scaling without changing
+  survivors.
+- `play.rs`: new `--continuous-weather` spec gate (third parallel gate
+  beside torch/actors). When on, `world_meshes` skips the mesh grass
+  blades/decals and rain streaks and records the coverage window
+  (`weather_window`); `continuous_scene`'s new `push_native_weather`
+  composes the `weather::` records projected through the same camera
+  (grass depth −3, motes −2.8, rain −2.5 — under torch/actor primitives;
+  rain carries no emission, so bloom ownership stays `torch || actors`).
+- `play --check` extended: the weather gate must shrink the mesh list vs
+  legacy, produce grass base/tip glyphs + streaks in Rain mode (no
+  motes), wave tips between samples, swap rain for motes in Clear mode,
+  and leave authoritative positions identical.
+
+### Exact changed paths (this session, all uncommitted)
+
+- `engine/src/weather.rs` (new)
+- `engine/src/lib.rs` (pub mod character + pub mod weather)
+- `engine/examples/play.rs` (weather gate + window capture + helper +
+  check + docs)
+- `engine/src/present.rs` (from earlier this session: integer viewport
+  snap + DPI-aware atlas)
+- `engine/src/character.rs`, `engine/examples/torch.rs` (earlier slices)
+- `AGENTS.md`, `docs/SESSION_HANDOFF.md`
+
+### Verification (2026-10-25, Windows)
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo test --locked --workspace`: passed — 300 tests total, 0 failures
+  (6 new weather tests; 187 present-feature engine lib tests).
+- `cargo run --locked -p ascii-mmorpg-tools -- content`: passed — 11
+  definitions.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` and
+  the present-feature example clippy: passed (one redundant-guard lint
+  fixed).
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example
+  play -- --check`: passed (torch + layered-actor + weather gates +
+  density contract).
+- 70-frame fullscreen Vulkan smokes on the NVIDIA GeForce GTX 1650
+  passed for `--continuous-weather --weather storm` alone and for all
+  three gates combined.
+- `git diff --check`: passed (standing LF/CRLF warnings only).
+- `latest.patch` remains pre-existing, untracked, and untouched.
+
+### Ticket status and next action
+
+Ticket #9 is implemented and verified; the issue stays OPEN pending the
+user's live visual acceptance — run `cargo run --locked -p
+ascii-mmorpg-engine --features present --release --example play --
+--continuous-weather` (default rain; add `--weather storm` or
+`--weather clear`, and combine with the other gates freely). Judge:
+grass tufts grounded with tips waving coherently, storm density/lean vs
+rain, clear-mode motes, no double grass/rain from the mesh path. Then
+close #9 and commit when asked. #7 (Veyrath-backed continuous world) is
+the remaining child ticket before #10.
+
+## #8 follow-up: crisp viewport + doubled player + fullscreen-native (2026-10-25)
+
+User live verdicts on `--continuous-actors`, two rounds:
+
+1. "Display is very lowres" — measured ~12x19 px cells vs the ~6x10 native
+   atlas (cell_px 10): the authored-grid cap stretched glyphs by a
+   non-integer ~1.85x on a maximized window. Fixed `fitted_viewport` to
+   snap enlarging scales to integer texel factors (test-enforced; pointer
+   fitting shares the function), and fixed the latent DPI defect (window
+   sized LOGICAL, atlas rasterized PHYSICAL — `resumed` now rebuilds both
+   atlases at `cell_px * window.scale_factor()`; no-op at 1.0).
+2. "Now it's not fullscreen" — the snap produced crisp-but-margined
+   content; the user wants edge-to-edge fill AND crisp glyphs. Fix: `play`
+   now defaults to **fullscreen-native** (`width_cells/height_cells = 0`
+   → borderless fullscreen, logical grid derived from the surface at
+   exactly one atlas texel per pixel — zero resampling, zero margins).
+   `--window` keeps the authored 160x56 comparison window with its capped
+   grid. Density safety: `camera3` scales focal with the grid (clamped
+   2.25) keeping the visible world span ~constant, so the sliding
+   coverage margins (±34 x / ±46 z) still cover the frustum; a new
+   `--check` density contract CPU-rasterizes the same world at 160x56 and
+   320x108 and requires world-ink ratio ≥ 1.6 (guards the historical
+   fullscreen sparse-band regression headlessly).
+3. Player doubled per request: layered player scale 1.25 -> 2.5
+   (character clamp 2.0 -> 3.0; monsters/NPCs unchanged).
+
+Verification (2026-10-25): fmt; workspace tests 294; tools content; both
+clippy orders -D warnings (one unnecessary-cast fixed); present-feature
+engine lib tests 181 (viewport snap contract); `play --check` (both gates +
+density contract); 30- and 70-frame fullscreen Vulkan smokes on the GTX
+1650 — the 70-frame run reports `grid=240x83` (surface-derived, not
+capped), 5772 continuous instances, first-minute profile build=8.1ms
+world3d=7.6ms compose=0.2ms inst=0.2ms (includes shader warmup; the
+on-screen FPS EMA readout is the live judge). `git diff --check` clean
+(standing LF/CRLF warnings only). All uncommitted; `latest.patch`
+untouched.
+
+Next action: user re-verdict, default command (fullscreen is now the
+default, no size flags): `cargo run --locked -p ascii-mmorpg-engine
+--features present --release --example play -- --continuous-actors` —
+expect edge-to-edge crisp glyphs at native density, player twice the
+size, readable FPS counter; watch whether per-frame CPU cost at the
+fullscreen grid holds 60 FPS on their machine (if not, the next bounded
+slice is HUD/scene build-cost scaling with grid area). Then close #8 on
+acceptance and commit when asked.
+
+## Ticket #5 closed on live verdict + ticket #8 layered characters (2026-10-25)
+
+### Ticket lifecycle
+
+- The user gave the live visual verdict on the torch/sun showcase: happy
+  with the particles; flame/stick/sun aesthetics rough but accepted as
+  example-only art (the final game's torch comes from the in-world play
+  meshes/primitives and no sun exists in-game). #5 closed with that verdict.
+
+### Ticket #8 implementation (uncommitted)
+
+- New `engine/src/character.rs` (public `character` module): layered
+  animated glyph characters for the continuous canvas. `CharacterSpec`
+  (palette + scale + optional aura) + `CharacterMotion` (gait / action /
+  idle / facing / t) + `push_character`/`compose_character`. Layers: ground
+  shadow (yaw-oriented, breathing), orbiting aura motes (time-keyed, radial
+  gradient + emission), legs + arms (gait-keyed sub-cell swing), torso
+  (double-stride bob + idle breathing + stride lean), head (un-bobbed
+  shoulder line + idle drift, radial gradient), weapon (action-arc only,
+  hung from the un-bobbed shoulder so gait cannot leak into the swing),
+  shield (counter-lean), and two seeded idle motes (fade before nameplate
+  height). `CHARACTER_PRIMITIVE_BUDGET = 32`; presentation-only, never sees
+  snapshots or authoritative positions. Six lib tests: budget, determinism,
+  gait/action/aura layer independence (the gait-bob leak into the weapon and
+  the shared-`·` aura/mote ambiguity were both caught and fixed by these
+  tests), full appearance-channel coverage (sub-cell/scale/rotation/
+  gradients/opacity/emission), and sampled depth order (shadow < torso <
+  weapon).
+- `play.rs`: new `--continuous-actors` spec gate (mirrors `--continuous-torch`).
+  When on, `world_meshes` skips mesh humanoids + shadow decals and records
+  smoothed foot anchors (`NativeActorAnchor`: pos/kind/skeleton/is_player/
+  phase); `continuous_scene` composes `character::` layers at the fractional
+  projections (palettes mirror the mesh dispatch: player lime+gold aura /
+  skeleton bone / mossling green / herbalist cyan; player uses gait_phase,
+  entities idle). Nameplate label layer stays composed in both paths.
+  Lighting ownership is now claimed by EITHER gate
+  (`continuous_bloom_owns_world_lighting = torch || actors`), and
+  `active_lights` drops legacy point lights under the same condition so no
+  configuration double-lights. The torch continuous-scene builder moved into
+  `push_native_torches` (inherent LocalGame methods, beside the new
+  `push_layered_actors`).
+- `play --check` extended: actors gate drops lights, mesh count shrinks vs
+  legacy, bloom ownership claimed, torso/weapon/shadow/mote glyphs + player
+  radial aura present in the continuous scene, nameplate label layer still
+  composed, and the authoritative sim reaches identical player positions on
+  both paths after the same tick sequence (AC #4).
+
+### Exact changed paths (this session, all uncommitted)
+
+- `engine/src/character.rs` (new)
+- `engine/src/lib.rs` (pub mod character)
+- `engine/examples/play.rs` (gate, anchors, helpers, ownership, check, docs)
+- `AGENTS.md` (engine bullet: character module + actor gate)
+- `docs/SESSION_HANDOFF.md` (this section + TODO checklist)
+- (earlier this session, same worktree) `engine/examples/torch.rs` — ticket
+  #5 showcase, now closed as accepted
+
+### Verification (2026-10-25, Windows)
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo test --locked --workspace`: passed — 294 tests total, 0 failures
+  (includes the 6 new character tests).
+- `cargo run --locked -p ascii-mmorpg-tools -- content`: passed — 11
+  definitions.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: passed
+  (after removing a dead draft helper the lib-test target flagged).
+- `cargo clippy --locked -p ascii-mmorpg-engine --features present
+  --examples -- -D warnings`: passed.
+- `cargo test --locked -p ascii-mmorpg-engine --features present --lib`:
+  passed — 181 tests.
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example
+  play -- --check`: passed (torch + layered-actor gate contracts).
+- 30-frame Vulkan smoke runs on the NVIDIA GeForce GTX 1650 passed for
+  `--continuous-actors` alone and combined with `--continuous-torch`.
+- `git diff --check`: passed (standing LF/CRLF warnings only).
+- `latest.patch` remains pre-existing, untracked, and untouched.
+
+### Ticket status and next action
+
+Ticket #8 is implemented and verified; the issue stays OPEN pending the
+user's live visual acceptance of `--continuous-actors` (silhouette
+readability, walk swing, weapon arc, player aura, nameplates intact) — run
+`cargo run --locked -p ascii-mmorpg-engine --features present --release
+--example play -- --continuous-actors`. Then close #8 and commit when the
+user asks. Remaining renderer tickets: #9 (weather/environmental particles)
+and #7 (Veyrath-backed continuous world), then #10 (play-path integration)
+unblocks.
+
+## Ticket lifecycle + ticket #5 torch and sun showcase (2026-10-25)
+
+### Ticket lifecycle actions
+
+- The user's intended push of e75f6f2 had not reached origin (local main was
+  ahead 1; `git ls-remote` showed origin/main still at 84b441d). Pushed it now:
+  `84b441d..e75f6f2 main -> main`.
+- Closed #4 (floating-point emission and bloom) and #6 (Veyrath visual data
+  model) with comments referencing e75f6f2 and the verification record. That
+  unblocks #5, #7, #8, #9; #10 stays blocked by all four.
+
+### Ticket #5 implementation (new file, uncommitted)
+
+- Added `engine/examples/torch.rs`, the isolated black-void torch/sun showcase
+  built on the continuous primitive + float bloom pipeline. It opts into
+  `continuous_bloom_owns_world_lighting` — the standalone acceptance gate the
+  in-world `--continuous-torch` migration waits on.
+- Torch: wooden stick + iron bowl anchors; four-glyph flame core (outer
+  amber→deep-red vertical `▲` teardrop with skew/sway, amber `*` tongue,
+  white-hot radial `o` core, jittering `·` spark); 12 seeded embers on curved
+  sine arcs (per-index lifetimes, shrink/fade/rotate, 5 glyphs, row-crossing
+  rise, weak trailing emissions); 5 faint non-emissive `░` smoke puffs.
+- Sun: white-hot radial `■` core (strongest emitter, strength 1.35/radius 9.5)
+  + 4 breathing radial `O` petals in a 2:1-compensated ring; two seeded ray
+  rings (16 outer + 6 inner) where length, width, tip width, opacity, scale,
+  and rotation all vary per ray and pulse over time, with the whole corona
+  drifting; glyph scale tracks authored ray length until the dedicated ray
+  renderer lands; 10 spiral-ejecta flare particles (inner 4 emissive).
+- Everything is a pure function of `t` plus fixed per-index seeds (`unit()`
+  hash, same construction as `fx::hash_unit`), so presenter sampling and
+  emission derivation stay deterministic and loopable.
+- `--check` asserts: determinism at 4 times; primitive budget ≤
+  MAX_NATIVE_PRIMITIVES and emission sources ≤ MAX_SOURCE_COUNT at 5 phases;
+  ≥3 gradient glyphs at the flame anchor with mixed radial/vertical axes; ≥4
+  core-strength emitters; ≥20 rays with ≥6/5/12/6/6 distinct
+  lengths/widths/rotations/opacities/scales; ≥20 particles with ≥4 glyphs and
+  real sampled motion (row crossings, fades, shrinks, spins between t=0.5 and
+  t=1.6); ≥10 bloom sources incl. one sun-scale emitter; zero legacy glow in
+  the composed captions frame; plus a 60-frame build+sample timing report
+  (deterministic budget proxy for the 60 FPS smoke).
+
+### Exact changed paths (this session, all uncommitted)
+
+- `engine/examples/torch.rs` (new)
+- `AGENTS.md` (engine bullet: torch showcase registered)
+- `docs/SESSION_HANDOFF.md` (this section + TODO checklist)
+
+### Verification (2026-10-25, Windows)
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo test --locked --workspace`: passed — 16 suites, 0 failures (engine
+  143, client, shared 16, bot/tools/doc suites).
+- `cargo run --locked -p ascii-mmorpg-tools -- content`: passed — 11
+  definitions.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: passed.
+- `cargo clippy --locked -p ascii-mmorpg-engine --features present --examples
+  -- -D warnings`: passed (lints the new example's real cfg).
+- `cargo check --locked -p ascii-mmorpg-engine --features present --examples`:
+  passed.
+- `cargo test --locked -p ascii-mmorpg-engine --features present --lib`:
+  passed — 175 tests.
+- `cargo run --locked -p ascii-mmorpg-engine --features present --example
+  torch -- --check`: passed — 60 frames built+sampled, peak 61 primitives,
+  70–84 µs/frame (debug), 24 bloom sources.
+- 60 FPS Vulkan smoke: `PRESENT_PROFILE=1 ... --release --example torch --
+  --frames 180` on the NVIDIA GeForce GTX 1650 — 180 frames presented,
+  per-frame build ~19µs / compose ~22µs / inst ~8µs, 106 continuous
+  instances, mode Continuous, grid 72x26.
+- `git diff --check`: passed.
+- `latest.patch` remains pre-existing, untracked, and untouched.
+
+### Ticket status and next action
+
+Ticket #5 is implemented and verified; the issue stays OPEN pending the user's
+live visual acceptance (an explicit AC). Next action: user runs `cargo run
+--locked -p ascii-mmorpg-engine --features present --release --example torch`
+and judges the flame/sun cores, ray variety, particle motion, and bloom-over-
+dark-void; then close #5 (and optionally commit). Next unblocked tickets after
+that: #8 animated layered characters, #9 weather and environmental effects,
+#7 Veyrath-backed continuous world.
+
 ## Completed: ticket #4 review fixes and ticket #6 visual data slice (2026-10-25)
 
 ### Root causes fixed
@@ -1189,6 +2037,139 @@ The latest read-only GPU review identified the smallest high-value slice:
 6. **Defer more grass geometry** — crossed grass blades now exist. More instances could multiply cost under 4× SSAA; profile first.
 
 ## Active TODO checklist
+- [ ] NEW 2026-10-25 (video mimicry plan — analysis DONE, slices pending):
+  S1 per-partition pitch scale (presenter `frame_continuous_instances`
+  honors a partition pitch for cell quads; modal UI ~1.25, rain backdrop
+  <1) → S2 letter-built multi-glyph trees/props at 0.55 sub-cell pitch
+  (`veyrath_world`) → S3 camera-follow ease-in/cruise/ease-out + walk
+  trail glyphs → S4 FX pack (concentric rings + spiral arcs + shockwave
+  arc + ember speckle, ~1.4s+1s profile) → S5 inventory-style modal
+  (dimmed world + ASCII rain + item sprites, hard 1-frame open) → S6
+  optional perspective row compression. Start at S1; see
+  `docs/VIDEO_MIMICRY_PLAN.md` for measured targets and acceptance.
+- [x] NEW 2026-10-25 (torch-lighting model fix per the second external
+  review): tone-mapped bloom response in the continuous shader (soft
+  energy curve, no additive clamp; contract-test-pinned), ONE coherent
+  torch light + small local glows in `engine::flame` (per-torch emission
+  ~5.1 → ~1.8; structure test), world-cell light receivers (faint warm
+  fill in glyph gaps inside strong fields, void stays black, ink
+  compositing unchanged), and a CPU-BloomField profile contract
+  (monotonic falloff, core dominance, warm hue, near-black far field).
+  fmt, 318 workspace tests, 207 present-feature tests, both clippys,
+  three --checks, play + showcase Vulkan smokes — all green. Knobs for
+  the user's live verdict: shader exposure 1.7, receiver fill 0.38,
+  torch light 1.05/radius 5.2. #10 open pending verdicts; fullscreen-60
+  FPS + client terminal map remain the two large open slices.
+- [x] NEW 2026-10-25 (review block 2 — remaining items completed on the
+  user's "complete them now"): stage clearance (SceneSource::stage_anchors
+  + presenter dithered world-cell suppression + test); weather fog bands
+  + deterministic storm lightning (Wash) + tests; ONE shared `engine::
+  flame` builder used by play AND the showcase + flood bound; shared
+  `engine::fx_timeline` phase model behind play's FX meshes + retention;
+  labels repartitioned as UI ink (non-camera partition, painted after
+  natives, --check-enforced); presenter warns once on emissive natives
+  without bloom ownership; atlas presentation helpers moved shared→
+  client. fmt, 317 workspace tests, 206 present-feature tests, both
+  clippys, three --checks, default/storm/legacy Vulkan smokes — all
+  green. Remaining open (large standalone slices only): fullscreen-60FPS
+  world3d WGSL resolve; client terminal map typed re-render. #10 open
+  pending live verdicts.
+- [x] NEW 2026-10-25 (external review fixes, top block): native-layer
+  paint order fixed (world cells → natives → UI cells, regression-tested
+  — natives can no longer occlude HUD/inventory/map captions); per-system
+  lighting fallback (legacy torch keeps point lights in hybrid configs,
+  glow layer suppressed only for torch-legacy-under-ownership, --check
+  hybrid contracts added); ▀ shadow glyph added to the atlas; map caption
+  no longer claims ESC closes it; weather generation bounded at budget
+  inside the lattice scans; veyrath_world authors in visual priority
+  order + truncates to its budget via new ContinuousScene::truncate. All
+  checks green (309 workspace, 197 present-feature, both clippys, three
+  --checks, default + legacy Vulkan smokes). Review's remaining P0/P1/P2
+  items recorded as follow-up slices (quiet-radius ground, world labels,
+  FX timelines, fog/lightning, fullscreen 60 FPS, atlas move). Ticket #10
+  still open: flame re-verdict + integrated default + performance item.
+- [x] NEW 2026-10-25 (ticket #10 play-path integration): the continuous
+  renderer is now play's DEFAULT (torch bloom + layered actors + weather
+  together; `--legacy`/`--legacy-torch`/`--legacy-actors`/
+  `--legacy-weather` fallbacks; `--grid` unchanged; nothing deleted
+  yet), plus the `M` Veyrath world-map modal (input frozen, server
+  ticking, caption frame + native world scene). --check extended with
+  default-mode and map-modal contracts. All checks green (309 tests,
+  both clippys, 196 present-feature). 60 FPS AC: authored window ✓
+  (12ms/frame); fullscreen-native 240×83 ≈ 51 FPS with world3d 4x-SSAA
+  as the documented lever. #7 closed earlier this session. Ticket #10
+  open pending the user's live acceptance of the integrated default;
+  after that: retirement slice + optional world3d optimization.
+- [x] NEW 2026-10-25 (ticket #7 Veyrath-backed continuous world): added
+  public `engine::veyrath_world` (provisional percent → grid projection,
+  terrain-keyed region carpets, river polylines with shimmer, dashed
+  roads between resolved nodes, faction-coloured settlements, landmark
+  marks, Millhaven starter ring; ≤900 primitives; 9 lib tests incl. the
+  provisional-coordinates guard) and `engine/examples/world.rs`
+  (showcase, `--check`, 180×74 authored window, no bloom ownership).
+  fmt, 309 workspace tests, content, both clippy orders, 196
+  present-feature tests, world/play checks, and a 70-frame Vulkan smoke
+  (grid 180×71, 422+caption instances) all passed. #9 closed earlier
+  this session. Ticket #7 stays open pending the user's live visual
+  acceptance; after it closes, #10 (play-path integration) is the last
+  open ticket.
+- [x] NEW 2026-10-25 (ticket #9 weather and environmental effects): added
+  public `engine::weather` (world-anchored grass/rain/mote records,
+  coherent gust field, non-linear seeded rain paths, clear/rain/storm
+  profiles, density scalar, ≤512 glyphs, 6 lib tests — the tests caught a
+  per-cell phase jitter bug and a tip-offset sampling bug) and the `play
+  --continuous-weather` gate (mesh grass/rain skipped, same-camera
+  projection, check contracts incl. Clear-mode mote swap + authority
+  equality). fmt, 300 workspace tests, content, both clippy orders, 187
+  present-feature tests, play --check (3 gates), and 70-frame fullscreen
+  Vulkan smokes (storm-only + all gates) all passed. #8 closed earlier
+  this session. Ticket #9 stays open pending the user's live visual
+  acceptance; commit pending user call. Next open child: #7, then #10
+  unblocks.
+- [x] NEW 2026-10-25 (#8 follow-up round 2: fullscreen-native): after the
+  integer-snap fix produced crisp-but-margined content ("now it's not
+  fullscreen"), `play` now defaults to borderless fullscreen with a
+  surface-derived logical grid at exact 1x atlas density (edge-to-edge,
+  zero resampling); `--window` keeps the authored 160x56 comparison
+  window. New `--check` density contract (160x56 vs 320x108 world-ink
+  ratio ≥ 1.6) guards the old sparse-band regression. fmt, 294 workspace
+  tests, content, both clippys, 181 present-feature tests, play --check,
+  and 30/70-frame fullscreen Vulkan smokes (grid=240x83, 5772 instances)
+  all passed. Awaiting the user's re-verdict before closing #8.
+- [x] NEW 2026-10-25 (#8 follow-up: crisp viewport + doubled player):
+  diagnosed the "lowres" report as non-integer viewport stretching of the
+  capped 160x56 grid (measured ~12x19 px cells vs the 10x16 atlas at 96
+  DPI). `fitted_viewport` now snaps enlarging scales to integer texel
+  factors (test-enforced), the presenter rebuilds its atlases at the
+  window scale factor (latent DPI defect), and the layered player doubled
+  to 2.5. fmt, 294 workspace tests, content, both clippys, 181
+  present-feature tests, play --check, and a 30-frame Vulkan smoke all
+  passed. Awaiting the user's re-verdict before closing #8.
+- [x] NEW 2026-10-25 (ticket #8 layered characters): added public
+  `engine::character` (layered glyph characters, per-layer motion channels,
+  ≤32 primitives, 6 lib tests) and the `play --continuous-actors` gate
+  (mesh silhouettes skipped, anchors projected fractionally, palettes mirror
+  the mesh dispatch, nameplates kept, bloom ownership = torch OR actors,
+  no double lighting, sim untouched). `play --check` asserts the full
+  contract incl. authority equality; fmt, workspace tests (294), content,
+  both clippy orders, present-feature engine tests (181), and 30-frame
+  Vulkan smokes (actors-only + combined) all passed. #5 closed earlier this
+  session on the user's live verdict. Ticket #8 stays open pending the
+  user's live visual acceptance; commit pending user call.
+- [x] NEW 2026-10-25 (ticket #5 torch and sun showcase): added
+  `engine/examples/torch.rs` — isolated black-void showcase on the continuous
+  primitive + float bloom pipeline, opting into bloom-owned world lighting
+  (the standalone acceptance gate for the in-world `--continuous-torch`
+  migration). Multi-glyph flame with vertical+radial gradients, radial sun
+  core + two seeded ray rings (length/width/tip/opacity/scale/direction
+  variety), seeded curved ember/smoke/flare particles with real sampled
+  motion, deterministic `unit()` seeding. `--check` contracts (determinism,
+  budgets, gradient/ray/particle variety, bloom readability, zero legacy
+  glow) pass; fmt, workspace tests (16 suites), content validation, both
+  clippy orders, present-feature engine tests (175), and the 180-frame 60 FPS
+  Vulkan smoke on the GTX 1650 all passed. e75f6f2 was pushed to origin/main
+  (the user's earlier push had not landed); #4 and #6 closed. Ticket #5 stays
+  open pending the user's live visual acceptance; commit pending user call.
 - [x] NEW 2026-10-23 (ticket #4 floating-point emission/bloom): added the
   bounded `EmissionSource`/CPU reference seam plus a real GPU `Rgba32Float`
   emission/blur/composite field. Continuous composition avoids legacy 8-bit
