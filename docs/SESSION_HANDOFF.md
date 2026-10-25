@@ -2,7 +2,49 @@
 
 Updated: 2026-10-25. This is the resumable engineering record, not a full transcript.
 
-## Video-mimicry S2: letter-built trees (2026-10-25, latest)
+## Video-mimicry S3: camera-follow glide + walk trails (2026-10-25, latest)
+
+S2 pushed as `7a952df`. S3 landed next: the reference's measured camera
+scroll shape and walker motion-streaks.
+
+1. **`engine::follow`** (new module): `FollowCam` — first-order glide
+   (response 8/s ⇒ 90% of cruise in ~0.29s ≈ the measured 0.4s ease-in;
+   settle < 0.05 cells by 0.5s), teleport snap at 4.0 cells, seeded
+   start, builder clamps (response 1..=30, snap ≥ 0.5, NaN-safe). Three
+   tests pin the reference windows: 90% cruise ≤ 0.4s, never outruns the
+   walker (no overshoot), settles ≤ 0.5s without passing the target.
+   play `camera3` swapped to `follow_cam.advance(target, dt)` — same
+   response/snap the inline math used, zero behavior change, now
+   test-pinned and reusable.
+2. **`character::push_walk_trail`**: three fading `~` streaks BEHIND the
+   movement heading (sign-checked in test), growing distance, falling
+   opacity/scale, ground-ink depth 0.02, no emission, deterministic
+   seed wobble. Test covers trailing direction, per-streak fade order,
+   and the spent-trail (fade 0 → no glyphs) case.
+3. **Play wiring**: `NativeActorAnchor` gained `vel` — finite-difference
+   WORLD velocity of the smoothed player/entity anchors across frames
+   (`last_player_anchor` + `prev_entity_pos` state). `push_layered_actors`
+   projects a point 60ms ahead of the velocity to get the SCREEN-space
+   heading and draws trails for speed > 0.4 cells/s (fade = speed/2.5).
+   `--check`: actors-only game (weather off — fog bands also use `~`),
+   24 × 50ms frames with W held → trails present and ≤ 6 (cap 3/actor);
+   24 frames idle → zero `~`. NOTE: check games must tick in ≤50ms steps
+   (`KinematicMotion::update` clamps dt) — coarse check frames freeze
+   the walker, which is why the first attempt showed no movement.
+
+Verified: fmt; both clippys `-D warnings`; workspace tests 16 crates ok
+(engine lib 181: +3 follow, +1 trail); present lib 216; tools content
+11; play/world/torch `--check`s; Vulkan smoke 90 frames. Also
+investigated `bridge::camera_follows_the_player` failing under a
+filtered test run: pre-existing order-dependence (fails alone at
+`e75f6f2` too, passes in the full suite) — NOT a session regression;
+noted for a later test-isolation cleanup.
+
+Next: **S4 FX vocabulary pack** (concentric particle rings + spiral arcs
++ ground shockwave arc + ember speckle, ~1.4s heavy + ~1s ease-out decay)
+per `docs/VIDEO_MIMICRY_PLAN.md`.
+
+## Video-mimicry S2: letter-built trees (2026-10-25)
 
 S1 (per-partition pitch) pushed as `19ad8a0`. S2 landed next: the
 reference's trees — 3–6-row letter-built canopies, per-tree variety,
@@ -2109,15 +2151,28 @@ The latest read-only GPU review identified the smallest high-value slice:
 6. **Defer more grass geometry** — crossed grass blades now exist. More instances could multiply cost under 4× SSAA; profile first.
 
 ## Active TODO checklist
-- [x] NEW 2026-10-25 (video-mimicry S2 DONE): `engine::props` letter-built
-  tree builder (3 habits, ≤24 prims, coherent sway, sub-cell pitch) +
-  play `continuous_trees` gate default ON with `--legacy-trees`
-  fallback, distance-scaled sprites via `project_frac_depth`,
-  truncation-priority push order (torches→trees→actors→weather),
-  `--check` canopy on/off contract, raster tris 1951→1134. Full battery
-  green (fmt, both clippys, workspace 16 crates, engine lib 177, present
-  lib 212, content, three --checks, two Vulkan smokes). S1 pushed as
-  `19ad8a0`; S2 commit follows.
+- [x] NEW 2026-10-25 (video-mimicry S3 DONE): `engine::follow` FollowCam
+  (test-pinned ease-in/cruise/ease-out windows, snap) wired into play
+  `camera3`; `character::push_walk_trail` fading `~` streaks behind
+  movers, driven by finite-difference world velocities on the actor
+  anchors; `--check` walk/idle trail contract (tick in ≤50ms steps —
+  motion clamps dt). engine lib 181, present lib 216, full battery green.
+  Also: `bridge::camera_follows_the_player` fails ONLY under filtered
+  runs at every commit including pre-session `e75f6f2` — pre-existing
+  test order-dependence, not a regression (cleanup candidate).
+- [ ] NEW 2026-10-25 (video mimicry plan — S4 next): S4 FX pack
+  (concentric rings + spiral arcs + shockwave arc + ember speckle,
+  ~1.4s+1s profile) → S5 inventory-style modal (dimmed world + ASCII
+  rain + item sprites, hard 1-frame open; reuse S1 pitch) → S6 optional
+  perspective row compression. See `docs/VIDEO_MIMICRY_PLAN.md` for
+  measured targets and acceptance.
+- [x] NEW 2026-10-25 (video-mimicry S2 DONE, pushed as `7a952df`):
+  `engine::props` letter-built tree builder (3 habits, ≤24 prims,
+  coherent sway, sub-cell pitch) + play `continuous_trees` gate default
+  ON with `--legacy-trees` fallback, distance-scaled sprites via
+  `project_frac_depth`, truncation-priority push order
+  (torches→trees→actors→weather), `--check` canopy on/off contract,
+  raster tris 1951→1134.
 - [x] NEW 2026-10-25 (video-mimicry S1 DONE, pushed as `19ad8a0`):
   `Partition::pitch_scale` + `with_pitch` (0.25..=4.0 clamp),
   continuous-only re-pitching around the partition origin in

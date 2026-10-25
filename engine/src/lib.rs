@@ -34,6 +34,7 @@ pub mod continuous;
 pub mod demo;
 pub mod emission;
 pub mod flame;
+pub mod follow;
 pub mod fx;
 pub mod fx_timeline;
 mod layer;

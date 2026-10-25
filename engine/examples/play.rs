@@ -576,7 +576,10 @@ fn real_main() -> Result<(), String> {
         click_target: Option<Point>,
         // Camera follow is presentation-only; orientation and scale are fixed
         // constants, while the smoothed focus follows the local player.
-        follow: Option<(f32, f32)>,
+        // Video mimicry S3: the glide profile (ease-in ~0.4s → cruise →
+        // ease-out ~0.5s) is `engine::follow`'s test-pinned shape — same
+        // response rate and snap distance the inline math used.
+        follow_cam: ascii_mmorpg_engine::follow::FollowCam,
         /// Entity render positions smoothed toward snapshot positions.
         smoothed: HashMap<u64, (f32, f32)>,
         /// Presentation-side combat FX state (observed from sim messages).
@@ -631,14 +634,21 @@ fn real_main() -> Result<(), String> {
         /// Smoothed foot anchors + roles captured by `world_meshes` on the
         /// gated path, consumed by `continuous_scene` the same frame.
         native_actor_anchors: Vec<NativeActorAnchor>,
+        /// Previous smoothed player anchor (walk-trail velocity, S3).
+        last_player_anchor: Option<(f32, f32)>,
+        /// Previous smoothed entity anchors (walk-trail velocity, S3).
+        prev_entity_pos: HashMap<u64, (f32, f32)>,
     }
 
     /// One gated-path actor record: where the layered glyph character is
     /// composed from (presentation-only; authoritative positions stay in the
-    /// simulation).
+    /// simulation). `vel` is the actor's smoothed WORLD velocity (cells/s)
+    /// captured from consecutive frames — consumed for walk-trail streaks
+    /// (video mimicry S3).
     #[derive(Clone)]
     struct NativeActorAnchor {
         pos: (f32, f32),
+        vel: (f32, f32),
         kind: EntityKind,
         skeleton: bool,
         is_player: bool,
@@ -719,7 +729,7 @@ fn real_main() -> Result<(), String> {
                 pending: Vec::new(),
                 click_path: VecDeque::new(),
                 click_target: None,
-                follow: None,
+                follow_cam: ascii_mmorpg_engine::follow::FollowCam::new(),
                 smoothed: HashMap::new(),
                 combat_fx: Vec::new(),
                 seen_combat_events: Vec::new(),
@@ -752,6 +762,8 @@ fn real_main() -> Result<(), String> {
                     z1: 0,
                 },
                 native_actor_anchors: Vec::new(),
+                last_player_anchor: None,
+                prev_entity_pos: HashMap::new(),
             }
         }
         /// Native flame/crackle primitives for the gated in-world torch
@@ -968,6 +980,39 @@ fn real_main() -> Result<(), String> {
                     motion,
                     anchor,
                 );
+                // Walk-trail streaks (video mimicry S3): fading `~` glyphs
+                // trail figures that are actually moving, in SCREEN space
+                // (project a point slightly ahead along the world velocity
+                // and take the screen-space heading). Ground ink: depth
+                // stays under the body layers, no emission.
+                let speed = actor.vel.0.hypot(actor.vel.1);
+                if speed > 0.4 {
+                    if let Some((ax, ay)) = project_frac(
+                        Vec3::new(
+                            actor.pos.0 + actor.vel.0 * 0.06,
+                            0.0,
+                            actor.pos.1 + actor.vel.1 * 0.06,
+                        ),
+                        camera,
+                    ) {
+                        let dir = (ay - anchor.y).atan2(ax - anchor.x);
+                        let trail_color = if actor.is_player {
+                            Rgb::new(95, 195, 75)
+                        } else if actor.skeleton {
+                            Rgb::new(205, 200, 185)
+                        } else {
+                            Rgb::new(75, 150, 65)
+                        };
+                        ascii_mmorpg_engine::character::push_walk_trail(
+                            scene,
+                            anchor,
+                            dir,
+                            (speed / 2.5).min(1.0),
+                            (actor.phase * 91.0) as u32,
+                            trail_color,
+                        );
+                    }
+                }
             }
         }
 
@@ -1104,18 +1149,7 @@ fn real_main() -> Result<(), String> {
                 snapshot.player.position.x as f32,
                 snapshot.player.position.y as f32,
             ));
-            let next = match self.follow {
-                None => target,
-                Some(f) => {
-                    let k = 1.0 - (-dt * 8.0).exp();
-                    if (target.0 - f.0).hypot(target.1 - f.1) > 4.0 {
-                        target
-                    } else {
-                        (f.0 + (target.0 - f.0) * k, f.1 + (target.1 - f.1) * k)
-                    }
-                }
-            };
-            self.follow = Some(next);
+            let next = self.follow_cam.advance(target, dt);
             let (sp, cp) = CAM_PITCH.sin_cos();
             let (sy, cy) = CAM_YAW.sin_cos();
             let fwd = Vec3::new(sy * cp, sp, cy * cp);
@@ -1675,8 +1709,16 @@ fn real_main() -> Result<(), String> {
                     player_scale,
                 ));
             } else {
+                // Walk-trail velocity (S3): finite difference of the smoothed
+                // player anchor across frames.
+                let vel = match self.last_player_anchor {
+                    Some(prev) if dt > 0.0 => ((player.0 - prev.0) / dt, (player.1 - prev.1) / dt),
+                    _ => (0.0, 0.0),
+                };
+                self.last_player_anchor = Some(player);
                 self.native_actor_anchors.push(NativeActorAnchor {
                     pos: player,
+                    vel,
                     kind: EntityKind::Player,
                     skeleton: false,
                     is_player: true,
@@ -1694,8 +1736,16 @@ fn real_main() -> Result<(), String> {
                 );
                 let idle_phase = t * 1.35 + entity.id as f32 * 0.37;
                 if native_actors {
+                    // Walk-trail velocity (S3): finite difference of the
+                    // entity's smoothed anchor across frames.
+                    let vel = match self.prev_entity_pos.get(&entity.id) {
+                        Some(prev) if dt > 0.0 => ((gx - prev.0) / dt, (gy - prev.1) / dt),
+                        _ => (0.0, 0.0),
+                    };
+                    self.prev_entity_pos.insert(entity.id, (gx, gy));
                     self.native_actor_anchors.push(NativeActorAnchor {
                         pos: (gx, gy),
+                        vel,
                         kind: entity.kind.clone(),
                         skeleton: entity.name.to_ascii_lowercase().contains("skeleton"),
                         is_player: false,
@@ -3287,6 +3337,55 @@ fn real_main() -> Result<(), String> {
             .ok_or("check: continuous scene missing without trees")?;
         if canopy(&no_tree_scene) != 0 {
             return Err("check: canopy glyphs must come only from the tree gate".into());
+        }
+
+        // Walk trails + follow profile (video mimicry S3): a walking player
+        // trails fading `~` streaks (weather off — fog bands also use `~` —
+        // so every `~` here is trail ink), and the follow camera is the
+        // engine's test-pinned glide (response 8/s, snap 4.0).
+        let mut trail_game = LocalGame::with_gpu3d(true);
+        trail_game.continuous_canvas = true;
+        trail_game.continuous_torch = false;
+        trail_game.continuous_weather = false;
+        trail_game.continuous_trees = false;
+        trail_game.held.insert(KeyCode::KeyW);
+        // Tick in frame-sized steps: `KinematicMotion::update` clamps dt to
+        // 50ms per call, so coarse check frames would freeze the walker.
+        for frame in 1..=24 {
+            trail_game.scene_at(frame as f32 * 0.05);
+        }
+        let trail_scene = trail_game
+            .continuous_scene(1.20)
+            .ok_or("check: continuous scene missing for trails")?;
+        let trail_count = trail_scene
+            .primitives()
+            .iter()
+            .filter(|p| match p.kind {
+                PrimitiveKind::Glyph { glyph } => glyph == '~',
+                _ => false,
+            })
+            .count();
+        if trail_count == 0 {
+            return Err("check: walking player must trail `~` streaks".into());
+        }
+        if trail_count > 6 {
+            return Err(format!(
+                "check: trail budget exceeded ({trail_count} streaks, cap 3/actor)"
+            ));
+        }
+        trail_game.held.clear();
+        for frame in 25..=48 {
+            trail_game.scene_at(frame as f32 * 0.05);
+        }
+        let idle_scene = trail_game
+            .continuous_scene(2.40)
+            .ok_or("check: continuous scene missing when idle")?;
+        if idle_scene
+            .primitives()
+            .iter()
+            .any(|p| matches!(p.kind, PrimitiveKind::Glyph { glyph: '~' }))
+        {
+            return Err("check: stationary player must not trail".into());
         }
 
         // Fixed-control path: D always sends the world-east intent regardless

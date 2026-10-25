@@ -289,6 +289,46 @@ pub fn compose_character(
     scene
 }
 
+/// Motion-trail streaks behind a moving figure (video mimicry S3): the
+/// reference captures show short fading `~` streaks trailing walking
+/// figures while the world scrolls. `dir` is the GRID-space movement
+/// direction (project the world velocity through the camera before
+/// calling), `fade` the trail's remaining life (1 → 0). Three glyphs at
+/// growing distance behind the anchor, opacity and scale falling with
+/// distance, deterministic in `seed`. No emission — trails are ground
+/// ink, not light sources.
+pub fn push_walk_trail(
+    scene: &mut ContinuousScene,
+    anchor: Point2,
+    dir: f32,
+    fade: f32,
+    seed: u32,
+    color: Rgb,
+) {
+    for i in 0..3u32 {
+        let back = (i + 1) as f32;
+        // Wobble spreads the streaks off the exact path line.
+        let wobble = ((seed.wrapping_add(i * 977)) as f32 * 0.13).sin() * 0.10;
+        let d = dir + wobble;
+        // BEHIND the mover: offset against the movement direction.
+        // Ground streaks foreshorten vertically: squash the y component.
+        let x = anchor.x - d.cos() * 0.8 * back;
+        let y = anchor.y - d.sin() * 0.45 * back;
+        let strength = (fade - 0.15 * back).max(0.0);
+        if strength <= 0.0 {
+            continue;
+        }
+        let size = (0.72 - 0.12 * back).max(0.3);
+        scene.push(Primitive::new(
+            PrimitiveKind::glyph('~'),
+            Transform2::new(Point2::new(x, y), 0.02)
+                .with_scale(Point2::new(size, size))
+                .with_rotation(d),
+            Material::new(color).with_opacity(strength),
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,5 +570,41 @@ mod tests {
             torso < weapon,
             "torso ({torso}) must sort under weapon ({weapon})"
         );
+    }
+
+    #[test]
+    fn walk_trails_fade_behind_the_anchor() {
+        let mut scene = ContinuousScene::new();
+        push_walk_trail(
+            &mut scene,
+            Point2::new(10.0, 10.0),
+            0.0, // moving +x: streaks must trail to the LEFT
+            1.0,
+            7,
+            Rgb::new(90, 190, 70),
+        );
+        let prims = scene.primitives();
+        assert_eq!(prims.len(), 3, "three streak glyphs");
+        let mut seen = Vec::new();
+        for p in prims {
+            assert!(matches!(p.kind, PrimitiveKind::Glyph { glyph: '~' }));
+            // Behind the anchor against the movement direction.
+            assert!(p.transform.position.x < 10.0);
+            seen.push((p.transform.position.x, p.material.opacity));
+        }
+        // Farther streaks are dimmer.
+        assert!(seen[0].1 > seen[1].1 && seen[1].1 > seen[2].1);
+        assert!(seen[0].0 > seen[1].0 && seen[1].0 > seen[2].0);
+        // A spent trail emits nothing.
+        let mut spent = ContinuousScene::new();
+        push_walk_trail(
+            &mut spent,
+            Point2::new(1.0, 1.0),
+            0.0,
+            0.0,
+            7,
+            Rgb::new(0, 0, 0),
+        );
+        assert_eq!(spent.primitives().len(), 0);
     }
 }
