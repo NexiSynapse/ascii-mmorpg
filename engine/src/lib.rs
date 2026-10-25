@@ -26,6 +26,7 @@
 
 mod anim;
 pub mod bridge;
+pub mod burst;
 mod cell;
 pub mod character;
 mod color;

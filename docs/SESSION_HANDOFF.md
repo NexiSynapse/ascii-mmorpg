@@ -2,7 +2,49 @@
 
 Updated: 2026-10-25. This is the resumable engineering record, not a full transcript.
 
-## Video-mimicry S3: camera-follow glide + walk trails (2026-10-25, latest)
+## Video-mimicry S4: burst vocabulary (2026-10-26, latest)
+
+S3 pushed as `961c294`. S4 landed: the reference's impact read —
+particle rings, not solid geometry — is now the default combat FX.
+
+1. **`engine::burst`** (new module): `push_burst(scene, anchor,
+   impact_age, radius, seed, scale, &BurstPalette)` composes three
+   staggered concentric rings (`*` hot inner with terrain-tinting
+   emission → `o` → `·`), two counter-winding spiral arms, a ground
+   shockwave arc that flashes out inside 0.5s, and 8 ember specks that
+   linger through decay. Heavy [`HEAVY_S`] 1.4s + ease-out decay
+   [`DECAY_S`] 1.0s (`alive()` exports the horizon), ground ellipse
+   squash 0.5 for the oblique camera, ≤[`BURST_BUDGET`] 64 prims,
+   deterministic in (seed, age). 3 tests: budget/vocabulary/lifetime
+   (nothing before impact or after heavy+decay), phase shape (shockwave
+   early only, rings expand ≥1.3×, decay fades opacity while embers
+   linger), determinism.
+2. **Play wiring**: `continuous_fx` gate DEFAULT ON, `--legacy-fx`
+   (and `--legacy`) restore the mesh core/ring/ember impact visuals.
+   Retention stretches to telegraph + heavy + decay ONLY on the native
+   path (legacy keeps FX_BURST_S); `world_meshes` skips the mesh impact
+   block when the gate is on (telegraph decals stay); `push_native_fx`
+   runs in `continuous_scene` after actors (push order torches → trees
+   → actors → bursts → weather; burst depth 0.015 rides over
+   trees/ground, under actor ink). Palette derives from the effect
+   colour exactly like the mesh path (hot = 0.65 toward white, ember =
+   0.4 toward warm orange).
+   `--check`: actors-off fx game (idle motes share `o`/`·` with the
+   vocabulary — count set must not collide), melee impact at 50ms-step
+   frames → peak 20..64 burst glyphs at impact_age 0.6, decay lingers
+   but < peak at 1.9, zero at 2.8, and zero with the gate off.
+
+Verified: fmt; both clippys `-D warnings`; workspace tests 16 crates
+ok; present lib 219; tools content 11; play/world/torch `--check`s;
+Vulkan smokes 90 frames native + 60 frames `--legacy-fx`.
+
+Next: **S5 inventory-style modal** (dimmed world + ASCII-rain backdrop
+at S1 small pitch + item ASCII-art sprites + bag grid, hard 1-frame
+open) per `docs/VIDEO_MIMICRY_PLAN.md`; then S6 optional perspective
+rows. After S5/S6 the mimicry plan is complete — remaining large
+slices stay fullscreen-60FPS and client terminal map.
+
+## Video-mimicry S3: camera-follow glide + walk trails (2026-10-25)
 
 S2 pushed as `7a952df`. S3 landed next: the reference's measured camera
 scroll shape and walker motion-streaks.
@@ -2151,7 +2193,29 @@ The latest read-only GPU review identified the smallest high-value slice:
 6. **Defer more grass geometry** — crossed grass blades now exist. More instances could multiply cost under 4× SSAA; profile first.
 
 ## Active TODO checklist
-- [x] NEW 2026-10-25 (video-mimicry S3 DONE): `engine::follow` FollowCam
+- [x] NEW 2026-10-26 (video-mimicry S4 DONE): `engine::burst` combat
+  burst vocabulary (rings/spiral/shockwave/embers, heavy 1.4s + decay
+  1.0s, ≤64 prims, ring emission tints terrain) + play `continuous_fx`
+  gate default ON with `--legacy-fx` fallback, native-path retention
+  stretch, mesh impact skip, `--check` peak/decay/spent/gate-off
+  contract. present lib 219, full battery green incl. both Vulkan
+  smokes.
+- [ ] NEW 2026-10-26 (video mimicry plan — S5 next): S5 inventory-style
+  modal (dimmed world + ASCII-rain backdrop at S1 small pitch + item
+  ASCII-art sprites + bag grid, hard 1-frame open) → S6 optional
+  perspective row compression. Then the mimicry plan is complete;
+  remaining large slices: fullscreen-60FPS, client terminal map. See
+  `docs/VIDEO_MIMICRY_PLAN.md` for measured targets and acceptance.
+- [x] NEW 2026-10-25 (video-mimicry S3 DONE, pushed as `961c294`):
+  `engine::follow` FollowCam (test-pinned ease-in/cruise/ease-out
+  windows, snap) wired into play `camera3`;
+  `character::push_walk_trail` fading `~` streaks behind movers, driven
+  by finite-difference world velocities on the actor anchors;
+  `--check` walk/idle trail contract (tick in ≤50ms steps — motion
+  clamps dt). engine lib 181, present lib 216, full battery green.
+  Also: `bridge::camera_follows_the_player` fails ONLY under filtered
+  runs at every commit including pre-session `e75f6f2` — pre-existing
+  test order-dependence, not a regression (cleanup candidate).
   (test-pinned ease-in/cruise/ease-out windows, snap) wired into play
   `camera3`; `character::push_walk_trail` fading `~` streaks behind
   movers, driven by finite-difference world velocities on the actor

@@ -625,6 +625,14 @@ fn real_main() -> Result<(), String> {
         /// (`engine::props`) at sub-cell pitch, distance-scaled; the mesh
         /// trunk+cone trees are the `--legacy-trees` fallback.
         continuous_trees: bool,
+        /// Spec gate for the native burst vocabulary (video mimicry S4).
+        /// DEFAULT ON: combat impacts render the reference particle
+        /// read — concentric rings + spiral arms + shockwave arc + ember
+        /// speckle (`engine::burst`), heavy ~1.4s + decay ~1s — with the
+        /// mesh core/ring/ember impact visuals skipped and the telegraph
+        /// ring still mesh-drawn. `--legacy-fx` restores the mesh-only
+        /// path (retention returns to FX_BURST_S).
+        continuous_fx: bool,
         /// World-map modal (`M`): swaps the frame for Veyrath world
         /// visuals composed from the shared model (issue #7/#10).
         map_open: bool,
@@ -679,6 +687,7 @@ fn real_main() -> Result<(), String> {
             .with_continuous_trees(
                 !legacy_all && !std::env::args().any(|arg| arg == "--legacy-trees"),
             )
+            .with_continuous_fx(!legacy_all && !std::env::args().any(|arg| arg == "--legacy-fx"))
         }
 
         /// Enable the spec-gated in-world torch migration (see the
@@ -709,6 +718,13 @@ fn real_main() -> Result<(), String> {
         /// `continuous_trees` field).
         fn with_continuous_trees(mut self, enabled: bool) -> Self {
             self.continuous_trees = enabled;
+            self
+        }
+
+        /// Enable the native burst vocabulary (see the `continuous_fx`
+        /// field).
+        fn with_continuous_fx(mut self, enabled: bool) -> Self {
+            self.continuous_fx = enabled;
             self
         }
 
@@ -755,6 +771,7 @@ fn real_main() -> Result<(), String> {
                 continuous_actors: true,
                 continuous_weather: true,
                 continuous_trees: true,
+                continuous_fx: true,
                 weather_window: ascii_mmorpg_engine::weather::CoverageWindow {
                     x0: 0,
                     x1: 0,
@@ -850,6 +867,41 @@ fn real_main() -> Result<(), String> {
                     scene_hash(tx as i32, tz as i32) ^ (i as u32),
                     scale,
                     t,
+                    &palette,
+                );
+            }
+        }
+
+        /// Native burst vocabulary (video mimicry S4): combat impacts
+        /// render `engine::burst`'s concentric rings + spiral arms +
+        /// shockwave arc + ember speckle through the continuous scene,
+        /// heavy ~1.4s then ~1s ease-out decay. The telegraph stays a
+        /// mesh ground decal; ring emission tints nearby terrain through
+        /// the bloom receivers. Depth 0.015 keeps bursts under actor ink
+        /// but over trees/ground.
+        fn push_native_fx(&mut self, scene: &mut ContinuousScene, t: f32, camera: &Camera3) {
+            let fx_list: Vec<bridge::SceneFx> = self.combat_fx.clone();
+            for fx in &fx_list {
+                let impact_age = t - fx.born_s - fx.telegraph_s;
+                if !ascii_mmorpg_engine::burst::alive(impact_age) {
+                    continue;
+                }
+                let Some((sx, sy)) = project_frac(Vec3::new(fx.origin.0, 0.0, fx.origin.1), camera)
+                else {
+                    continue;
+                };
+                let palette = ascii_mmorpg_engine::burst::BurstPalette {
+                    hot: mix(fx.color, Rgb::new(255, 255, 245), 0.65),
+                    ring: fx.color,
+                    ember: mix(fx.color, Rgb::new(255, 190, 80), 0.4),
+                };
+                ascii_mmorpg_engine::burst::push_burst(
+                    scene,
+                    Point2::new(sx, sy + HUD_H as f32),
+                    impact_age,
+                    fx.radius,
+                    (fx.born_s * 997.0).fract().abs() as u32 ^ 0x5701,
+                    1.0,
                     &palette,
                 );
             }
@@ -1201,11 +1253,20 @@ fn real_main() -> Result<(), String> {
             }
             // Retention follows the shared phase model (review
             // 2026-10-25 P1): one definition of when an effect ends.
+            // Video mimicry S4: on the native burst path the impact
+            // vocabulary runs heavy+decay (engine::burst), so retention
+            // stretches to cover it; the legacy mesh path keeps the
+            // original FX_BURST_S horizon.
             self.combat_fx.retain(|fx| {
+                let impact_s = if self.continuous_canvas && self.continuous_fx {
+                    ascii_mmorpg_engine::burst::HEAVY_S + ascii_mmorpg_engine::burst::DECAY_S
+                } else {
+                    bridge::FX_BURST_S
+                };
                 ascii_mmorpg_engine::fx_timeline::EffectTimeline::new(
                     fx.born_s,
                     fx.telegraph_s,
-                    bridge::FX_BURST_S,
+                    impact_s,
                     bridge::FX_CORE_S,
                 )
                 .is_live(t)
@@ -1895,6 +1956,13 @@ fn real_main() -> Result<(), String> {
                     // keeps the eased end-state until retention drops it
                     // (same visuals the raw age math produced).
                     EffectPhase::Impact { .. } | EffectPhase::Decay { .. } => {
+                        // Video mimicry S4: the native burst vocabulary
+                        // replaces the mesh impact visuals when the gate
+                        // is on (see `push_native_fx`); the telegraph
+                        // ring above still renders as ground decals.
+                        if self.continuous_canvas && self.continuous_fx {
+                            continue;
+                        }
                         let p = match timeline.phase(t) {
                             EffectPhase::Impact { progress } => progress,
                             EffectPhase::Decay { .. } => 1.0,
@@ -2021,6 +2089,7 @@ fn real_main() -> Result<(), String> {
                 && !self.continuous_actors
                 && !self.continuous_weather
                 && !self.continuous_trees
+                && !self.continuous_fx
             {
                 return None;
             }
@@ -2028,10 +2097,11 @@ fn real_main() -> Result<(), String> {
             let mut scene = ContinuousScene::new();
             // Push order is the truncation priority when the scene would
             // exceed the 1024-native cap (sample keeps the first
-            // pushed): torches → trees → actors → weather, so a crowded
-            // frame trims weather density before it ever drops figures
-            // or scenery. Paint order between natives is depth-driven
-            // (trees at depth 0 sit under flames and actors).
+            // pushed): torches → trees → actors → bursts → weather, so
+            // a crowded frame trims weather density before it ever
+            // drops figures, scenery, or combat reads. Paint order
+            // between natives is depth-driven (trees at depth 0 sit
+            // under flames and actors; bursts at 0.015 ride over both).
             if self.continuous_torch {
                 self.push_native_torches(&mut scene, _t, &camera);
             }
@@ -2040,6 +2110,9 @@ fn real_main() -> Result<(), String> {
             }
             if self.continuous_actors {
                 self.push_layered_actors(&mut scene, _t, &camera);
+            }
+            if self.continuous_fx {
+                self.push_native_fx(&mut scene, _t, &camera);
             }
             if self.continuous_weather {
                 self.push_native_weather(&mut scene, _t, &camera);
@@ -2717,6 +2790,7 @@ fn real_main() -> Result<(), String> {
         legacy_canvas.continuous_actors = false;
         legacy_canvas.continuous_weather = false;
         legacy_canvas.continuous_trees = false;
+        legacy_canvas.continuous_fx = false;
         legacy_canvas.scene_at(0.06);
         let (legacy_mesh_count, legacy_has_lights) = legacy_canvas
             .pending_world
@@ -3386,6 +3460,70 @@ fn real_main() -> Result<(), String> {
             .any(|p| matches!(p.kind, PrimitiveKind::Glyph { glyph: '~' }))
         {
             return Err("check: stationary player must not trail".into());
+        }
+
+        // Burst vocabulary (video mimicry S4): a melee impact on the
+        // native path renders ring/spiral/shockwave/ember glyphs through
+        // the continuous scene, lingers through heavy+decay with falling
+        // opacity, and is gone after it; the gate-off path renders none.
+        let burst_count = |game: &mut LocalGame, t: f32| -> usize {
+            game.continuous_scene(t)
+                .map(|scene| {
+                    scene
+                        .primitives()
+                        .iter()
+                        .filter(|p| match p.kind {
+                            PrimitiveKind::Glyph { glyph } => "*o·_.'".contains(glyph),
+                            _ => false,
+                        })
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        let mut fx_game = LocalGame::with_gpu3d(true);
+        fx_game.continuous_canvas = true;
+        fx_game.continuous_torch = false;
+        fx_game.continuous_weather = false;
+        fx_game.continuous_trees = false;
+        // Actors off: their idle motes share 'o'/'·' with the burst
+        // vocabulary, and this contract counts burst glyphs only.
+        fx_game.continuous_actors = false;
+        fx_game.key(KeyCode::KeyF, true);
+        fx_game.scene_at(0.06);
+        if fx_game.combat_fx.is_empty() {
+            return Err("check: F attack spawned no combat fx for the burst contract".into());
+        }
+        // Melee telegraph is 0: impact age == t - born.
+        for frame in 1..=12 {
+            fx_game.scene_at(0.06 + frame as f32 * 0.05);
+        }
+        let peak = burst_count(&mut fx_game, 0.66);
+        if !(20..=ascii_mmorpg_engine::burst::BURST_BUDGET).contains(&peak) {
+            return Err(format!(
+                "check: burst vocabulary missing or over budget at peak ({peak})"
+            ));
+        }
+        for frame in 13..=38 {
+            fx_game.scene_at(0.06 + frame as f32 * 0.05);
+        }
+        let decay = burst_count(&mut fx_game, 1.96);
+        if decay == 0 || decay >= peak {
+            return Err(format!(
+                "check: decay must linger but thin (peak {peak}, decay {decay})"
+            ));
+        }
+        for frame in 39..=56 {
+            fx_game.scene_at(0.06 + frame as f32 * 0.05);
+        }
+        let spent = burst_count(&mut fx_game, 2.86);
+        if spent != 0 {
+            return Err(format!(
+                "check: burst must end after heavy+decay ({spent} left)"
+            ));
+        }
+        fx_game.continuous_fx = false;
+        if burst_count(&mut fx_game, 0.66) != 0 {
+            return Err("check: burst glyphs must come only from the fx gate".into());
         }
 
         // Fixed-control path: D always sends the world-east intent regardless
