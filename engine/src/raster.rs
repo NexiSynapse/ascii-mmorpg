@@ -1516,9 +1516,10 @@ fn fill_tri(
 }
 
 /// Resolve one cell's 4x4 samples: material glyph by mean luminance and
-/// stable local variation, or a depth edge glyph where the block spans a
-/// step; distance-aware detail and fog throughout.
-/// `None` when no sample hit (void shows through).
+/// stable local variation, a depth edge glyph where the block spans a step,
+/// and — for partially covered blocks — positional sub-cell glyphs placed
+/// where the coverage actually sits; distance-aware detail and fog
+/// throughout. `None` when no sample hit (void shows through).
 pub(crate) fn resolve_cell(
     buf: &[Sample],
     w2: usize,
@@ -1532,9 +1533,25 @@ pub(crate) fn resolve_cell(
     let mut g = 0.0f32;
     let mut b = 0.0f32;
     let mut lum_sq = 0.0f32;
+    let mut max_lum = 0.0f32;
+    let mut max_r = 0.0f32;
+    let mut max_g = 0.0f32;
+    let mut max_b = 0.0f32;
     let mut normal_x = 0.0f32;
     let mut normal_y = 0.0f32;
     let mut normal_z = 0.0f32;
+    // Sub-cell detail accumulators: which samples hit (mask), where the ink
+    // sits (position-weighted luma), and per-channel second moments for the
+    // facet-normal / colour spread the detail channel reads.
+    let mut mask: u16 = 0;
+    let mut lum_x = 0.0f32;
+    let mut lum_y = 0.0f32;
+    let mut nx_sq = 0.0f32;
+    let mut ny_sq = 0.0f32;
+    let mut nz_sq = 0.0f32;
+    let mut r_sq = 0.0f32;
+    let mut g_sq = 0.0f32;
+    let mut b_sq = 0.0f32;
     let mut zmin = f32::INFINITY;
     let mut zmax = f32::NEG_INFINITY;
     let mut material_votes = [0u32; 9];
@@ -1551,9 +1568,24 @@ pub(crate) fn resolve_cell(
                 g += s.g;
                 b += s.b;
                 lum_sq += s.lum_sq;
+                mask |= 1 << (dy * SAMPLE_GRID + dx);
+                lum_x += s.lum * dx as f32;
+                lum_y += s.lum * dy as f32;
+                if s.lum > max_lum {
+                    max_lum = s.lum;
+                    max_r = s.r;
+                    max_g = s.g;
+                    max_b = s.b;
+                }
                 normal_x += s.normal_x;
                 normal_y += s.normal_y;
                 normal_z += s.normal_z;
+                nx_sq += s.normal_x * s.normal_x;
+                ny_sq += s.normal_y * s.normal_y;
+                nz_sq += s.normal_z * s.normal_z;
+                r_sq += s.r * s.r;
+                g_sq += s.g * s.g;
+                b_sq += s.b * s.b;
                 zmin = zmin.min(s.depth);
                 zmax = zmax.max(s.depth);
                 material_votes[s.material.index()] += 1;
@@ -1577,6 +1609,33 @@ pub(crate) fn resolve_cell(
     let variation = (lum_sq / n - mean_lum * mean_lum).max(0.0).sqrt();
     let view_normal = Vec3::new(normal_x / n, normal_y / n, normal_z / n).norm();
     let coverage = hits as f32 / (SAMPLE_GRID * SAMPLE_GRID) as f32;
+    let var = |sum: f32, sq: f32| (sq / n - (sum / n) * (sum / n)).max(0.0);
+    // Luma-weighted ink centre (falls back to the hits' geometric centre
+    // when the whole block is unlit, so black silhouettes still position).
+    let (mut centroid_x, mut centroid_y) = if lum > 1e-6 {
+        ((lum_x / lum - 1.5) / 1.5, (lum_y / lum - 1.5) / 1.5)
+    } else {
+        let (mut hx, mut hy) = (0.0f32, 0.0f32);
+        for dy in 0..SAMPLE_GRID {
+            for dx in 0..SAMPLE_GRID {
+                if mask & (1 << (dy * SAMPLE_GRID + dx)) != 0 {
+                    hx += dx as f32;
+                    hy += dy as f32;
+                }
+            }
+        }
+        ((hx / n - 1.5) / 1.5, (hy / n - 1.5) / 1.5)
+    };
+    centroid_x = centroid_x.clamp(-1.0, 1.0);
+    centroid_y = centroid_y.clamp(-1.0, 1.0);
+    let feat = CellDetail {
+        coverage,
+        variation,
+        mask,
+        centroid: (centroid_x, centroid_y),
+        normal_var: var(normal_x, nx_sq) + var(normal_y, ny_sq) + var(normal_z, nz_sq),
+        chroma_var: var(r, r_sq) + var(g, g_sq) + var(b, b_sq),
+    };
     let material = material_votes
         .iter()
         .enumerate()
@@ -1590,8 +1649,21 @@ pub(crate) fn resolve_cell(
     // 75% reduction turned most of the world into near-black punctuation at
     // the default orbit distance, so foreground objects lost their context.
     let dim = 1.0 - 0.52 * fog;
-    let to_u8 = |c: f32| (c / n * dim * 255.0).clamp(0.0, 255.0) as u8;
-    let fg = Rgb::new(to_u8(r), to_u8(g), to_u8(b));
+    // Hotspot retention: the cell mean washes a small bright feature (a
+    // glint, an ember, a torch-lit edge) into its dark surroundings. Bias
+    // the displayed energy toward the brightest sample so minor details
+    // keep ink; the quiet dark ground (max ≈ mean) is untouched.
+    const HOTSPOT: f32 = 0.22;
+    let mean_r = r / n;
+    let mean_g = g / n;
+    let mean_b = b / n;
+    let mix = |mean: f32, hot: f32| mean + (hot - mean) * HOTSPOT;
+    let to_u8 = |c: f32| (c * dim * 255.0).clamp(0.0, 255.0) as u8;
+    let fg = Rgb::new(
+        to_u8(mix(mean_r, max_r)),
+        to_u8(mix(mean_g, max_g)),
+        to_u8(mix(mean_b, max_b)),
+    );
     let edge = if zmax - zmin > opts.edge_step {
         let at = |i: usize| {
             if corner[i].is_finite() {
@@ -1614,35 +1686,83 @@ pub(crate) fn resolve_cell(
     } else {
         '\0'
     };
-    let glyph = select_glyph(
-        material,
-        mean_lum * dim,
-        edge,
-        fog,
-        coverage,
-        variation,
-        view_normal,
-        cx,
-        cy,
-    );
+    let shown_lum = (mean_lum + (max_lum - mean_lum).max(0.0) * HOTSPOT) * dim;
+    let glyph = select_glyph(material, shown_lum, edge, fog, feat, view_normal, cx, cy);
     // Foreground-only world contract: a hit cell may carry a coloured glyph,
     // but neither it nor the empty space around it paints a terrain fill.
     Some(Cell::new(glyph, fg, WORLD_BLACK))
 }
 
+/// Sub-cell detail features extracted from one cell's supersample block.
+/// Everything derives from the samples (never time), so glyph choices stay
+/// world-stable while the camera moves.
+#[derive(Clone, Copy)]
+struct CellDetail {
+    coverage: f32,
+    variation: f32,
+    /// One bit per supersample hit (row-major, `dy * SAMPLE_GRID + dx`).
+    mask: u16,
+    /// Luma-weighted ink centre as -1..1 offsets from the cell centre
+    /// (negative y = toward the cell top).
+    centroid: (f32, f32),
+    /// Facet-normal spread inside the cell — surface relief (seams, bark,
+    /// armour plating) that luminance alone cannot see.
+    normal_var: f32,
+    /// Per-channel colour spread — coloured detail with flat luminance
+    /// (moss on stone, ember tint) lives here.
+    chroma_var: f32,
+}
+
+/// Rows and columns the coverage mask spans (1..=SAMPLE_GRID each).
+fn mask_spans(mask: u16) -> (usize, usize) {
+    let row = (1u16 << SAMPLE_GRID) - 1;
+    let mut rows = 0u16;
+    let mut cols = 0u16;
+    for dy in 0..SAMPLE_GRID {
+        if mask >> (dy * SAMPLE_GRID) & row != 0 {
+            rows |= 1 << dy;
+        }
+        for dx in 0..SAMPLE_GRID {
+            if mask >> (dy * SAMPLE_GRID + dx) & 1 != 0 {
+                cols |= 1 << dx;
+            }
+        }
+    }
+    (rows.count_ones() as usize, cols.count_ones() as usize)
+}
+
+/// Mean ink column of the mask's top (dy < 2) or bottom half, if it has
+/// any hits — the two halves' columns decide a diagonal sliver's slant.
+fn half_col_mean(mask: u16, top: bool) -> Option<f32> {
+    let (mut sum, mut count) = (0.0f32, 0.0f32);
+    for dy in 0..SAMPLE_GRID {
+        if (dy < 2) != top {
+            continue;
+        }
+        for dx in 0..SAMPLE_GRID {
+            if mask & (1 << (dy * SAMPLE_GRID + dx)) != 0 {
+                sum += dx as f32;
+                count += 1.0;
+            }
+        }
+    }
+    (count > 0.0).then_some(sum / count)
+}
+
 /// Material-specific density and shape selection. The first-class edge
 /// strokes are retained for structural geometry, while organic materials use
 /// branching/cluster glyphs instead of a uniform global ramp. Coverage,
-/// supersample variance, view orientation, and fog all participate so close
-/// geometry gets fine texture while distant geometry simplifies deterministically.
+/// supersample variance (luminance, facets, colour), the ink's position
+/// inside the cell, view orientation, and fog all participate so close
+/// geometry gets fine texture while distant geometry simplifies
+/// deterministically.
 #[allow(clippy::too_many_arguments)]
 fn select_glyph(
     material: MaterialKind,
     luminance: f32,
     edge: char,
     fog: f32,
-    coverage: f32,
-    variation: f32,
+    feat: CellDetail,
     view_normal: Vec3,
     x: i32,
     y: i32,
@@ -1654,45 +1774,75 @@ fn select_glyph(
     let orientation =
         view_normal.z.abs() * 0.16 + view_normal.y.max(0.0) * 0.10 - view_normal.x.abs() * 0.04;
     let density = (luminance * 1.52 + orientation - fog * 0.08).clamp(0.0, 1.0);
-    let detail = (variation * 3.0 + coverage * 0.42 + (1.0 - fog) * 0.34).clamp(0.0, 1.0);
+    // Facet relief and colour spread widen the detail channel: a cell whose
+    // samples disagree about the surface normal or hue is textured even when
+    // its luminance is flat. Capped so the channel cannot pin at 1 and turn
+    // the jitter into noise.
+    let detail_level = (feat.variation * 3.0
+        + feat.coverage * 0.42
+        + (1.0 - fog) * 0.34
+        + (feat.normal_var * 2.5).min(0.35)
+        + (feat.chroma_var * 6.0).min(0.30))
+    .clamp(0.0, 1.0);
 
     if edge != '\0' {
         return edge_glyph(material, edge, hash, view_normal);
     }
 
+    // Sub-cell silhouette detail: when only part of the block is covered,
+    // place ink where the coverage actually sits instead of averaging the
+    // whole cell — limbs, blade tips, and silhouette edges gain sub-cell
+    // position resolution. Fully sample-driven, so it is deterministic and
+    // camera-stable like every other channel.
+    if feat.coverage < 0.5 && fog < 0.6 && !matches!(material, MaterialKind::Water) {
+        let (row_span, col_span) = mask_spans(feat.mask);
+        if col_span == 1 && row_span >= 2 {
+            return '|'; // tall sliver: trunk edges, limbs, pole arms
+        }
+        if row_span == 1 && col_span >= 2 {
+            return if luminance > 0.45 { '=' } else { '_' }; // flat ledge
+        }
+        if feat.coverage < 0.35 && row_span >= 2 && col_span >= 2 {
+            if let (Some(top), Some(bot)) = (
+                half_col_mean(feat.mask, true),
+                half_col_mean(feat.mask, false),
+            ) {
+                if (top - bot).abs() > 0.5 {
+                    return if top > bot { '/' } else { '\\' };
+                }
+            }
+        }
+        let bright = luminance > 0.42;
+        if feat.centroid.1 < -0.33 {
+            return if bright { '"' } else { '\'' }; // ink sits high
+        }
+        if feat.centroid.1 > 0.33 {
+            return if bright { ',' } else { '.' }; // ink sits low
+        }
+        if feat.coverage < 0.2 {
+            return if bright { ':' } else { '.' }; // centred speck
+        }
+        // Centred, chunkier partial coverage: fall through to the family.
+    }
+
     let family = material.glyphs();
-    let mut glyph = family_glyph(family, density, detail, fog, hash);
+    let mut glyph = family_glyph(family, density, detail_level, fog, hash);
     // A partially covered geometry cell should never disappear solely because
     // its density family begins with a space. The black void remains untouched;
     // this only gives a visible ink mark to actual silhouette coverage.
-    if glyph == ' ' && coverage >= 0.18 {
+    if glyph == ' ' && feat.coverage >= 0.18 {
         glyph = family.get(1).copied().unwrap_or(b'.') as char;
     }
 
-    // Near-facing structural facets get a stable directional cue even when
-    // their luminance is low. This is useful for trunks, walls, armor seams,
-    // and narrow props that occupy only a few supersample taps.
-    if detail > 0.68 && coverage < 0.48 {
-        match material {
-            MaterialKind::Bark if view_normal.y.abs() > 0.42 => {
-                glyph = if view_normal.x.abs() > view_normal.z.abs() {
-                    if hash & 1 == 0 {
-                        '/'
-                    } else {
-                        '\\'
-                    }
-                } else {
-                    '|'
-                };
-            }
-            MaterialKind::Stone | MaterialKind::Metal if view_normal.y.abs() > 0.55 => {
-                glyph = if hash & 1 == 0 { '_' } else { '=' };
-            }
-            MaterialKind::Water if view_normal.y > 0.45 => {
-                glyph = if hash & 1 == 0 { '~' } else { '-' };
-            }
-            _ => {}
-        }
+    // Near-facing water keeps its wave language even where coverage is
+    // partial (the positional slivers above exclude water so shorelines and
+    // crests keep reading as waves).
+    if detail_level > 0.68
+        && feat.coverage < 0.48
+        && matches!(material, MaterialKind::Water)
+        && view_normal.y > 0.45
+    {
+        glyph = if hash & 1 == 0 { '~' } else { '-' };
     }
     glyph
 }
@@ -1760,8 +1910,168 @@ fn cell_hash(x: i32, y: i32) -> u32 {
 mod tests {
     use super::*;
 
+    /// Partially covered blocks must place their ink where the coverage
+    /// sits: tall slivers become bars, thin diagonals get their slant, and
+    /// top/bottom-heavy ink lands as positioned punctuation.
+    #[test]
+    fn sparse_coverage_places_ink_at_sub_cell_positions() {
+        let normal = Vec3::new(0.0, 0.7, 0.7).norm();
+        let feat = |coverage: f32, mask: u16, cy: f32| CellDetail {
+            coverage,
+            variation: 0.1,
+            mask,
+            centroid: (0.0, cy),
+            normal_var: 0.0,
+            chroma_var: 0.0,
+        };
+        // bit(dy, dx): the coverage-mask bit for one supersample.
+        let bit = |dy: usize, dx: usize| 1u16 << (dy * SAMPLE_GRID + dx);
+        // Tall sliver (column 1, all rows) → bar.
+        let bar = (0..SAMPLE_GRID).fold(0u16, |m, dy| m | bit(dy, 1));
+        assert_eq!(
+            select_glyph(
+                MaterialKind::Metal,
+                0.3,
+                '\0',
+                0.1,
+                feat(0.25, bar, 0.0),
+                normal,
+                3,
+                5
+            ),
+            '|'
+        );
+        // Flat sliver (row 2, all columns) → ledge.
+        let flat = (0..SAMPLE_GRID).fold(0u16, |m, dx| m | bit(2, dx));
+        assert_eq!(
+            select_glyph(
+                MaterialKind::Stone,
+                0.3,
+                '\0',
+                0.1,
+                feat(0.25, flat, 0.0),
+                normal,
+                3,
+                6
+            ),
+            '_'
+        );
+        // Thin diagonal: top half's ink right of the bottom half's → '/'.
+        let diag = bit(0, 2) | bit(0, 3) | bit(3, 0) | bit(3, 1);
+        assert_eq!(
+            select_glyph(
+                MaterialKind::Bark,
+                0.3,
+                '\0',
+                0.1,
+                feat(0.25, diag, 0.0),
+                normal,
+                3,
+                7
+            ),
+            '/'
+        );
+        // Ink sitting high/low lands as positioned punctuation, not a family
+        // average (masks hit rows 0-1 / rows 2-3 on the left columns so no
+        // sliver shape applies).
+        let high = bit(0, 0) | bit(1, 1);
+        let low = bit(2, 0) | bit(3, 1);
+        let high_glyph = select_glyph(
+            MaterialKind::Earth,
+            0.3,
+            '\0',
+            0.1,
+            feat(0.125, high, -0.8),
+            normal,
+            3,
+            8,
+        );
+        assert!(
+            high_glyph == '\'' || high_glyph == '"',
+            "high ink must read as a top mark, got '{high_glyph}'"
+        );
+        let low_glyph = select_glyph(
+            MaterialKind::Earth,
+            0.3,
+            '\0',
+            0.1,
+            feat(0.125, low, 0.8),
+            normal,
+            3,
+            9,
+        );
+        assert!(
+            low_glyph == ',' || low_glyph == '.',
+            "low ink must read as a bottom mark, got '{low_glyph}'"
+        );
+    }
+
     fn test_cam() -> Camera3 {
         Camera3::new(Vec3::new(0.0, 2.2, -9.0), 0.0, 0.0, 60.0, 96, 35)
+    }
+
+    /// One bright sample inside an otherwise dark block must keep visible
+    /// ink: the fg color lifts toward the hot sample and the glyph never
+    /// gets sparser than the all-dark resolve (hotspot retention).
+    #[test]
+    fn hotspot_sample_keeps_minor_detail_ink() {
+        let cam = test_cam();
+        let opts = DepthOpts::default();
+        let w2 = cam.width as usize * SAMPLE_GRID;
+        let mut buf = vec![Sample::empty(); w2 * cam.height as usize * SAMPLE_GRID];
+        let dark = Sample {
+            depth: 10.0,
+            r: 0.02,
+            g: 0.03,
+            b: 0.02,
+            lum: 0.027,
+            lum_sq: 0.027 * 0.027,
+            normal_x: 0.0,
+            normal_y: 1.0,
+            normal_z: 0.0,
+            material: MaterialKind::Earth,
+        };
+        let hot = Sample {
+            r: 0.95,
+            g: 0.55,
+            b: 0.15,
+            lum: 0.606,
+            lum_sq: 0.606 * 0.606,
+            ..dark
+        };
+        let block =
+            |buf: &mut Vec<Sample>, cx: usize, cy: usize, hot_at: Option<(usize, usize)>| {
+                for dy in 0..SAMPLE_GRID {
+                    for dx in 0..SAMPLE_GRID {
+                        buf[(cy * SAMPLE_GRID + dy) * w2 + cx * SAMPLE_GRID + dx] =
+                            if hot_at == Some((dx, dy)) { hot } else { dark };
+                    }
+                }
+            };
+        let (cx, cy) = (48, 16);
+        block(&mut buf, cx, cy, Some((2, 2)));
+        let hotspot = resolve_cell(&buf, w2, cx as i32, cy as i32, &opts).expect("hotspot cell");
+        block(&mut buf, cx, cy, None);
+        let plain = resolve_cell(&buf, w2, cx as i32, cy as i32, &opts).expect("plain cell");
+        assert!(
+            hotspot.fg.r > plain.fg.r && hotspot.fg.g > plain.fg.g,
+            "hotspot must lift fg ink: {:?} vs {:?}",
+            (hotspot.fg.r, hotspot.fg.g, hotspot.fg.b),
+            (plain.fg.r, plain.fg.g, plain.fg.b)
+        );
+        let family = MaterialKind::Earth.glyphs();
+        let density = |g: char| {
+            family
+                .iter()
+                .position(|&c| c as char == g)
+                .expect("glyph belongs to the material family")
+        };
+        assert!(
+            density(hotspot.glyph) >= density(plain.glyph),
+            "hotspot glyph must not be sparser: '{}' vs '{}'",
+            hotspot.glyph,
+            plain.glyph
+        );
     }
 
     fn white() -> Rgb {
@@ -1811,6 +2121,14 @@ mod tests {
             MaterialKind::Metal,
         ];
         let mut outputs = [false; 128];
+        let feat = CellDetail {
+            coverage: 0.82,
+            variation: 0.18,
+            mask: 0xFFFF,
+            centroid: (0.0, 0.0),
+            normal_var: 0.0,
+            chroma_var: 0.0,
+        };
         for (index, material) in materials.into_iter().enumerate() {
             for band in 0..=8 {
                 let glyph = select_glyph(
@@ -1818,8 +2136,7 @@ mod tests {
                     band as f32 / 8.0,
                     '\0',
                     0.12,
-                    0.82,
-                    0.18,
+                    feat,
                     normal,
                     (index * 11) as i32,
                     band,
@@ -1833,8 +2150,7 @@ mod tests {
                         band as f32 / 8.0,
                         '\0',
                         0.12,
-                        0.82,
-                        0.18,
+                        feat,
                         normal,
                         (index * 11) as i32,
                         band,

@@ -17,8 +17,10 @@
 //!    bbox, indices ascending) keep each thread's visitation set and order
 //!    identical to the CPU scan, so parity is arithmetic identity: only f32
 //!    scheduling may move a boundary sample by one ulp.
-//! 3. The buffer copies into a mapped readback and decodes into the same
-//!    `raster::Sample` layout the CPU fill produces.
+//! 3. The buffer copies into a mapped readback that `submit` requests and
+//!    `collect` decodes (after the presenter's swapchain acquire — the vsync
+//!    wait doubles as the compute window) into the same `raster::Sample`
+//!    layout the CPU fill produces.
 //! 4. `raster::resolve_layer` finishes: identical glyphs, colors, fog and
 //!    rim, by construction.
 //!
@@ -48,11 +50,29 @@ pub struct World3d {
     idx_buf: wgpu::Buffer,
     idx_cap: u64,
     out_buf: wgpu::Buffer,
-    readback: Option<wgpu::Buffer>,
+    /// Two readback buffers in a ring. Frame N's fill cannot complete until
+    /// the previous presents drain (DXGI frame latency), so this frame's map
+    /// is never waited on: `retire_pending` decodes whichever maps already
+    /// finished — last frame's at `submit` (steady state), this frame's at
+    /// `collect` when the GPU was fast — and a straggler keeps its map
+    /// pending for a later call at the cost of one stale world layer.
+    readback: [Option<wgpu::Buffer>; 4],
+    pending: [Option<std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>; 4],
+    /// Preferred buffer for the next fill (alternates each submitted frame).
+    fill_index: usize,
     readback_pitch: u32,
     /// Current supersampled extents (0 = not yet created).
     w2: u32,
     h2: u32,
+    /// Per-buffer camera/opts/z snapshot taken at submit, for the resolve.
+    decode_ctx: [Option<(Camera3, DepthOpts, i32)>; 4],
+    last_layer: Option<crate::Layer>,
+    samples: Vec<raster::Sample>,
+    prof_pre: f32,
+    prof_bins: f32,
+    prof_sub: f32,
+    prof_tris: usize,
+    prof_idxs: usize,
 }
 
 /// One uploaded fill triangle: screen-space supersample coordinates,
@@ -367,10 +387,20 @@ impl World3d {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             }),
-            readback: None,
+            readback: [None, None, None, None],
+            pending: [None, None, None, None],
+            fill_index: 0,
             readback_pitch: 0,
             w2: 0,
             h2: 0,
+            decode_ctx: [None, None, None, None],
+            last_layer: None,
+            samples: Vec::new(),
+            prof_pre: 0.0,
+            prof_bins: 0.0,
+            prof_sub: 0.0,
+            prof_tris: 0,
+            prof_idxs: 0,
         })
     }
 
@@ -413,24 +443,37 @@ impl World3d {
     /// (Re)create the sample output + readback buffers for the grid; also
     /// (re)binds, since `out_buf` is part of the group.
     fn ensure_targets(&mut self, device: &wgpu::Device, w2: u32, h2: u32) {
-        if self.w2 == w2 && self.h2 == h2 && self.readback.is_some() {
+        if self.w2 == w2 && self.h2 == h2 && self.readback[0].is_some() {
             return;
         }
         // 10 floats (40 bytes) per sample; rows pad to 256 bytes (copy rule).
         let pitch = ((w2 * 40) + 255) / 256 * 256;
         let size = u64::from(pitch) * u64::from(h2.max(1));
+        // Dropping a mapped buffer is an error, so drain the ring first
+        // (resize is rare — the same full retire the client ring does).
+        for index in 0..4 {
+            if let Some(rx) = self.pending[index].take() {
+                device.poll(wgpu::Maintain::Wait);
+                let _ = rx.recv();
+                if let Some(readback) = &self.readback[index] {
+                    readback.unmap();
+                }
+            }
+        }
         self.out_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("world3d-outs"),
             size: size.max(1),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        self.readback = Some(device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("world3d-readback"),
-            size: size.max(1),
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }));
+        for slot in &mut self.readback {
+            *slot = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("world3d-readback"),
+                size: size.max(1),
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
         self.readback_pitch = pitch;
         self.w2 = w2;
         self.h2 = h2;
@@ -439,12 +482,36 @@ impl World3d {
 
     /// Rasterize `world`'s meshes on the GPU and resolve to a CPU glyph
     /// layer (the same type the CPU backend produced for this slot).
+    /// Synchronous test wrapper (parity checks); the live presenter splits
+    /// this into `submit` + `collect` so the fill overlaps the vsync wait.
+    #[cfg(test)]
     pub(crate) fn run(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         world: &GpuWorld,
     ) -> Result<crate::Layer, String> {
+        self.submit(device, queue, world)?;
+        device.poll(wgpu::Maintain::Wait);
+        self.retire_pending(device, std::time::Duration::from_secs(1))?;
+        self.last_layer
+            .clone()
+            .ok_or_else(|| "world3d readback did not complete".to_string())
+    }
+
+    /// Queue this frame's fill and request its readback map. Non-blocking:
+    /// the GPU fill runs while the presenter acquires the swapchain texture
+    /// and composes the rest of the frame; `collect` finishes the readback.
+    pub(crate) fn submit(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        world: &GpuWorld,
+    ) -> Result<(), String> {
+        // Decode the previous frame's completed readback (its fill ran during
+        // the last vsync window) before refilling buffers. Bounded: a
+        // straggler keeps its map pending and is decoded next frame.
+        self.retire_pending(device, std::time::Duration::from_millis(5))?;
         let cam = world.camera;
         let w2 = (cam.width.max(1) as usize * raster::SAMPLE_GRID) as u32;
         let h2 = (cam.height.max(1) as usize * raster::SAMPLE_GRID) as u32;
@@ -599,7 +666,19 @@ impl World3d {
             self.rebuild_bind(device);
         }
 
-        let readback = self.readback.as_ref().expect("readback target");
+        // Pick a free readback buffer, rotating from the preferred slot; if
+        // every ring slot still holds an unfinished map (GPU starved), skip
+        // this fill — the world layer stays one frame older until it drains.
+        let idx = (0..4)
+            .map(|offset| (self.fill_index + offset) % 4)
+            .find(|slot| self.pending[*slot].is_none());
+        let Some(idx) = idx else {
+            if std::env::var("PRESENT_PROFILE").is_ok() {
+                eprintln!("[world3d] all readbacks pending: skipping fill");
+            }
+            return Ok(());
+        };
+        let readback = self.readback[idx].clone().expect("readback target");
         let bind = self.bind.as_ref().expect("world3d bind");
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         if !tris.is_empty() {
@@ -629,37 +708,116 @@ impl World3d {
             cpass.set_bind_group(0, bind, &[]);
             cpass.dispatch_workgroups((w2 + 7) / 8, (h2 + 7) / 8, 1);
         }
-        encoder.copy_buffer_to_buffer(&self.out_buf, 0, readback, 0, self.out_size());
+        encoder.copy_buffer_to_buffer(&self.out_buf, 0, &readback, 0, self.out_size());
         queue.submit([encoder.finish()]);
-        let t_gpu0 = std::time::Instant::now();
         let t_sub = t0.elapsed();
 
-        // Map + decode into the CPU Sample layout the resolve speaks.
+        // Request the readback map but do not wait for it: the next `submit`
+        // (or this frame's `collect` when the GPU is fast) decodes it.
         let slice = readback.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |res| {
             let _ = tx.send(res);
         });
-        device.poll(wgpu::Maintain::Wait);
-        let t_poll = t_gpu0.elapsed();
-        rx.recv()
-            .map_err(|_| "world3d readback channel dropped".to_string())?
-            .map_err(|e| format!("world3d readback: {e}"))?;
-        let data = slice.get_mapped_range();
-        let chunk_len = (w2 as usize) * 40;
-        let mut samples = vec![raster::Sample::empty(); (w2 as usize) * (h2 as usize)];
-        for row in 0..h2 as usize {
+        self.pending[idx] = Some(rx);
+        self.decode_ctx[idx] = Some((world.camera, world.opts, world.z));
+        self.fill_index = (idx + 1) % 4;
+        if std::env::var("PRESENT_PROFILE").is_ok() {
+            self.prof_pre = t_pre.as_secs_f32() * 1e3;
+            self.prof_bins = (t_bins - t_pre).as_secs_f32() * 1e3;
+            self.prof_sub = t_sub.as_secs_f32() * 1e3;
+            self.prof_tris = tri_count;
+            self.prof_idxs = idxs.len();
+        }
+        Ok(())
+    }
+
+    /// Serve the freshest decoded world layer. A short bounded drain decodes
+    /// this frame's own map when the GPU already finished it (fast path: no
+    /// staleness); otherwise the previous frame's layer is served and this
+    /// frame's map completes by the next `submit`. Never blocks on presents.
+    pub(crate) fn collect(
+        &mut self,
+        device: &wgpu::Device,
+    ) -> Result<Option<crate::Layer>, String> {
+        self.retire_pending(device, std::time::Duration::from_millis(5))?;
+        Ok(self.last_layer.clone())
+    }
+
+    /// Decode every readback whose map has completed, waiting up to `budget`
+    /// total. Stragglers keep their map pending for a later call; each
+    /// completed buffer refreshes `last_layer`.
+    fn retire_pending(
+        &mut self,
+        device: &wgpu::Device,
+        budget: std::time::Duration,
+    ) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + budget;
+        for index in 0..4 {
+            let Some(rx) = self.pending[index].take() else {
+                continue;
+            };
+            // try_recv consumes the completion, so the loop exits WITH the
+            // result; a straggler is put back and left for a later call.
+            let mut result: Option<Result<Result<(), wgpu::BufferAsyncError>, String>> = None;
+            loop {
+                device.poll(wgpu::Maintain::Poll);
+                match rx.try_recv() {
+                    Ok(res) => {
+                        result = Some(Ok(res));
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        result = Some(Err("world3d readback channel dropped".to_string()));
+                        break;
+                    }
+                }
+                if std::time::Instant::now() >= deadline {
+                    break; // straggler: result stays None, map goes back
+                }
+                std::thread::sleep(std::time::Duration::from_micros(250));
+            }
+            let Some(result) = result else {
+                self.pending[index] = Some(rx);
+                continue;
+            };
+            result
+                .map_err(|e| format!("world3d readback: {e}"))?
+                .map_err(|e| format!("world3d readback: {e}"))?;
+            self.decode_readback(index)?;
+        }
+        Ok(())
+    }
+
+    /// Decode a completed readback buffer into `last_layer`. Its map must
+    /// already be complete (the receiver delivered) and still mapped.
+    fn decode_readback(&mut self, index: usize) -> Result<(), String> {
+        let readback = self.readback[index].clone().expect("readback target");
+        let t_dec0 = std::time::Instant::now();
+        // Map + decode into the CPU Sample layout the resolve speaks.
+        let data = readback.slice(..).get_mapped_range();
+        let w2 = self.w2 as usize;
+        let chunk_len = w2 * 40;
+        if self.samples.len() != w2 * self.h2 as usize {
+            self.samples = vec![raster::Sample::empty(); w2 * self.h2 as usize];
+        } else {
+            self.samples
+                .iter_mut()
+                .for_each(|s| *s = raster::Sample::empty());
+        }
+        for row in 0..self.h2 as usize {
             let row_bytes = &data[row * self.readback_pitch as usize
                 ..row * self.readback_pitch as usize + chunk_len];
             let floats: &[f32] = bytemuck::cast_slice(row_bytes);
-            for px in 0..w2 as usize {
+            for px in 0..w2 {
                 let z = floats[px * 10];
                 if z < 0.0 {
                     continue; // no sample here (clear sentinel)
                 }
                 let material =
                     raster::MaterialKind::from_index(floats[px * 10 + 9].round() as usize);
-                samples[row * w2 as usize + px] = raster::Sample {
+                self.samples[row * w2 + px] = raster::Sample {
                     depth: z,
                     r: floats[px * 10 + 1],
                     g: floats[px * 10 + 2],
@@ -675,26 +833,26 @@ impl World3d {
         }
         drop(data);
         readback.unmap();
-        let t_dec = t_gpu0.elapsed();
-
+        let t_dec = t_dec0.elapsed();
+        let (cam, opts, z) = self.decode_ctx[index].ok_or("world3d: missing decode context")?;
         let t_res0 = std::time::Instant::now();
-        let layer = raster::resolve_layer(&samples, &cam, &world.opts, world.z);
+        let layer = raster::resolve_layer(&self.samples, &cam, &opts, z);
         if std::env::var("PRESENT_PROFILE").is_ok() {
             eprintln!(
-                "[world3d] pre={:.2}ms bins={:.2}ms sub={:.2}ms poll={:.2}ms map+dec={:.2}ms resolve={:.2}ms tris={} idxs={} grid={}x{}",
-                t_pre.as_secs_f32() * 1e3,
-                (t_bins - t_pre).as_secs_f32() * 1e3,
-                t_sub.as_secs_f32() * 1e3,
-                t_poll.as_secs_f32() * 1e3,
+                "[world3d] pre={:.2}ms bins={:.2}ms sub={:.2}ms map+dec={:.2}ms resolve={:.2}ms tris={} idxs={} grid={}x{}",
+                self.prof_pre,
+                self.prof_bins,
+                self.prof_sub,
                 t_dec.as_secs_f32() * 1e3,
                 t_res0.elapsed().as_secs_f32() * 1e3,
-                tri_count,
-                idxs.len(),
-                w2,
-                h2
+                self.prof_tris,
+                self.prof_idxs,
+                self.w2,
+                self.h2
             );
         }
-        Ok(layer)
+        self.last_layer = Some(layer);
+        Ok(())
     }
 
     fn out_size(&self) -> u64 {

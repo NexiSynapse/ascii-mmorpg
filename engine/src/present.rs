@@ -545,7 +545,12 @@ impl App {
             },
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            // One in-flight present: the world fill (submitted at frame start
+            // behind this queue) then completes during the acquire's vsync
+            // wait instead of trailing two flips, so the readback ring stays
+            // current and input-to-photon latency shrinks. The GPU is idle
+            // enough that the shallower queue never starves it.
+            desired_maximum_frame_latency: 1,
         };
         surface.configure(&device, &config);
 
@@ -1062,15 +1067,30 @@ impl App {
         // GPU world raster: the source (e.g. `play`) skipped the CPU fill
         // and pushed a placeholder layer; run the triangle pass and swap
         // the resolved layer in before compose. `None` = CPU raster frame.
+        // The fill is submitted first and decoded after the swapchain
+        // acquire below: that vsync wait doubles as the GPU compute window,
+        // so the CPU never stalls in a full-queue `Maintain::Wait` (which
+        // drains queued presents and paced the old path at 30-100 ms/frame).
         let mut gpu3d_ms: Option<std::time::Duration> = None;
+        let mut surface_frame: Option<(
+            wgpu::SurfaceTexture,
+            wgpu::TextureView,
+            wgpu::CommandEncoder,
+        )> = None;
         if let Some(world) = self.source.gpu_world() {
             let t3d = std::time::Instant::now();
-            let layer = gpu
-                .world3d
-                .run(&gpu.device, &gpu.queue, &world)
+            gpu.world3d
+                .submit(&gpu.device, &gpu.queue, &world)
                 .map_err(|e| format!("gpu world raster: {e}"))?;
-            if world.layer_slot < scene.layers.len() {
-                scene.layers[world.layer_slot] = layer;
+            surface_frame = acquire_frame(gpu)?;
+            if let Some(layer) = gpu
+                .world3d
+                .collect(&gpu.device)
+                .map_err(|e| format!("gpu world raster: {e}"))?
+            {
+                if world.layer_slot < scene.layers.len() {
+                    scene.layers[world.layer_slot] = layer;
+                }
             }
             gpu3d_ms = Some(t3d.elapsed());
         }
@@ -1272,24 +1292,13 @@ impl App {
         gpu.queue
             .write_buffer(&gpu.overlay_buf, 0, bytemuck::cast_slice(&halo));
 
-        let output = match gpu.surface.get_current_texture() {
-            Ok(frame) => frame,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                gpu.surface.configure(&gpu.device, &gpu.config);
-                return Ok(());
-            }
-            Err(wgpu::SurfaceError::Timeout) => return Ok(()),
-            Err(wgpu::SurfaceError::Other) => return Ok(()),
-            Err(wgpu::SurfaceError::OutOfMemory) => {
-                return Err("wgpu surface out of memory".into());
-            }
+        let (output, view, mut encoder) = match surface_frame {
+            Some(parts) => parts,
+            None => match acquire_frame(gpu)? {
+                Some(parts) => parts,
+                None => return Ok(()),
+            },
         };
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         if self.opts.mode == PresentMode::Continuous {
             gpu.bloom
                 .as_ref()
@@ -1370,6 +1379,39 @@ impl App {
         }
         Ok(())
     }
+}
+
+/// Acquire the swapchain texture plus a fresh command encoder. `Ok(None)`
+/// means skip this frame (resize/timeout), matching the old inline match.
+fn acquire_frame(
+    gpu: &Gpu,
+) -> Result<
+    Option<(
+        wgpu::SurfaceTexture,
+        wgpu::TextureView,
+        wgpu::CommandEncoder,
+    )>,
+    String,
+> {
+    let output = match gpu.surface.get_current_texture() {
+        Ok(output) => output,
+        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+            gpu.surface.configure(&gpu.device, &gpu.config);
+            return Ok(None);
+        }
+        Err(wgpu::SurfaceError::Timeout) => return Ok(None),
+        Err(wgpu::SurfaceError::Other) => return Ok(None),
+        Err(wgpu::SurfaceError::OutOfMemory) => {
+            return Err("wgpu surface out of memory".into());
+        }
+    };
+    let view = output
+        .texture
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    let encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    Ok(Some((output, view, encoder)))
 }
 
 /// Exponential camera follow: eases the float follow-point toward the
